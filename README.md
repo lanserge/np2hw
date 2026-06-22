@@ -2,7 +2,7 @@
 
 **NumPy → streaming ISP hardware (Verilog) compiler.**
 
-Write image-processing / DSP code as ordinary NumPy. `np2hw` *traces* it (like JAX/TVM)
+Write image-processing (ISP) code as ordinary NumPy. `np2hw` *traces* it (like JAX/TVM)
 into a streaming line-based IR and emits synthesizable Verilog — with line buffers,
 shift registers, edge handling, config registers, and ZeroAsic-stack interfaces
 generated for you. **The same NumPy function is the spec, the hardware, and the
