@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "np2hw"
 version = "0.1.0"
 description = "NumPy -> streaming ISP hardware (Verilog) compiler"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Serge Rabyking" }]
 requires-python = ">=3.9"
 dependencies = ["numpy"]
 
