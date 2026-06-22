@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "np2hw"
+version = "0.1.0"
+description = "NumPy -> streaming ISP hardware (Verilog) compiler"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+media = ["pillow"]            # CLI image/GIF IO
+camera = ["opencv-python"]    # `np2hw view --source camera` (webcam)
+switchboard = ["switchboard-hw", "umi"]   # `np2hw run --backend switchboard`
+
+[project.scripts]
+np2hw = "np2hw.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+*.vvp
+
+# simulator / Switchboard run artifacts
+*.q
+*.vpi
+*.o
+obj_dir/
+testbench.sv

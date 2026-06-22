@@ -1,0 +1,11 @@
+numpy
+
+[camera]
+opencv-python
+
+[media]
+pillow
+
+[switchboard]
+switchboard-hw
+umi

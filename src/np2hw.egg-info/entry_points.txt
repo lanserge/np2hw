@@ -1,0 +1,2 @@
+[console_scripts]
+np2hw = np2hw.cli:main

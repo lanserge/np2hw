@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/np2hw/__init__.py
+src/np2hw/cli.py
+src/np2hw/core.py
+src/np2hw/frontend.py
+src/np2hw/ir.py
+src/np2hw/stream_array.py
+src/np2hw/verilog.py
+src/np2hw/view.py
+src/np2hw.egg-info/PKG-INFO
+src/np2hw.egg-info/SOURCES.txt
+src/np2hw.egg-info/dependency_links.txt
+src/np2hw.egg-info/entry_points.txt
+src/np2hw.egg-info/requires.txt
+src/np2hw.egg-info/top_level.txt
