@@ -51,10 +51,17 @@ traced — see [docs/supported-ops.md](docs/supported-ops.md).)
 ## Install
 
 ```bash
-uv venv && uv pip install -e ".[media]"     # core + image/video IO
+uv venv
+uv pip install -e ".[media]"               # core + image/video IO (np2hw run/view)
+uv pip install -e ".[media,camera]"        # + webcam for `view --source camera` (opencv-python)
+uv pip install -e ".[media,switchboard]"   # + run through the ZeroAsic Switchboard stack
 ```
-See [`docs/install.md`](docs/install.md) for the optional extras (`camera`,
-`switchboard`) and the system tools (Icarus, Yosys, Verilator).
+
+`uv` installs the Python package and its extras. **RTL simulation uses external
+tools installed separately** — Icarus (`iverilog`), Yosys (`yosys`), and Verilator
+(`verilator`), e.g. from Homebrew, your package manager, or the OSS CAD Suite. A
+non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
+[`docs/install.md`](docs/install.md).
 
 ## Documentation
 

@@ -42,9 +42,21 @@ These are external binaries, not pip packages. Install whichever backend you use
 | `yosys` + `yosys-config`, a C++ compiler | `--sim cxxrtl` | Yosys `write_cxxrtl` + compiled C++ model (fast) |
 | `verilator` | `--backend switchboard --sb-tool verilator` | fast Switchboard engine |
 
-(`iverilog` is also the Switchboard `--sb-tool icarus` engine.) On macOS these come
-from Homebrew; on Linux from your package manager or the
-[OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build).
+(`iverilog` is also the Switchboard `--sb-tool icarus` engine.)
+
+Install with your package manager, or get all of them at once from the
+[OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build) (one download, add
+its `bin/` to `PATH`):
+
+```bash
+brew install icarus-verilog yosys verilator      # macOS (Homebrew)
+sudo apt install iverilog yosys verilator        # Debian/Ubuntu
+```
+
+> **`np2hw run --backend switchboard`** needs **both** the `[switchboard]` Python
+> extra (`switchboard-hw`, `umi`, `siliconcompiler`) **and** a simulator —
+> `verilator` (default, `--sb-tool verilator`) or `iverilog` (`--sb-tool icarus`).
+> The first run also builds a small C++ DPI, so a C++ compiler is required too.
 
 ## Without uv
 
