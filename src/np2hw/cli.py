@@ -187,6 +187,22 @@ def _run_cxxrtl(fn, params, pvals, frames, module="model"):
             for i in range(len(frames))]
 
 
+def _sb_design(Design, name, vpath, work):
+    """Build a siliconcompiler Design carrying the core+wrapper Verilog with the
+    fileset layout Switchboard expects: an 'rtl' fileset with the sources, plus
+    'icarus'/'verilator' filesets that depend on it. SbDut then selects the
+    fileset matching its `tool` (so we DON'T pass fileset= ourselves), which also
+    pulls in the C++ testbench + DPI automatically -- no manual add_file needed.
+    (Per zeroasiccorp/switchboard#309.)"""
+    d = Design(name); d.set_dataroot("root", work)
+    with d.active_fileset("rtl"):
+        d.set_topmodule(name); d.add_file(vpath)
+    for fs in ("icarus", "verilator"):
+        with d.active_fileset(fs):
+            d.set_topmodule(name); d.add_depfileset(d, "rtl")
+    return d
+
+
 def _sb_build(fn, params, pvals, W, H, tool="verilator", module="model"):
     """Build a persistent Switchboard sim for a WxH core (PACKED gearbox) and
     return (dut, tx, rx, meta, wrap). Params are baked at build time via autowrap
@@ -205,20 +221,13 @@ def _sb_build(fn, params, pvals, W, H, tool="verilator", module="model"):
                             native=True, pack=True)        # gearbox: many px/packet
     vpath = os.path.join(work, "g.v")
     open(vpath, "w").write(meta["verilog"] + "\n" + wrap["verilog"] + "\n")
-    d = Design(module + "_sb"); d.set_dataroot("root", work)
-    with d.active_fileset("rtl"):
-        d.set_topmodule(module + "_sb"); d.add_file(vpath)
-        if tool == "verilator":
-            # switchboard 0.3.3 doesn't auto-add these for the Verilator flow:
-            # the C++ main and the DPI implementation (_pi_sb_send/recv/init).
-            d.add_file(str(sb.sb_path() / "verilator" / "testbench.cc"), filetype="c")
-            d.add_file(str(sb.sb_path() / "dpi" / "switchboard_dpi.cc"), filetype="c")
+    d = _sb_design(Design, module + "_sb", vpath, work)
     # tie each config register to its value -- width MUST be given (autowrap
     # defaults tieoff width to 1, which would truncate e.g. gain=24 to 0)
     tieoffs = {f"param_{p.name}": {"value": int(pvals[p.name]), "width": p.bits}
                for p in _leaves(params)}
     dut = sb.SbDut(
-        design=d, fileset="rtl", autowrap=True, trace=False, tool=tool,
+        design=d, autowrap=True, trace=False, tool=tool,
         parameters={"WIDTH": W, "HEIGHT": H},
         interfaces={"sb_in": {"type": "sb", "direction": "input", "dw": 416},
                     "sb_out": {"type": "sb", "direction": "output", "dw": 416}},
@@ -295,14 +304,9 @@ def _sb_build_ctrl(fn, params, pvals, W, H, tool="verilator", module="model"):
     wrap = switchboard_control_wrap(meta, W, H, module_name=module + "_sbc")
     vpath = os.path.join(work, "g.v")
     open(vpath, "w").write(meta["verilog"] + "\n" + wrap["verilog"] + "\n")
-    d = Design(module + "_sbc"); d.set_dataroot("root", work)
-    with d.active_fileset("rtl"):
-        d.set_topmodule(module + "_sbc"); d.add_file(vpath)
-        if tool == "verilator":
-            d.add_file(str(sb.sb_path() / "verilator" / "testbench.cc"), filetype="c")
-            d.add_file(str(sb.sb_path() / "dpi" / "switchboard_dpi.cc"), filetype="c")
+    d = _sb_design(Design, module + "_sbc", vpath, work)
     dut = sb.SbDut(
-        design=d, fileset="rtl", autowrap=True, trace=False, tool=tool,
+        design=d, autowrap=True, trace=False, tool=tool,
         parameters={"WIDTH": W, "HEIGHT": H},
         interfaces={"sb_in": {"type": "sb", "direction": "input", "dw": 416},
                     "sb_out": {"type": "sb", "direction": "output", "dw": 416},

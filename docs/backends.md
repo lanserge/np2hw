@@ -57,11 +57,15 @@ pixel. Needs the `[switchboard]` extra; see [install.md](install.md) and
 
 ### Implementation notes (Switchboard backend)
 
-Worked around three gaps in the installed `switchboard-hw` 0.3.3 (Verilator path):
-the C++ main and the DPI source aren't auto-added (we add `verilator/testbench.cc` +
-`dpi/switchboard_dpi.cc`), and sim-module lint warnings are waived. Icarus needs none of
-this. Streaming uses a single-threaded **non-blocking send/recv interleave** (the SB
-queues are bounded, so sending a whole frame before reading would deadlock).
+The generated core+wrapper is registered as a siliconcompiler `Design` with an `rtl`
+fileset plus `icarus`/`verilator` filesets that depend on it; `SbDut` then selects the
+fileset matching its `tool`, which pulls in the C++ testbench + DPI automatically (the
+recommended setup per [zeroasiccorp/switchboard#309](https://github.com/zeroasiccorp/switchboard/issues/309)
+— so we don't add those sources by hand). A few Verilator lint warnings are waived,
+including `PINMISSING` for an upstream reset-pin gap in the SB sim shims and the usual
+width/sign notes from the generated bit-width arithmetic. Streaming uses a
+single-threaded **non-blocking send/recv interleave** (the SB queues are bounded, so
+sending a whole frame before reading would deadlock).
 
 ## Which to use
 
