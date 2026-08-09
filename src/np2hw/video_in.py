@@ -1,0 +1,221 @@
+"""bayerlink receiver: parallel video in, one 12-bit sample per clock out.
+
+The bayerlink protocol (github.com/bayerlink/bayerlink) carries packed raw
+Bayer over a display link: line 0 of the active area is a header, every
+following line holds one camera line of V4L2 12P bytes, zero-padded to the
+display width. An HDMI receiver (dvi2rgb and its kin) recovers the parallel
+video -- pixel clock, data enable, vsync, 24 data bits -- and this adapter
+turns that into np2hw's elastic stream: `valid/ready/data` with
+`sof/eol/last` framing, 12 bits per beat, ready to drive a generated core.
+
+Three facts of the link shape the design:
+
+  TWO SAMPLES PER PIXEL   a display pixel's 3 bytes hold 2 samples, so the
+      input bursts at twice the output rate during payload. A half-line FIFO
+      absorbs the burst and the line's padding + blanking drain it. The
+      protocol's rate rule (camera width <= the display mode's total line
+      slots) is exactly the condition under which this works at one sample
+      per pixel-clock cycle.
+
+  NO BACKPRESSURE UPSTREAM   video cannot be stalled, so a FIFO overflow is
+      unavoidable data loss, and unobservable data loss is how a demo
+      becomes a debugging season. The `overflow` output is STICKY: once set
+      it stays set until reset, for software to read as an error flag.
+
+  LANES ARE A PERMUTATION   which memory byte of the container arrives on
+      which 8-bit video lane depends on the scanout format and the receiver;
+      the protocol defines byte order, not lane names. `lane_map` fixes the
+      permutation at generation time -- resolved once per platform pair with
+      a test pattern, not discovered per frame.
+
+The header line is SKIPPED, not parsed: this receiver is configured for one
+geometry and format, and hosts validate headers on the source side or from a
+raw tap (the reference codec, `pip install bayerlink`, runs on the host).
+Parsing the header in hardware -- and refusing a stream that disagrees with
+the configuration -- is a natural v2 once a status-register path exists to
+report what was refused.
+"""
+from __future__ import annotations
+
+
+def bayerlink_in(cam_width: int, cam_height: int,
+                 module_name: str = "bayerlink_in",
+                 fifo_depth: int | None = None,
+                 lane_map: tuple[int, int, int] = (0, 1, 2),
+                 vsync_active_high: bool = True) -> dict:
+    """Emit the receiver for one camera geometry.
+
+    Args:
+        cam_width: samples per camera line. Even (12P packs pairs).
+        cam_height: camera lines per frame (the header line is extra, on the
+            display side only).
+        fifo_depth: FIFO capacity in samples, power of two. The worst-case
+            backlog against a consumer taking one sample per cycle is
+            ``cam_width / 2`` (the payload burst); anything above that buys
+            tolerance of downstream stalls. Default: the smallest power of
+            two >= ``cam_width``, i.e. a full line of slack.
+        lane_map: which video lane carries container byte 0, 1, 2. Lane 0 is
+            ``vid_data[23:16]``, lane 1 ``[15:8]``, lane 2 ``[7:0]``.
+        vsync_active_high: polarity of the frame pulse. CEA-861 modes are
+            active high; a receiver that normalises polarity keeps the
+            default.
+
+    Returns:
+        ``{"verilog", "module", "interface", ...}`` -- a self-describing
+        source module: no stream input, one 12-bit output stream, so
+        ``compose()`` can instantiate it at the head of a pipeline.
+    """
+    if cam_width <= 0 or cam_width % 2:
+        raise ValueError(
+            f"cam_width {cam_width} must be positive and even: 12P packs "
+            "sample pairs, so an odd camera line cannot exist on the link")
+    if cam_height <= 0:
+        raise ValueError(f"cam_height {cam_height} must be positive")
+    if sorted(lane_map) != [0, 1, 2]:
+        raise ValueError(
+            f"lane_map {lane_map} must be a permutation of (0, 1, 2)")
+    if fifo_depth is None:
+        fifo_depth = 1
+        while fifo_depth < cam_width:
+            fifo_depth *= 2
+    if fifo_depth & (fifo_depth - 1) or fifo_depth < cam_width // 2 + 2:
+        raise ValueError(
+            f"fifo_depth {fifo_depth} must be a power of two and exceed the "
+            f"payload burst of cam_width/2 = {cam_width // 2} samples; a "
+            "smaller FIFO overflows on EVERY line, which the rate rule exists "
+            "to prevent")
+
+    payload_pixels = cam_width // 2          # display pixels carrying samples
+    half = fifo_depth // 2                   # per-bank capacity (even/odd)
+    lane_hi = {0: 23, 1: 15, 2: 7}
+    vs = "" if vsync_active_high else "~"
+
+    def clog2(n: int) -> int:
+        return max(1, (n - 1).bit_length())
+
+    colw = clog2(payload_pixels + 1)
+    linew = clog2(cam_height + 2)
+    ptrw = clog2(fifo_depth)
+    cntw = clog2(fifo_depth + 1)
+
+    L = []
+    a = L.append
+    a(f"// generated by np2hw -- bayerlink v1 receiver: parallel video in,")
+    a(f"// one 12-bit sample per clock out. Camera {cam_width}x{cam_height}, "
+      f"FIFO {fifo_depth} samples,")
+    a(f"// container byte k on video lane {tuple(lane_map)} "
+      f"(resolved per platform with a test pattern).")
+    a(f"// Header line skipped; hosts validate headers with the reference codec.")
+    a(f"module {module_name} (")
+    a("    input  wire        clk,     // the recovered pixel clock")
+    a("    input  wire        rst,")
+    a("    // Parallel video from the HDMI/DVI receiver. No ready exists on")
+    a("    // this side: video cannot be stalled, only missed.")
+    a("    input  wire        vid_de,")
+    a("    input  wire        vid_vsync,")
+    a("    input  wire [23:0] vid_data,")
+    a("    // The elastic stream a generated core consumes.")
+    a("    output wire        out_valid,")
+    a("    input  wire        out_ready,")
+    a("    output wire [11:0] out_data,")
+    a("    output wire        out_sof,")
+    a("    output wire        out_eol,")
+    a("    output wire        out_last,")
+    a("    // STICKY: an overflow is unavoidable data loss (video does not")
+    a("    // wait), so it latches until reset for software to observe.")
+    a("    output reg         overflow")
+    a(");")
+    a(f"    localparam PAYLOAD_PIXELS = {payload_pixels};  // per line; the rest is padding")
+    a(f"    localparam CAM_HEIGHT     = {cam_height};")
+    a("")
+    a("    // ---- position in the display frame ----")
+    a("    reg de_q, vs_q;")
+    a(f"    reg [{colw-1}:0] col;                 // DE pixels into the line, capped")
+    a(f"    reg [{linew-1}:0] line;               // display lines since vsync, capped")
+    a(f"    wire frame_start = {vs}vid_vsync & ~vs_q;")
+    a("    wire line_end    = de_q & ~vid_de;   // DE falling edge")
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin")
+    a("            de_q <= 1'b0; vs_q <= 1'b0; col <= 0; line <= CAM_HEIGHT + 1;")
+    a("        end else begin")
+    a("            de_q <= vid_de;")
+    a(f"            vs_q <= {vs}vid_vsync;")
+    a("            if (vid_de && col != PAYLOAD_PIXELS)")
+    a("                col <= col + 1'b1;       // cap: padding pixels all look alike")
+    a("            if (line_end) begin")
+    a("                col <= 0;")
+    a("                if (line != CAM_HEIGHT + 1)")
+    a("                    line <= line + 1'b1; // cap: trailing blank lines alike")
+    a("            end")
+    a("            if (frame_start) begin       // line 0 = the header line, skipped")
+    a("                line <= 0; col <= 0;")
+    a("            end")
+    a("        end")
+    a("    end")
+    a("")
+    a("    // ---- unpack: 3 container bytes -> 2 samples (V4L2 12P) ----")
+    a(f"    wire [7:0] byte0 = vid_data[{lane_hi[lane_map[0]]}:{lane_hi[lane_map[0]]-7}];")
+    a(f"    wire [7:0] byte1 = vid_data[{lane_hi[lane_map[1]]}:{lane_hi[lane_map[1]]-7}];")
+    a(f"    wire [7:0] byte2 = vid_data[{lane_hi[lane_map[2]]}:{lane_hi[lane_map[2]]-7}];")
+    a("    wire [11:0] sample0 = {byte0, byte2[3:0]};   // P0[11:4], P0[3:0]")
+    a("    wire [11:0] sample1 = {byte1, byte2[7:4]};   // P1[11:4], P1[3:0]")
+    a("")
+    a("    wire payload = vid_de && line != 0 && line != CAM_HEIGHT + 1")
+    a("                   && col != PAYLOAD_PIXELS;")
+    a("    // Framing decided at ingest, carried through the FIFO with the data:")
+    a("    // after the FIFO decouples timing, position information is gone.")
+    a("    wire sof0  = (line == 1) && (col == 0);")
+    a("    wire eol1  = (col == PAYLOAD_PIXELS - 1);")
+    a("    wire last1 = (line == CAM_HEIGHT) && eol1;")
+    a("")
+    a("    // ---- half-line FIFO, two banks so a pair lands in one cycle ----")
+    a("    // Even samples in one bank, odd in the other: each bank sees at most")
+    a("    // one write per cycle, which is what a single write port provides.")
+    a(f"    reg [14:0] bank_even [0:{half-1}];   // {{last, eol, sof, data}}")
+    a(f"    reg [14:0] bank_odd  [0:{half-1}];")
+    a(f"    reg [{ptrw-1}:0] wr_ptr, rd_ptr;     // in SAMPLES; wr_ptr stays even")
+    a(f"    reg [{cntw-1}:0] count;")
+    a("")
+    a("    wire room  = count <= {}'d{};   // space for the pair".format(cntw, fifo_depth - 2))
+    a("    wire wr_en = payload && room;")
+    a("    wire rd_en = out_valid && out_ready;")
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin")
+    a("            wr_ptr <= 0; rd_ptr <= 0; count <= 0; overflow <= 1'b0;")
+    a("        end else begin")
+    a("            if (wr_en) begin")
+    a(f"                bank_even[wr_ptr[{ptrw-1}:1]] <= {{2'b00, sof0, sample0}};")
+    a(f"                bank_odd [wr_ptr[{ptrw-1}:1]] <= {{last1, eol1, 1'b0, sample1}};")
+    a(f"                wr_ptr <= wr_ptr + {ptrw}'d2;")
+    a("            end")
+    a("            if (payload && !room)")
+    a("                overflow <= 1'b1;        // sticky; the pair is lost")
+    a(f"            if (rd_en) rd_ptr <= rd_ptr + {ptrw}'d1;")
+    a("            count <= count + (wr_en ? {}'d2 : {}'d0) - (rd_en ? {}'d1 : {}'d0);"
+      .format(cntw, cntw, cntw, cntw))
+    a("        end")
+    a("    end")
+    a("")
+    a(f"    wire [14:0] head = rd_ptr[0] ? bank_odd[rd_ptr[{ptrw-1}:1]]")
+    a(f"                                 : bank_even[rd_ptr[{ptrw-1}:1]];")
+    a("    assign out_valid = (count != 0);")
+    a("    assign {out_last, out_eol, out_sof, out_data} = head;")
+    a("endmodule")
+
+    interface = {
+        "clock": "clk",
+        "reset": "rst",
+        "param_prefix": "param_",
+        # A SOURCE: no stream input (the video side is not an np2hw stream,
+        # and cannot carry ready), one stream output.
+        "input": None,
+        "output": {"prefix": "out", "data_bits": 12,
+                   "flags": ("sof", "eol", "last")},
+        "streams": [{"prefix": "out", "direction": "out", "data_bits": 12,
+                     "flags": ("sof", "eol", "last"), "domain": ""}],
+        "params": [],
+    }
+    return {"verilog": "\n".join(L), "module": module_name,
+            "interface": interface, "cam_width": cam_width,
+            "cam_height": cam_height, "fifo_depth": fifo_depth,
+            "lane_map": tuple(lane_map), "out_bits": 12}
