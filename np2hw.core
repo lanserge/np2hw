@@ -1,0 +1,15 @@
+CAPI=2:
+name: lanserge:np2hw:gen:0.1.0
+description: >
+  np2hw as a FuseSoC generator: trace a NumPy model file into synthesisable
+  Verilog at build time. The model file follows the CLI convention -- it
+  exposes model() (or file.py:func) and optionally PARAMS. Requires np2hw
+  on the PATH (pip install np2hw).
+
+generators:
+  np2hw:
+    command: np2hw-fusesoc
+    description: >
+      Trace a NumPy model into a Verilog core. Parameters: model (path to
+      the .py, relative to the calling core), width, height, bits (input
+      image geometry, required), module_name (optional).
