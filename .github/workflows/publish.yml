@@ -1,0 +1,137 @@
+# Publish np2hw to PyPI.
+#
+# Uses PyPI Trusted Publishing (OIDC): the job exchanges a short-lived GitHub
+# identity token for an upload token at publish time. There is no API token in
+# repository secrets, so there is no long-lived credential to leak, rotate or
+# explain to a partner's security review.
+#
+# One-time setup, on PyPI, BEFORE the first run:
+#   1. https://pypi.org/manage/account/publishing/ -> add a pending publisher
+#        PyPI project name : np2hw
+#        Owner             : lanserge
+#        Repository        : np2hw
+#        Workflow          : publish.yml
+#        Environment       : pypi
+#   2. Repeat at https://test.pypi.org/manage/account/publishing/ with
+#      environment `testpypi`, to rehearse the whole thing first.
+#   3. In this repository: Settings -> Environments -> create `pypi` and
+#      `testpypi`. Add a required reviewer on `pypi` so a release cannot be
+#      published by an accidental tag.
+#
+# To release: bump `version` in pyproject.toml, tag `vX.Y.Z`, and publish a
+# GitHub Release from that tag. To rehearse: run this workflow manually with
+# target `testpypi`.
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Index to publish to
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check the distribution metadata
+        # twine's own check, which is what PyPI runs on upload. Failing here is
+        # far cheaper than failing after a version number has been consumed:
+        # a released version can never be reused, even after a deletion.
+        run: twine check --strict dist/*
+
+      - name: Refuse a direct-reference dependency
+        # PyPI rejects `pkg @ https://...` requirements outright. Catching it
+        # here names the problem; catching it on upload burns the version.
+        run: |
+          python - <<'PY'
+          import pathlib, sys, zipfile
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as z:
+              name = next(n for n in z.namelist() if n.endswith(".dist-info/METADATA"))
+              meta = z.read(name).decode()
+          bad = [ln for ln in meta.splitlines()
+                 if ln.startswith("Requires-Dist:") and " @ " in ln]
+          if bad:
+              print("Direct references are not uploadable to PyPI:", *bad, sep="\n  ")
+              sys.exit(1)
+          print("no direct references")
+          PY
+
+      - name: Verify the tag matches the declared version
+        if: github.event_name == 'release'
+        run: |
+          python -m pip install --upgrade packaging
+          python - <<'PY'
+          import os, pathlib, sys, tomllib
+          from packaging.version import Version
+          declared = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          if Version(declared) != Version(tag):
+              sys.exit(f"tag {tag!r} does not match pyproject version {declared!r}")
+          print(f"tag and version agree: {declared}")
+          PY
+
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/clean/bin/python -c "import np2hw; print('np2hw imports:', sorted(np2hw.__all__))"
+          /tmp/clean/bin/np2hw --help > /dev/null && echo "console script runs"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-24.04
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    name: Publish to PyPI
+    needs: build
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

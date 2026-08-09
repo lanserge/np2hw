@@ -1,0 +1,58 @@
+MIT License
+
+Copyright (c) 2026 Serge Rabyking
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+OUTPUT EXCEPTION
+================================================================================
+
+This section grants ADDITIONAL PERMISSION beyond the MIT License above. It takes
+nothing away, so the licence of this software is still MIT and the SPDX
+identifier `MIT` still describes it correctly.
+
+Verilog, and any other output, produced by running this software is NOT covered
+by the licence above. You may use, modify and distribute that output under any
+terms you choose, and you take on no obligation under this licence by doing so
+-- including no obligation to reproduce this notice alongside it.
+
+This applies to everything the tool writes into its output, including the module
+templates, interface wrappers, register files, testbenches and handshake logic
+that it emits there. It does not apply to this software's own source code, which
+remains under the MIT License above.
+
+Why this is stated rather than assumed
+--------------------------------------
+
+np2hw is not only a translator. Most of what it emits is text written in its own
+source: the streaming handshake, the line buffers, the AXI4-Lite register file
+and the composed top level are all generated from string literals in
+src/np2hw/verilog.py, and in a typical design they are the majority of the
+output by line count. Only the datapath itself is derived from the user's NumPy
+model.
+
+That makes np2hw a generator in the same category as Bison or a compiler that
+links its own runtime into what it builds, both of which carry an equivalent
+exception for exactly this reason. Without one, the MIT requirement to reproduce
+this notice "in all copies or substantial portions of the Software" could be
+read as attaching to every design somebody synthesises and ships. That is not
+the intent, has never been the intent, and this section removes the question
+instead of leaving it to be argued later.
