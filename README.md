@@ -1,5 +1,9 @@
 # np2hw
 
+[![CI](https://github.com/lanserge/np2hw/actions/workflows/ci.yml/badge.svg)](https://github.com/lanserge/np2hw/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/np2hw)](https://pypi.org/project/np2hw/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **NumPy → streaming hardware (Verilog) compiler for image and 2-D pipelines.**
 
 Write streaming image-processing code as ordinary NumPy. `np2hw` *traces* it (like JAX/TVM)

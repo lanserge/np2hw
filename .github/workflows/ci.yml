@@ -1,0 +1,51 @@
+# CI: the example suite IS the test suite, so CI runs the examples.
+# Every push and pull request proves NumPy == RTL, bit-exact, on a clean
+# machine -- which is the project's central claim, made continuously.
+#
+# switchboard.py is excluded: it exercises the Switchboard runtime, an
+# optional extra with its own toolchain, and is validated where that
+# stack is installed. Everything else runs against iverilog.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  examples:
+    name: Example suite (iverilog)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install iverilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Install np2hw and the example dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[fusesoc]" bayerlink
+
+      - name: Run the example suite
+        run: |
+          set -euo pipefail
+          fails=0
+          for f in $(ls examples/*.py | grep -v -e _harness.py -e switchboard.py); do
+            echo "::group::$f"
+            if python "$f"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "FAIL $f"
+              fails=1
+            fi
+          done
+          exit $fails
