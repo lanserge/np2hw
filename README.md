@@ -161,6 +161,10 @@ NumPy-level feature that unblocks everyone downstream, ISP or otherwise:
   the same pipeline as a plain C function, bit-exact against the NumPy that
   generated the Verilog: a golden model that runs beside the hardware, from
   the one source of truth.
+- **Register context banks** ([#7](https://github.com/lanserge/np2hw/issues/7)) --
+  N shadow copies of a core's full configuration, swapped atomically at frame
+  boundaries: one pipeline serving several streams, context isolation proven
+  bit-exact, not asserted.
 
 Scope is agreed in writing before work starts; sponsored work lands in the
 open tree immediately, MIT like everything else -- sponsorship buys ordering
