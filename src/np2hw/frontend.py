@@ -291,7 +291,12 @@ class Traced:
                 "astype), not to a stencil, a padded value or a phase plane")
         lo = -(1 << (self.image.bits - 1)) if self.image.signed else 0
         hi = (1 << (self.image.bits - (1 if self.image.signed else 0))) - 1
-        return PExpr("acc", (), lo, hi)
+        # ONE leaf per source value: a model that forks the input (channel
+        # lanes, a LUT's segment and fraction) shares the node, so the
+        # emitters' id-based CSE sees one entry point, not one per fork.
+        if getattr(self, "_acc_node", None) is None:
+            self._acc_node = PExpr("acc", (), lo, hi)
+        return self._acc_node
 
     def _expr_derive(self, node):
         negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
@@ -762,6 +767,46 @@ class PhaseCanvas:
         raise KeyError(f"no plane for phase {(row_desc, col_desc)}")
 
 
+class Channels:
+    """A multi-channel input word, presented the NumPy way: pixel[..., c].
+
+    The input stream carries one data word per pixel with C fields, channel
+    0 in the low bits, each field the sample width. A model should not know
+    that: it indexes channels as it would on an (H, W, C) array, and this
+    view hands it each field's lane. Run on real data the model receives an
+    actual (H, W, C) ndarray and never meets this class; traced, the lane is
+    the shift-and-mask the model no longer writes.
+    """
+
+    def __init__(self, word: Traced, channels: int):
+        if word.image.bits % channels:
+            raise ValueError(
+                f"a {word.image.bits}-bit word does not split into "
+                f"{channels} equal fields")
+        self.word = word
+        self.channels = channels
+        self.field = word.image.bits // channels
+
+    def __getitem__(self, key):
+        if not (isinstance(key, tuple) and len(key) == 2 and key[0] is Ellipsis
+                and isinstance(key[1], (int, np.integer))):
+            raise NotImplementedError(
+                "a channels view is indexed as pixel[..., c]; slicing rows "
+                "or columns happens on the lanes, after selecting a channel")
+        c = int(key[1])
+        if not 0 <= c < self.channels:
+            raise IndexError(f"channel {c} of {self.channels}")
+        lane = self.word
+        if c:
+            lane = lane >> (c * self.field)
+        return lane & ((1 << self.field) - 1)
+
+    def astype(self, dtype):
+        # Containers are free: lanes carry exact ranges, so a widening
+        # astype on the whole view is bookkeeping the trace does not need.
+        return self
+
+
 class ChannelStack:
     """`np.stack([c0, c1, ...], axis=-1)`: one output word of parallel channels.
 
@@ -778,19 +823,21 @@ class ChannelStack:
     C muxes, one word.
     """
 
-    def __init__(self, channels):
+    def __init__(self, channels, kind="canvas"):
         first = channels[0]
         self.channels = list(channels)
+        self.kind = kind
         self.image = first.image
         self.shape = first.shape
         self.zeroed = getattr(first, "zeroed", False)
+        self.in_channels = 1        # stamped by to_ir when the INPUT is a word
 
     # terminal declarations distribute, as they do on a canvas
     def astype(self, dtype):
-        return ChannelStack([c.astype(dtype) for c in self.channels])
+        return ChannelStack([c.astype(dtype) for c in self.channels], self.kind)
 
     def clip(self, lo, hi):
-        return ChannelStack([c.clip(lo, hi) for c in self.channels])
+        return ChannelStack([c.clip(lo, hi) for c in self.channels], self.kind)
 
 
 def _make_stack(arrays, axis=0, **kwargs):
@@ -801,15 +848,20 @@ def _make_stack(arrays, axis=0, **kwargs):
         raise NotImplementedError(
             "np.stack on traced values packs CHANNELS into the output word, "
             "which is axis=-1; other axes have no stream meaning")
-    if not all(isinstance(a, PhaseCanvas) for a in arrays):
+    if all(isinstance(a, PhaseCanvas) for a in arrays):
+        kind = "canvas"
+    elif all(isinstance(a, Traced) and a.expr is not None for a in arrays):
+        kind = "expr"          # pointwise DAG lanes -- the matrix-mix case
+    else:
         raise NotImplementedError(
-            "np.stack traces canvases assembled from phase planes (the "
-            "per-CFA-site case); stacking other traced forms is out of scope")
+            "np.stack traces channels that are all phase canvases (the "
+            "per-CFA-site case) or all pointwise expressions (the matrix "
+            "mix case); mixing forms in one word is out of scope")
     images = {a.image for a in arrays}
     shapes = {a.shape for a in arrays}
     if len(images) != 1 or len(shapes) != 1:
         raise ValueError("np.stack channels must describe one image, one shape")
-    return ChannelStack(arrays)
+    return ChannelStack(arrays, kind)
 
 
 def _make_mux(cond, x, y):
@@ -818,11 +870,18 @@ def _make_mux(cond, x, y):
     return Mux(x.image, cond, x, y)
 
 
-def to_ir(fn, image: Image2D, *params, out_bits=None):
+def to_ir(fn, image: Image2D, *params, out_bits=None, channels=1):
     # a single Params namespace -> hand the model its Param-valued view
     if len(params) == 1 and isinstance(params[0], Params):
         params = (params[0].trace_view(),)
-    traced = fn(Traced.image_input(image), *params)
+    source = Traced.image_input(image)
+    if channels > 1:
+        # A multi-channel input word: the model indexes pixel[..., c] and
+        # never writes the field extraction itself.
+        source = Channels(source, channels)
+    traced = fn(source, *params)
+    if isinstance(traced, ChannelStack):
+        traced.in_channels = channels
     if isinstance(traced, (Mux, PhaseCanvas, ChannelStack)):
         return None, traced                  # generate() handles these terminals
     if out_bits is not None:

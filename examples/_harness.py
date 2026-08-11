@@ -145,18 +145,29 @@ def check_sb_packed(name, fn, A, params=None, param_values=None, bits=8):
     return ok
 
 
-def check(name, fn, A, params=None, param_values=None, show=0, bits=8):
+def check(name, fn, A, params=None, param_values=None, show=0, bits=8,
+          channels=1):
+    """`bits` is the WORD width; with channels > 1 the input A is (H, W, C)
+    and rides the wire as packed words, channel 0 in the low bits."""
     params = params or []
     param_values = param_values or {}
-    H, W = A.shape
-    s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params)
+    H, W = A.shape[0], A.shape[1]
+    s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params,
+                   channels=channels)
     meta = generate(out, module_name=name)
 
     with open(os.path.join(BUILD, f"{name}.v"), "w") as fh:
         fh.write(meta["verilog"] + "\n")
     with open(os.path.join(BUILD, "tb.v"), "w") as fh:
         fh.write(testbench(meta, W, H, param_values) + "\n")
-    _write_hex(A, bits)
+    field = bits // channels
+    A_wire = A
+    if A.ndim == 3:
+        A_wire = np.zeros((H, W), dtype=np.int64)
+        for c in range(A.shape[-1]):
+            A_wire |= (A[..., c].astype(np.int64)
+                       & ((1 << field) - 1)) << (c * field)
+    _write_hex(A_wire, bits)
     subprocess.run(["iverilog", "-o", "sim.vvp", f"{name}.v", "tb.v"],
                    check=True, cwd=BUILD, capture_output=True)
     subprocess.run(["vvp", "sim.vvp"], check=True, cwd=BUILD, capture_output=True)
@@ -165,7 +176,7 @@ def check(name, fn, A, params=None, param_values=None, show=0, bits=8):
     # Reconstruct each argument the way the oracle needs it: a scalar Param is
     # an int, a SHAPED Param is the ndarray assembled from its leaves. The other
     # harness entry points already did this; check() predated shaped Params.
-    expected = _oracle(fn, A, params, param_values, bits)
+    expected = _oracle(fn, A, params, param_values, field)
     ok = got.size == expected.size and np.array_equal(got, expected)
     tag = f"line_buffers={meta['M']} shift={meta['N']} out_bits={meta['out_bits']}"
     print(f"  {name:<12} {tag:<46} -> " + ("PASS" if ok else "FAIL"))
