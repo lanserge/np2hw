@@ -951,6 +951,9 @@ class Channels:
         self.word = word
         self.channels = channels
         self.field = word.image.bits // channels
+        # (H, W, C), so a model can take its geometry from its input the
+        # same way it does on a real ndarray.
+        self.shape = (*word.shape, channels)
 
     def __getitem__(self, key):
         if not (isinstance(key, tuple) and len(key) == 2 and key[0] is Ellipsis
