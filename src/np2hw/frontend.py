@@ -189,6 +189,8 @@ class Traced:
             return _make_mux(*args)
         if func in (np.empty_like, np.zeros_like):
             return self._canvas(zeroed=func is np.zeros_like)
+        if func is np.stack:
+            return _make_stack(*args, **kwargs)
         return NotImplemented
 
     def _pad(self, pad_width, mode="constant", **kw):
@@ -223,33 +225,39 @@ class Traced:
     # -- slicing ------------------------------------------------------------- #
 
     def __getitem__(self, key):
-        if self.post:
-            raise ValueError("cannot slice after a pointwise op (v1)")
         if not isinstance(key, tuple):
             key = (key, slice(None))
         steps = [k.step for k in key if isinstance(k, slice)]
         if any(step not in (None, 1) for step in steps):
+            # A phase slice comes AFTER the plane's arithmetic ("compute the
+            # tap combination, then say which positions it applies to"), so
+            # it is legal on a finished chain where a spatial slice is not.
             return self._phase_slice(key)
+        if self.post:
+            raise ValueError("cannot slice after a pointwise op (v1)")
         (dr, rows), (dc, cols) = _axis(key[0], self.shape[0]), _axis(key[1], self.shape[1])
         return self._spatial({(r + dr, c + dc): w for (r, c), w in self.taps.items()},
                              (rows, cols), self.bits, self.signed)
 
     def _phase_slice(self, key):
-        """`img[py::2, px::2]` -- one interleaved plane of the image.
+        """`value[py::2, px::2]` -- one interleaved plane of a full-rate value.
 
         The plane is not decimated in hardware. Nothing is dropped and no rate
         changes: the phase travels with the value and, when the planes are
         written back into a full-size result, becomes the select on a mux over
-        the per-plane coefficients. That is why a CFA-phase-dependent operation
-        costs a mux rather than four quarter-rate datapaths.
+        the per-plane coefficients -- or, when the planes are STENCILS, over
+        the per-plane tap combinations computed on one shared window. That is
+        why a CFA-phase-dependent operation costs a mux rather than four
+        quarter-rate datapaths, and why demosaic costs one window rather than
+        one per colour.
 
         The start may be a REGISTER, so which physical half a plane refers to is
         a two-bit write rather than a rebuild -- one bitstream, every CFA order.
         """
-        if self.taps != {(0, 0): 1} or self.mode != "none":
+        if self.expr is not None:
             raise NotImplementedError(
-                "a strided slice must be taken directly on the image (optionally "
-                "after astype); slicing a stencil or a padded value is out of scope")
+                "a pointwise expression DAG cannot be phase-sliced; take the "
+                "phase slice of chain-form values (taps, shifts, clips)")
         if self.phase is not None:
             raise NotImplementedError("a phase-sliced value cannot be sliced again")
 
@@ -642,6 +650,11 @@ class PhaseCanvas:
         self.signed = source.signed
         self.branches = []          # [((row_desc, col_desc), stride, Traced)]
 
+    def __array_function__(self, func, types, args, kwargs):
+        if func is np.stack:
+            return _make_stack(*args, **kwargs)
+        return NotImplemented
+
     # -- assembly -------------------------------------------------------------- #
 
     def __setitem__(self, key, value):
@@ -749,6 +762,56 @@ class PhaseCanvas:
         raise KeyError(f"no plane for phase {(row_desc, col_desc)}")
 
 
+class ChannelStack:
+    """`np.stack([c0, c1, ...], axis=-1)`: one output word of parallel channels.
+
+    The NumPy-idiomatic way a model says "this pixel has several components":
+    run on real arrays it IS np.stack and returns (H, W, C); traced, the
+    channels become fields of one output data word, channel 0 in the low
+    bits, each field as wide as the input image's samples. The packing is a
+    property of the STREAM, stated once here at the boundary -- models never
+    shift-and-mask channels together themselves.
+
+    Channels may be PhaseCanvas (per-CFA-site tap selection -- the demosaic
+    shape) and must all describe the same image with the same phase
+    structure, so the hardware is one shared window, one position select,
+    C muxes, one word.
+    """
+
+    def __init__(self, channels):
+        first = channels[0]
+        self.channels = list(channels)
+        self.image = first.image
+        self.shape = first.shape
+        self.zeroed = getattr(first, "zeroed", False)
+
+    # terminal declarations distribute, as they do on a canvas
+    def astype(self, dtype):
+        return ChannelStack([c.astype(dtype) for c in self.channels])
+
+    def clip(self, lo, hi):
+        return ChannelStack([c.clip(lo, hi) for c in self.channels])
+
+
+def _make_stack(arrays, axis=0, **kwargs):
+    if kwargs:
+        raise NotImplementedError(f"np.stack options {sorted(kwargs)} are out of scope")
+    arrays = list(arrays)
+    if axis not in (-1, len(getattr(arrays[0], "shape", ())) or 2):
+        raise NotImplementedError(
+            "np.stack on traced values packs CHANNELS into the output word, "
+            "which is axis=-1; other axes have no stream meaning")
+    if not all(isinstance(a, PhaseCanvas) for a in arrays):
+        raise NotImplementedError(
+            "np.stack traces canvases assembled from phase planes (the "
+            "per-CFA-site case); stacking other traced forms is out of scope")
+    images = {a.image for a in arrays}
+    shapes = {a.shape for a in arrays}
+    if len(images) != 1 or len(shapes) != 1:
+        raise ValueError("np.stack channels must describe one image, one shape")
+    return ChannelStack(arrays)
+
+
 def _make_mux(cond, x, y):
     if not isinstance(x, Traced) or not isinstance(y, Traced):
         raise TypeError("np.where branches must both be traced expressions")
@@ -760,7 +823,7 @@ def to_ir(fn, image: Image2D, *params, out_bits=None):
     if len(params) == 1 and isinstance(params[0], Params):
         params = (params[0].trace_view(),)
     traced = fn(Traced.image_input(image), *params)
-    if isinstance(traced, (Mux, PhaseCanvas)):
+    if isinstance(traced, (Mux, PhaseCanvas, ChannelStack)):
         return None, traced                  # generate() handles these terminals
     if out_bits is not None:
         traced = traced.astype(out_bits)

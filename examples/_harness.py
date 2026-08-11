@@ -29,9 +29,18 @@ def _param_arg(p, pv):
     return int(pv[p.name])
 
 
-def _oracle(fn, A, params, pv):
+def _oracle(fn, A, params, pv, bits=8):
     args = [A] + [_param_arg(p, pv) for p in params]
-    return np.asarray(fn(*args)).astype(np.int64).flatten()
+    out = np.asarray(fn(*args)).astype(np.int64)
+    if out.ndim == 3:
+        # np.stack channels: the DUT emits ONE word per pixel, channel 0 in
+        # the low bits, each field as wide as the input's samples -- the same
+        # law the emitter states. The oracle speaks (H, W, C); pack here.
+        word = np.zeros(out.shape[:2], dtype=np.int64)
+        for c in range(out.shape[-1]):
+            word |= (out[..., c] & ((1 << bits) - 1)) << (c * bits)
+        out = word
+    return out.flatten()
 
 
 def _write_hex(A, bits):
@@ -52,7 +61,7 @@ def check_bp(name, fn, A, params=None, param_values=None, iface="core", bits=8):
     H, W = A.shape
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params)
     core = generate(out, module_name=name)
-    expected = _oracle(fn, A, params, param_values)
+    expected = _oracle(fn, A, params, param_values, bits)
     out_cols = core["out_cols"]
 
     files = [f"{name}.v"]
@@ -109,7 +118,7 @@ def check_sb_packed(name, fn, A, params=None, param_values=None, bits=8):
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params)
     core = generate(out, module_name=name)
     wrap = switchboard_wrap(core, W, H, module_name=f"{name}_sbp", pack=True)
-    expected = _oracle(fn, A, params, param_values)
+    expected = _oracle(fn, A, params, param_values, bits)
 
     with open(os.path.join(BUILD, f"{name}.v"), "w") as fh:
         fh.write(core["verilog"] + "\n")
@@ -156,7 +165,7 @@ def check(name, fn, A, params=None, param_values=None, show=0, bits=8):
     # Reconstruct each argument the way the oracle needs it: a scalar Param is
     # an int, a SHAPED Param is the ndarray assembled from its leaves. The other
     # harness entry points already did this; check() predated shaped Params.
-    expected = _oracle(fn, A, params, param_values)
+    expected = _oracle(fn, A, params, param_values, bits)
     ok = got.size == expected.size and np.array_equal(got, expected)
     tag = f"line_buffers={meta['M']} shift={meta['N']} out_bits={meta['out_bits']}"
     print(f"  {name:<12} {tag:<46} -> " + ("PASS" if ok else "FAIL"))
@@ -193,7 +202,7 @@ def check_ctrl(name, fn, A, params, param_values, ctrl="axil", bits=8,
         expected = np.concatenate([exp1, exp2])
         n_frames = 2
     else:
-        expected = _oracle(fn, A, params, param_values)
+        expected = _oracle(fn, A, params, param_values, bits)
         n_frames = 1
 
     with open(os.path.join(BUILD, f"{name}.v"), "w") as fh:

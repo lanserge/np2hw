@@ -836,7 +836,12 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         return _generate_mux(out_line, module_name)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
         return _generate_expr(out_line, module_name)
+    if type(out_line).__name__ == "ChannelStack":        # np.stack([...], axis=-1)
+        return _generate_phase_stencil(out_line, module_name)
     if type(out_line).__name__ == "PhaseCanvas":         # out[py::2, px::2] = ...
+        if any(value.taps != {(0, 0): 1} or value.mode != "none"
+               for _, _, value in out_line.branches):
+            return _generate_phase_stencil(out_line, module_name)
         return _generate_phase(out_line, module_name)
     image = find_image(out_line)
     if image is None:
@@ -1133,6 +1138,317 @@ def _generate_mux(mux, module_name) -> dict:
         "M": M, "N": N, "out_rows": out_rows, "out_cols": out_cols,
         "module": module_name, "image": image,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Phase-stencil emission — planes that are STENCILS, selected by position.
+#
+# The demosaic shape: each CFA site applies a DIFFERENT tap combination of one
+# shared window. One edge-handled window feeds every plane's combination at
+# full rate, and a positional mux (position parity XOR the phase registers)
+# picks the one this pixel's site names. np.stack channels ride the same
+# window and concatenate into one output word -- C muxes, one select, one
+# set of line buffers.
+# --------------------------------------------------------------------------- #
+
+def _generate_phase_stencil(stack, module_name) -> Core:
+    channels = (stack.channels if type(stack).__name__ == "ChannelStack"
+                else [stack])
+    image = channels[0].image
+
+    # Every channel-canvas must partition the image with the SAME phase
+    # structure: one position select serves all of them.
+    per_channel, phase_key, rows0, cols0 = [], None, None, None
+    for canvas in channels:
+        rows, cols = canvas.validate()
+        rows, cols = _phase_order(rows), _phase_order(cols)
+        key = tuple(canvas._key(d) for d in (*rows, *cols))
+        if phase_key is None:
+            phase_key, rows0, cols0 = key, rows, cols
+        elif key != phase_key:
+            raise ValueError(
+                "np.stack channels use different phase descriptors; one "
+                "position select must serve every channel of a word")
+        per_channel.append([canvas.plane(r, c) for r in rows for c in cols])
+
+    flat = [plane for planes in per_channel for plane in planes]
+    if any(isinstance(w, Param) for p in flat for w in p.taps.values()):
+        raise NotImplementedError(
+            "programmable tap coefficients under a phase select are out of "
+            "scope; use constant kernels per plane")
+    for plane in flat:
+        for op in plane.post:
+            if op[0] in ("mulp", "addp"):
+                raise NotImplementedError(
+                    "register operands inside phase-sliced stencil planes are "
+                    "out of scope in this version; constant shifts and clips "
+                    "only (put per-plane registers in a pointwise block)")
+    pads = {p.pad for p in flat}
+    modes = {p.mode for p in flat}
+    if len(pads) != 1 or len(modes) != 1:
+        raise ValueError(
+            "the phase planes disagree on padding; every plane must window "
+            "one identically padded image")
+    (pt, pb, pl, pr), mode = pads.pop(), modes.pop()
+    keys = set().union(*(set(p.taps) for p in flat))
+    if min(r for r, _ in keys) < 0 or min(c for _, c in keys) < 0:
+        raise ValueError("stencil offsets must be >= 0 (slice from 0)")
+    M = max(r for r, _ in keys)
+    N = max(c for _, c in keys)
+    if mode == "none" and (M or N):
+        raise NotImplementedError(
+            "a phase partition needs same-size planes; pad the image (edge "
+            "or constant) so the stencil keeps the input's shape")
+    rep = mode == "edge"
+    v_edge, h_edge = bool(pt or pb), bool(pl or pr)
+    if v_edge and pt + pb != M:
+        raise ValueError(f"row padding {(pt, pb)} must sum to the vertical "
+                         f"span {M} for same-size output")
+    if h_edge and pl + pr != N:
+        raise ValueError(f"column padding {(pl, pr)} must sum to the "
+                         f"horizontal span {N} for same-size output")
+
+    in_bits = image.bits
+    if image.signed:
+        in_lo, in_hi = -(1 << (in_bits - 1)), (1 << (in_bits - 1)) - 1
+    else:
+        in_lo, in_hi = 0, (1 << in_bits) - 1
+    signed = image.signed or any(
+        p.spatial_signed or _range_bits(*_acc_range(p.taps, in_lo, in_hi))[1]
+        for p in flat)
+    sgn = "signed " if signed else ""
+    rows_used = sorted({r for r, _ in keys})
+    realH, realW = image.height, image.width
+
+    params = []
+    for desc in (rows0[0], cols0[0]):
+        if isinstance(desc, PhaseRef) and desc.param.name not in {
+                n for n, *_ in params}:
+            params.append((desc.param.name, 1, False, desc.param.default,
+                           desc.param.description))
+
+    vrow_lo = pb if v_edge else M
+    hcol_lo = pr if h_edge else N
+
+    L = []
+    a = L.append
+    a(f"// generated by np2hw -- phase-selected stencils over one shared "
+      f"{M+1}x{N+1} window,")
+    a(f"// {len(flat)} plane datapath(s), {len(channels)} channel(s), "
+      f"{mode} edges")
+    a(f"module {module_name} #(parameter WIDTH = {realW}, "
+      f"parameter HEIGHT = {realH}) (")
+    a("    input  wire clk, input wire rst, input wire in_valid,")
+    a("    output wire in_ready,")
+    a("    input  wire in_sof,")
+    a(f"    input  wire [{in_bits-1}:0] in_data,")
+    for name, bits, psg, _, _doc in params:
+        L.extend(_param_port(name, bits, psg, _doc))
+    a("    output reg  out_valid,")
+    a("    input  wire out_ready,")
+    a("    output reg  out_sof,")
+    a("    output reg  out_eol,")
+    a("    output reg  out_last,")
+    a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
+    a(");")
+    a("    integer col; integer row; integer fcol; integer frow;")
+    a("    reg hf; reg vf; reg done;")
+    a("    wire [31:0] ecol = in_sof ? 0 : col;")
+    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a("    wire stall = out_valid && !out_ready;")
+    a("    wire in_active = !done && !hf && !vf;")
+    a("    assign in_ready = !stall && (in_active || in_sof);")
+    a("    wire en = !stall && !done && ((in_active && in_valid) || hf || vf"
+      " || (in_sof && in_valid));")
+    vbc = "in_sof || ((!vf) && (row == 0))" if (v_edge and rep) else "1'b0"
+    hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
+    a(f"    wire vbc = {vbc};")
+    a(f"    wire hbc = {hbc};")
+    # shared window: line buffers, vertical taps, per-row column delays
+    for k in range(1, M + 1):
+        a(f"    reg  [{in_bits-1}:0] mem{k} [0:WIDTH-1];")
+        a(f"    wire [{in_bits-1}:0] chain{k} = mem{k}[ecol];")
+    if v_edge and M >= 1:
+        flush_src = "mem1[ecol]" if rep else "0"
+        a(f"    wire [{in_bits-1}:0] chain0 = (vf && !in_sof) ? {flush_src} : in_data;")
+    else:
+        a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
+    for r in rows_used:
+        delay = M - r
+        base = f"chain{delay}"
+        if rep or delay == 0 or not v_edge:
+            a(f"    wire [{in_bits-1}:0] row{r} = {base};")
+        else:
+            a(f"    wire [{in_bits-1}:0] row{r} = (!vf && erow < {delay}) ? 0 : {base};")
+    zero_h = h_edge and not rep
+    for r in rows_used:
+        for d in range(1, N + 1):
+            a(f"    reg  [{in_bits-1}:0] row{r}_d{d};")
+    if h_edge and rep:
+        for r in rows_used:
+            a(f"    reg  [{in_bits-1}:0] vlast{r};")
+    for r in rows_used:
+        if h_edge:
+            src = f"vlast{r}" if rep else "0"
+            a(f"    wire [{in_bits-1}:0] cur{r} = hf ? {src} : row{r};")
+        else:
+            a(f"    wire [{in_bits-1}:0] cur{r} = row{r};")
+
+    def pixel(r, dc):
+        delay = N - dc
+        if delay == 0:
+            return f"cur{r}"
+        base = f"row{r}_d{delay}"
+        if zero_h:
+            return f"((!hf && ecol < {delay}) ? 0 : {base})"
+        return base
+
+    def term(r, c, w):
+        px = pixel(r, c)
+        if signed:
+            px = f"$signed({px})" if image.signed else f"$signed({{1'b0, {px}}})"
+        return px if w == 1 else f"{w}*{px}"
+
+    # The output pixel's position drives the plane select: during an edge
+    # flush the input counters sit on replicated columns, but the pixel
+    # being EMITTED is the one whose CFA site must choose the taps.
+    ORv = "HEIGHT" if v_edge else f"(HEIGHT - {M})"
+    OCv = "WIDTH" if h_edge else f"(WIDTH - {N})"
+    orow = (f"(vf ? (({ORv} - {pb}) + frow) : (erow - {vrow_lo}))" if v_edge
+            else f"(erow - {vrow_lo})")
+    ocolp = (f"(hf ? (({OCv} - {pr}) + fcol) : (ecol - {hcol_lo}))" if h_edge
+             else f"(ecol - {hcol_lo})")
+    a(f"    wire [31:0] o_row = {orow};")
+    a(f"    wire [31:0] o_col = {ocolp};")
+    row_x, col_x = _phase_expr(rows0[0]), _phase_expr(cols0[0])
+    a(f"    wire sel_row = o_row[0]{f' ^ {row_x}' if row_x else ''};")
+    a(f"    wire sel_col = o_col[0]{f' ^ {col_x}' if col_x else ''};")
+    a("")
+
+    # per-plane tap combinations, then one positional mux per channel
+    chan_wires = []
+    single = len(channels) == 1
+    for ci, planes in enumerate(per_channel):
+        results = []
+        for bi, plane in enumerate(planes):
+            prefix = f"c{ci}p{bi}_"
+            acc_bits = _range_bits_as(*_acc_range(plane.taps, in_lo, in_hi),
+                                      signed)
+            terms = [term(r, c, w) for (r, c), w in sorted(plane.taps.items())]
+            a(f"    wire {sgn}[{acc_bits-1}:0] {prefix}acc = {' + '.join(terms)};")
+            results.append(_emit_post(a, list(plane.post), acc_bits, signed,
+                                      prefix))
+        cb = max(bits for _, bits, _ in results)
+        csg = any(sg for _, _, sg in results)
+        if csg and not single:
+            raise NotImplementedError(
+                "np.stack cannot pack a signed channel into the word; clip "
+                "channels to their unsigned range first")
+        ext = [_extend(res, bits, cb, sg) for res, bits, sg in results]
+        kind = "signed " if csg else ""
+        a(f"    reg {kind}[{cb-1}:0] chan{ci};")
+        a("    always @(*) begin")
+        a("        case ({sel_row, sel_col})")
+        for code, expr in zip(("2'b00", "2'b01", "2'b10"), ext[:3]):
+            a(f"            {code}:   chan{ci} = {expr};")
+        a(f"            default: chan{ci} = {ext[3]};")
+        a("        endcase")
+        a("    end")
+        chan_wires.append((f"chan{ci}", cb, csg))
+
+    if single:
+        result, out_bits, out_signed = chan_wires[0][0], chan_wires[0][1], chan_wires[0][2]
+    else:
+        # channel 0 in the low bits, each field as wide as the input's
+        # samples -- the packing is a property of the word, stated here once.
+        field = in_bits
+        for name, cb, _ in chan_wires:
+            if cb > field:
+                raise NotImplementedError(
+                    f"channel {name} needs {cb} bits but the word's fields "
+                    f"are {field} (the input sample width); clip it first")
+        out_bits = field * len(chan_wires)
+        out_signed = False
+        parts = [_extend(name, cb, field, False)
+                 for name, cb, _ in reversed(chan_wires)]
+        a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
+        result = "word"
+
+    rowok = f"(vf || (erow >= {vrow_lo}))"
+    colok = f"(hf || (ecol >= {hcol_lo}))"
+    okv = f"({rowok} && {colok})"
+    eol = f"{okv} && (o_col == ({OCv} - 1))"
+    sof = f"{okv} && (o_row == 0) && (o_col == 0)"
+    last = f"{okv} && (o_row == ({ORv} - 1)) && (o_col == ({OCv} - 1))"
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin")
+    a("            col<=0; row<=0; fcol<=0; frow<=0;")
+    a("            hf<=1'b0; vf<=1'b0; done<=1'b0; out_valid<=1'b0;")
+    a("            out_sof<=1'b0; out_eol<=1'b0; out_last<=1'b0;")
+    a("        end else begin")
+    a("            if (!stall) begin")
+    a("            if (en) begin")
+    a(f"                out_valid <= {okv};")
+    a(f"                out_sof <= {sof}; out_eol <= {eol}; out_last <= {last};")
+    a(f"                out_data <= {result};")
+    for k in range(1, M + 1):
+        a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : chain{k-1};")
+    for r in rows_used:
+        for d in range(N, 0, -1):
+            src = f"cur{r}" if d == 1 else f"row{r}_d{d-1}"
+            a(f"                row{r}_d{d} <= hbc ? cur{r} : {src};")
+    if h_edge and rep:
+        for r in rows_used:
+            a(f"                if (!hf && col == WIDTH-1) vlast{r} <= row{r};")
+    a("                if (in_sof) begin")
+    a("                    col <= 1; row <= 0; hf <= 1'b0; vf <= 1'b0; fcol <= 0; frow <= 0;")
+    a("                end else if (!hf) begin")
+    a("                    if (col == WIDTH-1) begin")
+    if h_edge:
+        a("                        hf <= 1'b1; fcol <= 0;")
+    else:
+        a("                        col <= 0;")
+        _emit_row_advance(a, pb, v_edge, 24)
+    a("                    end else col <= col + 1;")
+    a("                end else begin")
+    a(f"                    if (fcol == {max(pr-1, 0)}) begin")
+    a("                        hf <= 1'b0; col <= 0;")
+    _emit_row_advance(a, pb, v_edge, 24)
+    a("                    end else fcol <= fcol + 1;")
+    a("                end")
+    a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
+    a("                out_eol <= 1'b0; out_last <= 1'b0; end")
+    a("            end")
+    a("        end")
+    a("    end")
+    a("endmodule")
+
+    verilog = ("\n".join(L)
+               .replace("OUT_BITS-1", f"{out_bits-1}")
+               .replace("OUT_SGN", "signed " if out_signed else ""))
+    return Core({
+        "verilog": verilog,
+        "interface": _interface(in_bits, out_bits, out_signed, params),
+        "in_bits": in_bits,
+        "out_bits": out_bits,
+        "signed": out_signed,
+        "params": [(n, b) for n, b, _, _, _ in params],
+        "param_defaults": {n: d for n, _, _, d, _ in params},
+        "M": M, "N": N,
+        "phases": len(flat) // max(1, len(channels)),
+        "channels": len(channels),
+        "out_rows": realH if v_edge else realH - M,
+        "out_cols": realW if h_edge else realW - N,
+        "module": module_name,
+        "image": image,
+        "edge": mode != "none",
+        "eof": False,
+        "dynamic": False,
+        "max_width": None,
+        "aw_bits": 0,
+        "hblank": pr + 2,
+        "vdrain": (pb + 1) * (realW + pr) + 8,
+    })
 
 
 # --------------------------------------------------------------------------- #
