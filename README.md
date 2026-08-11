@@ -173,4 +173,5 @@ and named credit, not exclusivity.
 ## Author
 
 Serge Rabyking — 12 years at Apical (acquired by Arm) on production ISP/image-processing
-IP; patent inventor (WO2016063023A1 / US10063787B2).
+IP; patent inventor (WO2016063023A1 / US10063787B2). More at
+[serge.rabyking.com](https://serge.rabyking.com).
