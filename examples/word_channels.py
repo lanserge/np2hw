@@ -75,17 +75,17 @@ def main():
     _, out = to_ir(colour_mix, Image2D("img", W, H, bits=BITS), matrix,
                    channels=3)
     core = generate(out, module_name="word_channels")
-    # One wire namespace across the three channel DAGs: the input value
-    # enters the expression forest exactly once, and each lane's mask is a
-    # shared node -- not re-derived per output channel.
-    entries = core.verilog.count("$signed({1'b0, in_data})")
+    # One wire namespace across the three channel DAGs: each input lane
+    # is a FIELD TAP extracted exactly once, shared by every output
+    # channel that reads it -- not re-derived per use.
+    lanes = core.verilog.count(", in_data[")
     iface = core["interface"]["output"]
     print(f"  channels={core['channels']} out_bits={core.out_bits} "
-          f"field_bits={iface['field_bits']} input-entries={entries} "
+          f"field_bits={iface['field_bits']} lane-taps={lanes} "
           f"expr_nodes={core['expr_nodes']}")
     shape_ok = (core["channels"] == 3 and core.out_bits == BITS
                 and iface["field_bits"] == FIELD and iface["channels"] == 3
-                and entries == 1 and core.line_buffers == 0)
+                and lanes == 3 and core.line_buffers == 0)
 
     print("\n" + ("WORD CHANNELS PASS" if all(results) and shape_ok else "FAIL"))
     return 0 if all(results) and shape_ok else 1

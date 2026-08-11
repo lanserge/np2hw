@@ -132,7 +132,8 @@ def _axis(s, dim):
 class Traced:
     def __init__(self, image, taps, shape, bits, signed,
                  spatial_bits=None, post=(), pad=(0, 0, 0, 0), mode="none",
-                 spatial_signed=None, phase=None, stride=(1, 1), expr=None):
+                 spatial_signed=None, phase=None, stride=(1, 1), expr=None,
+                 lane=None):
         self.image = image
         # Pointwise expression DAG, engaged the first time the model does
         # something a straight chain cannot say: forks the value, combines
@@ -159,6 +160,11 @@ class Traced:
         self.post = list(post)
         self.pad = tuple(pad)                # (top, bottom, left, right) padding rows/cols
         self.mode = mode                     # 'none' | 'edge' (replicate) | 'zero'
+        # (shift, bits) when this value is one FIELD of a multi-channel input
+        # word (a Channels lane). Field extraction is nonlinear, so lane
+        # values leave chain form the moment they meet arithmetic: their
+        # window taps become lane-tagged expression leaves.
+        self.lane = lane
 
     @classmethod
     def image_input(cls, image):
@@ -172,7 +178,8 @@ class Traced:
                     spatial_bits=self.spatial_bits,
                     spatial_signed=self.spatial_signed, post=self.post,
                     pad=self.pad, mode=self.mode,
-                    phase=self.phase, stride=self.stride, expr=self.expr)
+                    phase=self.phase, stride=self.stride, expr=self.expr,
+                    lane=self.lane)
         base.update(kw)
         return Traced(**base)
 
@@ -254,10 +261,6 @@ class Traced:
         The start may be a REGISTER, so which physical half a plane refers to is
         a two-bit write rather than a rebuild -- one bitstream, every CFA order.
         """
-        if self.expr is not None:
-            raise NotImplementedError(
-                "a pointwise expression DAG cannot be phase-sliced; take the "
-                "phase slice of chain-form values (taps, shifts, clips)")
         if self.phase is not None:
             raise NotImplementedError("a phase-sliced value cannot be sliced again")
 
@@ -284,7 +287,7 @@ class Traced:
         if self.expr is not None:
             return self.expr
         if (self.taps != {(0, 0): 1} or self.post or self.mode != "none"
-                or self.phase is not None):
+                or self.phase is not None or self.lane is not None):
             raise NotImplementedError(
                 "expression-DAG models are pointwise in this version: fork, "
                 "gather and recombine apply to the plain pixel value (after "
@@ -298,11 +301,107 @@ class Traced:
             self._acc_node = PExpr("acc", (), lo, hi)
         return self._acc_node
 
+    def _as_wexpr(self):
+        """This value as an expression over WINDOW TAP leaves.
+
+        The adaptive-filter form: gradients, absolute differences and
+        per-pixel selects are DAGs whose leaves are window positions
+        (optionally one FIELD of a multi-channel word). A linear chain
+        converts mechanically -- taps become leaves, posts become nodes --
+        so chains and window expressions mix freely in one model.
+        """
+        if self.expr is not None:
+            return self.expr
+        if getattr(self, "_wexpr_node", None) is not None:
+            return self._wexpr_node
+        if self.lane is not None:
+            shift, field = self.lane
+            tlo, thi = 0, (1 << field) - 1
+        else:
+            shift, field = 0, None
+            if self.image.signed:
+                tlo = -(1 << (self.image.bits - 1))
+                thi = (1 << (self.image.bits - 1)) - 1
+            else:
+                tlo, thi = 0, (1 << self.image.bits) - 1
+        node = None
+        for (r, c), w in sorted(self.taps.items()):
+            if isinstance(w, Param):
+                raise NotImplementedError(
+                    "a Param tap coefficient cannot join a window expression; "
+                    "multiply by the register after the spatial sum")
+            leaf = PExpr("tap", (r, c, shift, field), tlo, thi)
+            if w != 1:
+                corners = sorted((tlo * w, thi * w))
+                leaf = PExpr("mul", (leaf, PExpr("const", (int(w),),
+                                                 int(w), int(w))),
+                             corners[0], corners[1])
+            if node is None:
+                node = leaf
+            else:
+                node = PExpr("add", (node, leaf), node.lo + leaf.lo,
+                             node.hi + leaf.hi)
+        for op in self.post:
+            if op[0] == "shr":
+                node = PExpr("shr", (node, op[1]),
+                             node.lo >> op[1], node.hi >> op[1])
+            elif op[0] == "mulc":
+                corners = sorted((node.lo * op[1], node.hi * op[1]))
+                node = PExpr("mul", (node, PExpr("const", (op[1],),
+                                                 op[1], op[1])),
+                             corners[0], corners[1])
+            elif op[0] == "clip":
+                lo, hi = max(node.lo, op[1]), min(node.hi, op[2])
+                if lo > hi:
+                    lo = hi = op[1]
+                node = PExpr("clip", (node, op[1], op[2]), lo, hi)
+            elif op[0] == "trunc" and op[1] >= max(node.hi.bit_length(), 1):
+                continue                     # widening declaration: no-op
+            else:
+                raise NotImplementedError(
+                    f"post op {op[0]!r} cannot join a window expression")
+        self._wexpr_node = node
+        return node
+
+    def _any_expr(self):
+        """expr | window-expr | pointwise-acc, whichever this value is."""
+        if self.expr is not None:
+            return self.expr
+        if (self.lane is not None or self.taps != {(0, 0): 1}
+                or self.mode != "none" or self.post):
+            return self._as_wexpr()
+        return self._as_expr()
+
+    def _merge_pad(self, *others):
+        """Window sources of one expression must pad identically."""
+        pad, mode = self.pad, self.mode
+        for other in others:
+            if not isinstance(other, Traced):
+                continue
+            if other.mode == "none" and other.pad == (0, 0, 0, 0):
+                continue
+            if mode == "none" and pad == (0, 0, 0, 0):
+                pad, mode = other.pad, other.mode
+            elif (other.pad, other.mode) != (pad, mode):
+                raise ValueError(
+                    "window expression combines values padded differently "
+                    f"({pad}/{mode} vs {other.pad}/{other.mode}); pad the "
+                    "image once and derive everything from it")
+        return pad, mode
+
+    def _wexpr_derive(self, node, *sources):
+        pad, mode = self._merge_pad(*sources)
+        negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
+        bits = max(node.hi.bit_length(), negative) + (1 if node.lo < 0 else 0)
+        return self._derive(expr=node, bits=max(1, bits), signed=node.lo < 0,
+                            post=[], taps={(0, 0): 1}, lane=None,
+                            pad=pad, mode=mode)
+
     def _expr_derive(self, node):
         negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
         bits = max(node.hi.bit_length(), negative) + (1 if node.lo < 0 else 0)
         return self._derive(expr=node, bits=max(1, bits), signed=node.lo < 0,
-                            post=[])
+                            post=[], lane=None)
 
     def _gather_from(self, parent):
         """`table[traced_index]`: the whole register array, muxed by data.
@@ -339,10 +438,10 @@ class Traced:
         elif isinstance(o, Traced):
             if o.image is not self.image:
                 raise ValueError("expression combines values of two images")
-            other = o._as_expr()
+            other = o._any_expr()
         else:
             return NotImplemented
-        a, b = self._as_expr(), other
+        a, b = self._any_expr(), other
         if op == "add":
             lo, hi = a.lo + b.lo, a.hi + b.hi
         elif op == "sub":
@@ -350,7 +449,62 @@ class Traced:
         else:                                            # mul
             corners = [a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi]
             lo, hi = min(corners), max(corners)
-        return self._expr_derive(PExpr(op, (a, b), lo, hi))
+        return self._wexpr_derive(PExpr(op, (a, b), lo, hi),
+                                  o if isinstance(o, Traced) else None)
+
+    # -- comparisons / abs / select: the adaptive-filter vocabulary ---------- #
+
+    def _compare(self, o, flip):
+        if not isinstance(o, Traced):
+            if not isinstance(o, (int, np.integer)):
+                return NotImplemented
+            o_node = PExpr("const", (int(o),), int(o), int(o))
+            a, b = self._any_expr(), o_node
+            src = None
+        else:
+            if o.image is not self.image:
+                raise ValueError("comparison across two images")
+            a, b = self._any_expr(), o._any_expr()
+            src = o
+        if flip:
+            a, b = b, a
+        return self._wexpr_derive(PExpr("lt", (a, b), 0, 1), src)
+
+    def __lt__(self, o):
+        return self._compare(o, flip=False)
+
+    def __gt__(self, o):
+        return self._compare(o, flip=True)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method != "__call__" or kwargs:
+            return NotImplemented
+        if ufunc is np.absolute:
+            node = self._any_expr()
+            lo = 0 if node.lo <= 0 <= node.hi else min(abs(node.lo),
+                                                       abs(node.hi))
+            hi = max(abs(node.lo), abs(node.hi))
+            return self._wexpr_derive(PExpr("abs", (node,), lo, hi))
+        # NumPy scalars route their arithmetic here once the protocol
+        # exists; hand them back to the operators that always handled them.
+        binary = {np.multiply: "__mul__", np.add: "__add__",
+                  np.subtract: "__sub__"}
+        if ufunc in binary and len(inputs) == 2:
+            a, b = inputs
+            if a is self:
+                return getattr(self, binary[ufunc])(b)
+            reflected = {"__mul__": "__rmul__", "__add__": "__radd__",
+                         "__sub__": "__rsub__"}[binary[ufunc]]
+            if reflected == "__rsub__":
+                return (self * -1).__add__(a)
+            return getattr(self, reflected)(a)
+        if ufunc is np.less and len(inputs) == 2:
+            return (self.__lt__(inputs[1]) if inputs[0] is self
+                    else self.__gt__(inputs[0]))
+        if ufunc is np.greater and len(inputs) == 2:
+            return (self.__gt__(inputs[1]) if inputs[0] is self
+                    else self.__lt__(inputs[0]))
+        return NotImplemented
 
     def __rshift__(self, o):
         if not isinstance(o, (int, np.integer)) or o < 0:
@@ -378,6 +532,11 @@ class Traced:
             return self._expr_binary(o, "add")
         if isinstance(o, (int, np.integer)) and o == 0:
             return self                                   # identity (enables sum())
+        if self.lane is not None or (isinstance(o, Traced)
+                                     and o.lane is not None):
+            # Field extraction is nonlinear: lane arithmetic leaves chain
+            # form and becomes a window expression over lane-tagged taps.
+            return self._expr_binary(o, "add")
         if isinstance(o, Param):                          # bias/offset register
             rb = max(self.bits, o.bits) + 1
             rs = self.signed or o.signed
@@ -387,7 +546,10 @@ class Traced:
         if not isinstance(o, Traced):
             return NotImplemented
         if self.post or o.post:
-            raise ValueError("additions must come before pointwise ops (v1)")
+            # Arithmetic past a pointwise op leaves chain form and becomes
+            # a WINDOW EXPRESSION -- the corrected-average case: a shifted
+            # gradient term added to a shifted spatial mean.
+            return self._expr_binary(o, "add")
         if self.shape != o.shape:
             raise ValueError(f"shape mismatch: {self.shape} + {o.shape}")
         rb, rs = _promote(self.bits, self.signed, o.bits, o.signed)
@@ -421,6 +583,9 @@ class Traced:
 
     def __mul__(self, o):
         if self.expr is not None or (isinstance(o, Traced) and o.expr is not None):
+            return self._expr_binary(o, "mul")
+        if self.lane is not None or (isinstance(o, Traced)
+                                     and o.lane is not None):
             return self._expr_binary(o, "mul")
         if isinstance(o, bool):
             return NotImplemented
@@ -796,10 +961,14 @@ class Channels:
         c = int(key[1])
         if not 0 <= c < self.channels:
             raise IndexError(f"channel {c} of {self.channels}")
-        lane = self.word
-        if c:
-            lane = lane >> (c * self.field)
-        return lane & ((1 << self.field) - 1)
+        # A lane is a CHAIN over the word image, tagged with its field: it
+        # can be padded, sliced and phase-sliced like any spatial value,
+        # and the field extraction happens per window tap the moment it
+        # meets arithmetic (see Traced.lane).
+        return self.word._derive(bits=self.field, signed=False,
+                                 spatial_bits=self.field,
+                                 spatial_signed=False,
+                                 lane=(c * self.field, self.field))
 
     def astype(self, dtype):
         # Containers are free: lanes carry exact ranges, so a widening
@@ -848,15 +1017,26 @@ def _make_stack(arrays, axis=0, **kwargs):
         raise NotImplementedError(
             "np.stack on traced values packs CHANNELS into the output word, "
             "which is axis=-1; other axes have no stream meaning")
-    if all(isinstance(a, PhaseCanvas) for a in arrays):
+    if any(isinstance(a, PhaseCanvas) for a in arrays):
+        # Phase-selected channels; plain Traced channels ride along as
+        # BROADCAST channels (one value at every site -- a passthrough).
         kind = "canvas"
+        for a in arrays:
+            if not isinstance(a, (PhaseCanvas, Traced)):
+                raise NotImplementedError(
+                    "np.stack channels must be phase canvases or traced "
+                    f"values, got {type(a).__name__}")
+            if isinstance(a, Traced) and a.phase is not None:
+                raise ValueError(
+                    "a phase-sliced value cannot be a whole channel; write "
+                    "it into a canvas with its three sibling planes")
     elif all(isinstance(a, Traced) and a.expr is not None for a in arrays):
         kind = "expr"          # pointwise DAG lanes -- the matrix-mix case
     else:
         raise NotImplementedError(
-            "np.stack traces channels that are all phase canvases (the "
-            "per-CFA-site case) or all pointwise expressions (the matrix "
-            "mix case); mixing forms in one word is out of scope")
+            "np.stack traces channels that are phase canvases (with "
+            "optional broadcast channels) or all pointwise expressions "
+            "(the matrix mix case)")
     images = {a.image for a in arrays}
     shapes = {a.shape for a in arrays}
     if len(images) != 1 or len(shapes) != 1:
@@ -867,6 +1047,17 @@ def _make_stack(arrays, axis=0, **kwargs):
 def _make_mux(cond, x, y):
     if not isinstance(x, Traced) or not isinstance(y, Traced):
         raise TypeError("np.where branches must both be traced expressions")
+    if isinstance(cond, Traced):
+        # A DATA-derived condition: per-pixel select inside the datapath --
+        # the adaptive-filter case -- not the register-driven 2:1 Mux.
+        c = cond._any_expr()
+        if c.lo < 0 or c.hi > 1:
+            raise ValueError(
+                "np.where on traced data needs a BOOLEAN condition (a "
+                f"comparison); this one ranges [{c.lo}, {c.hi}]")
+        a, b = x._any_expr(), y._any_expr()
+        node = PExpr("sel", (c, a, b), min(a.lo, b.lo), max(a.hi, b.hi))
+        return x._wexpr_derive(node, y, cond)
     return Mux(x.image, cond, x, y)
 
 

@@ -556,6 +556,27 @@ def _generate_expr(line, module_name) -> dict:
         if node.op == "acc":
             expr = ("$signed(in_data)" if image.signed
                     else "$signed({1'b0, in_data})")
+        elif node.op == "tap":
+            r, c, shift, fld = node.args
+            if (r, c) != (0, 0):
+                raise NotImplementedError(
+                    "a window tap in a pointwise datapath: this model has "
+                    "no line buffers; pad the image and use the windowed "
+                    "emitters")
+            base = ("in_data" if fld is None
+                    else f"in_data[{shift + fld - 1}:{shift}]")
+            expr = (f"$signed({base})" if image.signed and fld is None
+                    else f"$signed({{1'b0, {base}}})")
+        elif node.op == "abs":
+            inner = emit(node.args[0])
+            expr = f"({inner} < 0) ? -{inner} : {inner}"
+        elif node.op == "lt":
+            expr = (f"({emit(node.args[0])} < {emit(node.args[1])}) "
+                    "? 2'sd1 : 2'sd0")
+        elif node.op == "sel":
+            cond = emit(node.args[0])
+            expr = (f"({cond} != 0) ? {emit(node.args[1])} : "
+                    f"{emit(node.args[2])}")
         elif node.op == "const":
             value = node.args[0]
             emitted[key] = str(value)
@@ -643,7 +664,11 @@ def _generate_expr(line, module_name) -> dict:
 
 def _walk_expr_params(roots):
     """Register leaves and gathered arrays across expression roots, in
-    first-use order, deduplicated -- the multi-root twin of lower()'s walk."""
+    first-use order, deduplicated -- the multi-root twin of lower()'s walk.
+    Recursion is generic over PExpr arguments, so every operator -- present
+    and future -- is covered by construction."""
+    from .ir import PExpr
+
     parents, seen = [], set()
 
     def walk(node):
@@ -653,19 +678,37 @@ def _walk_expr_params(roots):
                 seen.add(("gather", parent.name))
                 parents.append(("gather", parent))
             walk(node.args[1])
-        elif node.op == "param":
+            return
+        if node.op == "param":
             leaf = node.args[0]
             if ("param", leaf.name) not in seen:
                 seen.add(("param", leaf.name))
                 parents.append(("param", leaf))
-        elif node.op in ("add", "sub", "mul"):
-            walk(node.args[0]); walk(node.args[1])
-        elif node.op in ("shr", "mask", "clip"):
-            walk(node.args[0])
+            return
+        for arg in node.args:
+            if isinstance(arg, PExpr):
+                walk(arg)
 
     for root in roots:
         walk(root)
     return parents
+
+
+def _wexpr_taps(root):
+    """Window positions a windowed expression reads."""
+    from .ir import PExpr
+
+    taps = set()
+
+    def walk(node):
+        if node.op == "tap":
+            taps.add((node.args[0], node.args[1]))
+        for arg in node.args:
+            if isinstance(arg, PExpr):
+                walk(arg)
+
+    walk(root)
+    return taps
 
 
 def _generate_expr_stack(stack, module_name) -> Core:
@@ -762,6 +805,27 @@ def _generate_expr_stack(stack, module_name) -> Core:
         if node.op == "acc":
             expr = ("$signed(in_data)" if image.signed
                     else "$signed({1'b0, in_data})")
+        elif node.op == "tap":
+            r, c, shift, fld = node.args
+            if (r, c) != (0, 0):
+                raise NotImplementedError(
+                    "a window tap in a pointwise datapath: this model has "
+                    "no line buffers; pad the image and use the windowed "
+                    "emitters")
+            base = ("in_data" if fld is None
+                    else f"in_data[{shift + fld - 1}:{shift}]")
+            expr = (f"$signed({base})" if image.signed and fld is None
+                    else f"$signed({{1'b0, {base}}})")
+        elif node.op == "abs":
+            inner = emit(node.args[0])
+            expr = f"({inner} < 0) ? -{inner} : {inner}"
+        elif node.op == "lt":
+            expr = (f"({emit(node.args[0])} < {emit(node.args[1])}) "
+                    "? 2'sd1 : 2'sd0")
+        elif node.op == "sel":
+            cond = emit(node.args[0])
+            expr = (f"({cond} != 0) ? {emit(node.args[1])} : "
+                    f"{emit(node.args[2])}")
         elif node.op == "const":
             emitted[key] = str(node.args[0])
             return emitted[key]
@@ -1396,9 +1460,13 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     image = channels[0].image
 
     # Every channel-canvas must partition the image with the SAME phase
-    # structure: one position select serves all of them.
+    # structure: one position select serves all of them. A plain Traced
+    # channel is a BROADCAST: the same value at every site.
     per_channel, phase_key, rows0, cols0 = [], None, None, None
     for canvas in channels:
+        if type(canvas).__name__ != "PhaseCanvas":
+            per_channel.append([canvas])
+            continue
         rows, cols = canvas.validate()
         rows, cols = _phase_order(rows), _phase_order(cols)
         key = tuple(canvas._key(d) for d in (*rows, *cols))
@@ -1409,13 +1477,18 @@ def _generate_phase_stencil(stack, module_name) -> Core:
                 "np.stack channels use different phase descriptors; one "
                 "position select must serve every channel of a word")
         per_channel.append([canvas.plane(r, c) for r in rows for c in cols])
+    if rows0 is None:
+        raise ValueError("no phase canvas among the channels; a pointwise "
+                         "word is the expression-stack case")
 
     flat = [plane for planes in per_channel for plane in planes]
-    if any(isinstance(w, Param) for p in flat for w in p.taps.values()):
+    chains = [p for p in flat if p.expr is None]
+    exprs = [p for p in flat if p.expr is not None]
+    if any(isinstance(w, Param) for p in chains for w in p.taps.values()):
         raise NotImplementedError(
             "programmable tap coefficients under a phase select are out of "
             "scope; use constant kernels per plane")
-    for plane in flat:
+    for plane in chains:
         for op in plane.post:
             if op[0] in ("mulp", "addp"):
                 raise NotImplementedError(
@@ -1429,7 +1502,11 @@ def _generate_phase_stencil(stack, module_name) -> Core:
             "the phase planes disagree on padding; every plane must window "
             "one identically padded image")
     (pt, pb, pl, pr), mode = pads.pop(), modes.pop()
-    keys = set().union(*(set(p.taps) for p in flat))
+    keys = set().union(*(set(p.taps) for p in chains)) if chains else set()
+    for plane in exprs:
+        keys |= _wexpr_taps(plane.expr)
+    if not keys:
+        raise ValueError("empty window: no taps anywhere")
     if min(r for r, _ in keys) < 0 or min(c for _, c in keys) < 0:
         raise ValueError("stencil offsets must be >= 0 (slice from 0)")
     M = max(r for r, _ in keys)
@@ -1454,7 +1531,7 @@ def _generate_phase_stencil(stack, module_name) -> Core:
         in_lo, in_hi = 0, (1 << in_bits) - 1
     signed = image.signed or any(
         p.spatial_signed or _range_bits(*_acc_range(p.taps, in_lo, in_hi))[1]
-        for p in flat)
+        for p in chains) or any(p.expr.lo < 0 for p in exprs)
     sgn = "signed " if signed else ""
     rows_used = sorted({r for r, _ in keys})
     realH, realW = image.height, image.width
@@ -1465,6 +1542,14 @@ def _generate_phase_stencil(stack, module_name) -> Core:
                 n for n, *_ in params}:
             params.append((desc.param.name, 1, False, desc.param.default,
                            desc.param.description))
+    for kind, declared in _walk_expr_params([p.expr for p in exprs]):
+        if kind != "param":
+            raise NotImplementedError(
+                "register-array gathers inside a windowed expression are "
+                "out of scope in this version")
+        if declared.name not in {n for n, *_ in params}:
+            params.append((declared.name, declared.bits, declared.signed,
+                           declared.default, declared.description))
 
     vrow_lo = pb if v_edge else M
     hcol_lo = pr if h_edge else N
@@ -1564,6 +1649,71 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     a(f"    wire sel_col = o_col[0]{f' ^ {col_x}' if col_x else ''};")
     a("")
 
+    # One wire namespace for every windowed expression in the module, so a
+    # gradient shared between planes -- or between CHANNELS -- is computed
+    # once, whatever plane the id-identical node appears in.
+    wemitted = {}
+    wcounter = [0]
+
+    def wwidth(node):
+        negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
+        return max(node.hi.bit_length(), negative) + 1
+
+    def wemit(node):
+        key = id(node)
+        if key in wemitted:
+            return wemitted[key]
+        w = wwidth(node)
+        if node.op == "const":
+            wemitted[key] = str(node.args[0])
+            return wemitted[key]
+        if node.op == "tap":
+            r, c, shift, field = node.args
+            base = pixel(r, c)
+            if field is not None:
+                base = f"{base}[{shift + field - 1}:{shift}]"
+            expr = (f"$signed({base})" if image.signed and field is None
+                    else f"$signed({{1'b0, {base}}})")
+        elif node.op == "param":
+            leaf = node.args[0]
+            expr = (f"$signed(param_{leaf.name})" if leaf.signed
+                    else f"$signed({{1'b0, param_{leaf.name}}})")
+        elif node.op in ("add", "sub", "mul"):
+            op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
+            expr = f"{wemit(node.args[0])} {op} {wemit(node.args[1])}"
+        elif node.op == "shr":
+            expr = f"{wemit(node.args[0])} >>> {node.args[1]}"
+        elif node.op == "mask":
+            expr = f"$signed({{1'b0, {wemit(node.args[0])}[{node.args[1]-1}:0]}})"
+        elif node.op == "clip":
+            source, lo, hi = node.args
+            inner = wemit(source)
+            expr = (f"({inner} > {hi}) ? {hi} : "
+                    f"(({inner} < {lo}) ? {lo} : {inner})")
+        elif node.op == "abs":
+            inner = wemit(node.args[0])
+            expr = f"({inner} < 0) ? -{inner} : {inner}"
+        elif node.op == "lt":
+            expr = (f"({wemit(node.args[0])} < {wemit(node.args[1])}) "
+                    "? 2'sd1 : 2'sd0")
+        elif node.op == "sel":
+            cond = wemit(node.args[0])
+            yes, no = wemit(node.args[1]), wemit(node.args[2])
+            expr = f"({cond} != 0) ? {yes} : {no}"
+        elif node.op == "acc":
+            raise NotImplementedError(
+                "a pointwise value (acc leaf) inside a windowed expression: "
+                "derive everything from the padded image so it has a window "
+                "position")
+        else:
+            raise NotImplementedError(
+                f"expression op {node.op!r} in a windowed plane")
+        name = f"x{wcounter[0]}"
+        wcounter[0] += 1
+        a(f"    wire signed [{w-1}:0] {name} = {expr};")
+        wemitted[key] = name
+        return name
+
     # per-plane tap combinations, then one positional mux per channel
     chan_wires = []
     single = len(channels) == 1
@@ -1571,6 +1721,16 @@ def _generate_phase_stencil(stack, module_name) -> Core:
         results = []
         value_lo, value_hi = 0, 0
         for bi, plane in enumerate(planes):
+            if plane.expr is not None or plane.lane is not None:
+                # Lane-tagged chains lift too: field extraction happens per
+                # tap, never on the word's weighted sum.
+                root = plane.expr if plane.expr is not None \
+                    else plane._as_wexpr()
+                res = wemit(root)
+                results.append((res, wwidth(root), root.lo < 0))
+                value_lo = min(value_lo, root.lo)
+                value_hi = max(value_hi, root.hi)
+                continue
             prefix = f"c{ci}p{bi}_"
             acc_lo, acc_hi = _acc_range(plane.taps, in_lo, in_hi)
             acc_bits = _range_bits_as(acc_lo, acc_hi, signed)
@@ -1591,25 +1751,29 @@ def _generate_phase_stencil(stack, module_name) -> Core:
                 f"{value_lo}; clip channels to their unsigned range first")
         ext = [_extend(res, bits, cb, sg) for res, bits, sg in results]
         kind = "signed " if csg else ""
-        a(f"    reg {kind}[{cb-1}:0] chan{ci};")
-        a("    always @(*) begin")
-        a("        case ({sel_row, sel_col})")
-        for code, expr in zip(("2'b00", "2'b01", "2'b10"), ext[:3]):
-            a(f"            {code}:   chan{ci} = {expr};")
-        a(f"            default: chan{ci} = {ext[3]};")
-        a("        endcase")
-        a("    end")
+        if len(results) == 1:
+            # A broadcast channel: the same value at every site, no mux.
+            a(f"    wire {kind}[{cb-1}:0] chan{ci} = {ext[0]};")
+        else:
+            a(f"    reg {kind}[{cb-1}:0] chan{ci};")
+            a("    always @(*) begin")
+            a("        case ({sel_row, sel_col})")
+            for code, expr in zip(("2'b00", "2'b01", "2'b10"), ext[:3]):
+                a(f"            {code}:   chan{ci} = {expr};")
+            a(f"            default: chan{ci} = {ext[3]};")
+            a("        endcase")
+            a("    end")
         chan_wires.append((f"chan{ci}", cb, csg, value_hi))
 
     if single:
         result, out_bits, out_signed = chan_wires[0][0], chan_wires[0][1], chan_wires[0][2]
     else:
         # channel 0 in the low bits, each field as wide as the input's
-        # samples -- the packing is a property of the word, stated here
-        # once. Field capacity is judged by VALUE range: a value in
-        # [0, top] packs from a wider signed carrier by taking its low
-        # field bits.
-        field = in_bits
+        # SAMPLES (the word width over its channel count) -- the packing is
+        # a property of the word, stated here once. Field capacity is
+        # judged by VALUE range: a value in [0, top] packs from a wider
+        # signed carrier by taking its low field bits.
+        field = in_bits // max(1, getattr(stack, "in_channels", 1) or 1)
         for name, cb, _, vhi in chan_wires:
             if vhi.bit_length() > field:
                 raise NotImplementedError(
@@ -1679,7 +1843,8 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     interface = _interface(in_bits, out_bits, out_signed, params)
     if not single:
         interface["output"]["channels"] = len(channels)
-        interface["output"]["field_bits"] = in_bits
+        interface["output"]["field_bits"] = in_bits // max(
+            1, getattr(stack, "in_channels", 1) or 1)
     return Core({
         "verilog": verilog,
         "interface": interface,
