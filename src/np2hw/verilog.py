@@ -1369,6 +1369,27 @@ def _generate_mux(mux, module_name) -> dict:
 # set of line buffers.
 # --------------------------------------------------------------------------- #
 
+def _post_range(lo, hi, post):
+    """Exact value range after a chain of CONSTANT post ops.
+
+    The stencil-phase emitter packs channels by VALUE range, not carrier
+    signedness: an int32-typed centre tap is still [0, top] and packs fine.
+    Register operands are refused upstream, so every op here is exact."""
+    for op in post:
+        if op[0] == "shr":
+            lo, hi = lo >> op[1], hi >> op[1]
+        elif op[0] == "mulc":
+            corners = (lo * op[1], hi * op[1])
+            lo, hi = min(corners), max(corners)
+        elif op[0] == "clip":
+            lo, hi = max(lo, op[1]), min(hi, op[2])
+            if lo > hi:
+                lo = hi = op[1]
+        elif op[0] == "trunc" and op[1] < max(hi.bit_length(), 1):
+            lo, hi = 0, (1 << op[1]) - 1     # a narrowing trunc re-ranges
+    return lo, hi
+
+
 def _generate_phase_stencil(stack, module_name) -> Core:
     channels = (stack.channels if type(stack).__name__ == "ChannelStack"
                 else [stack])
@@ -1548,20 +1569,26 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     single = len(channels) == 1
     for ci, planes in enumerate(per_channel):
         results = []
+        value_lo, value_hi = 0, 0
         for bi, plane in enumerate(planes):
             prefix = f"c{ci}p{bi}_"
-            acc_bits = _range_bits_as(*_acc_range(plane.taps, in_lo, in_hi),
-                                      signed)
+            acc_lo, acc_hi = _acc_range(plane.taps, in_lo, in_hi)
+            acc_bits = _range_bits_as(acc_lo, acc_hi, signed)
             terms = [term(r, c, w) for (r, c), w in sorted(plane.taps.items())]
             a(f"    wire {sgn}[{acc_bits-1}:0] {prefix}acc = {' + '.join(terms)};")
             results.append(_emit_post(a, list(plane.post), acc_bits, signed,
                                       prefix))
+            plane_lo, plane_hi = _post_range(acc_lo, acc_hi, plane.post)
+            value_lo = min(value_lo, plane_lo)
+            value_hi = max(value_hi, plane_hi)
         cb = max(bits for _, bits, _ in results)
-        csg = any(sg for _, _, sg in results)
+        # Packability is a fact about the VALUE range, not the carrier:
+        # a signed accumulator whose every plane lands in [0, hi] packs.
+        csg = any(sg for _, _, sg in results) and value_lo < 0
         if csg and not single:
             raise NotImplementedError(
-                "np.stack cannot pack a signed channel into the word; clip "
-                "channels to their unsigned range first")
+                "np.stack cannot pack a channel whose value range reaches "
+                f"{value_lo}; clip channels to their unsigned range first")
         ext = [_extend(res, bits, cb, sg) for res, bits, sg in results]
         kind = "signed " if csg else ""
         a(f"    reg {kind}[{cb-1}:0] chan{ci};")
@@ -1572,23 +1599,28 @@ def _generate_phase_stencil(stack, module_name) -> Core:
         a(f"            default: chan{ci} = {ext[3]};")
         a("        endcase")
         a("    end")
-        chan_wires.append((f"chan{ci}", cb, csg))
+        chan_wires.append((f"chan{ci}", cb, csg, value_hi))
 
     if single:
         result, out_bits, out_signed = chan_wires[0][0], chan_wires[0][1], chan_wires[0][2]
     else:
         # channel 0 in the low bits, each field as wide as the input's
-        # samples -- the packing is a property of the word, stated here once.
+        # samples -- the packing is a property of the word, stated here
+        # once. Field capacity is judged by VALUE range: a value in
+        # [0, top] packs from a wider signed carrier by taking its low
+        # field bits.
         field = in_bits
-        for name, cb, _ in chan_wires:
-            if cb > field:
+        for name, cb, _, vhi in chan_wires:
+            if vhi.bit_length() > field:
                 raise NotImplementedError(
-                    f"channel {name} needs {cb} bits but the word's fields "
-                    f"are {field} (the input sample width); clip it first")
+                    f"channel {name} can reach {vhi}, which does not fit a "
+                    f"{field}-bit field (the input sample width); clip it "
+                    "first")
         out_bits = field * len(chan_wires)
         out_signed = False
-        parts = [_extend(name, cb, field, False)
-                 for name, cb, _ in reversed(chan_wires)]
+        parts = [(f"{name}[{field-1}:0]" if cb >= field
+                  else f"{{{field - cb}'b0, {name}}}")
+                 for name, cb, _, _ in reversed(chan_wires)]
         a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
         result = "word"
 
