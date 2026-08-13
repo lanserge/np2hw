@@ -1099,8 +1099,23 @@ def _generate_phase(canvas, module_name) -> dict:
     })
 
 
+def _timing_roots(out_line):
+    """PExpr roots this result kind exposes -- the pointwise stages the
+    depth model covers in v1. Spatial stencils get shapes of their own
+    later; their stages are shallow MACs today."""
+    from .ir import ExprLine
+    if isinstance(out_line, ExprLine):
+        yield out_line.root, "expr"
+    elif type(out_line).__name__ == "ChannelStack" \
+            and getattr(out_line, "kind", None) == "expr":
+        # expr channels are traced lanes; their DAG root is `.expr`,
+        # exactly what _generate_expr_stack emits from
+        for i, channel in enumerate(out_line.channels):
+            yield channel.expr, f"channel{i}"
+
+
 def generate(out_line, module_name="np2hw_top", framing="height",
-             max_width=None) -> dict:
+             max_width=None, clk_ns=None, label=None) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
     framing='eof': height-agnostic -- an `in_eof` input (the sensor's frame-end /
     VSYNC, pulsed on the last input pixel) triggers the bottom flush, and output
@@ -1112,6 +1127,13 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     (wrap / EOL / right-edge). So one synthesized core processes any line length
     <= MAX_WIDTH, set live. Combine with framing='eof' for full dynamic
     resolution (a reprogrammable sensor: active_width register + VSYNC height)."""
+    if clk_ns is not None:
+        # Timing is a TRACED property: refuse a stage the clock cannot
+        # hold at generation time, with the stage named -- not after
+        # place-and-route, with a net named.
+        from .timing import check
+        for root, where in _timing_roots(out_line):
+            check(root, clk_ns, label=f"{label or module_name}.{where}")
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
         return _generate_mux(out_line, module_name)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
