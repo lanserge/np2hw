@@ -509,7 +509,7 @@ class Traced:
     def __rshift__(self, o):
         if not isinstance(o, (int, np.integer)) or o < 0:
             return NotImplemented
-        node = self._as_expr()
+        node = self._any_expr()
         return self._expr_derive(PExpr("shr", (node, int(o)),
                                        node.lo >> int(o), node.hi >> int(o)))
 
@@ -521,7 +521,7 @@ class Traced:
             raise NotImplementedError(
                 f"& {mask:#x}: only low-bit masks (2**k - 1) are supported -- "
                 "that is a bit-slice in hardware; a general AND is not")
-        node = self._as_expr()
+        node = self._any_expr()
         return self._expr_derive(PExpr("mask", (node, mask.bit_length()),
                                        0, mask))
 
