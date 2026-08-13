@@ -11,3 +11,4 @@ build/
 obj_dir/
 testbench.sv
 *.egg-info/
+.DS_Store
