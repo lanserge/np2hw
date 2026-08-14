@@ -43,12 +43,13 @@ construction would fail first:
 Run:  python examples/timing_split.py   (needs iverilog)
 """
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from _harness import check, check_bp
+from _harness import BUILD, check, check_bp
 from np2hw import Image2D, generate, to_ir
 from np2hw.ir import Param
 
@@ -128,6 +129,71 @@ def demosaic(img, py, px):
         g[rows::2, cols::2] = gt[rows::2, cols::2]
         b[rows::2, cols::2] = bt[rows::2, cols::2]
     return np.stack([r, g, b], axis=-1).astype(np.uint8)
+
+
+def _two_frames(meta, W, H, frames, values):
+    """Drive the core through consecutive frames, in_sof on each first
+    pixel, edge-feed pacing; return the collected output words."""
+    mod = meta["module"]
+    hb, vd = meta["hblank"], meta["vdrain"]
+    L = []
+    a = L.append
+    a("`timescale 1ns/1ps")
+    a("module tb;")
+    a("    reg clk = 0, rst = 1, in_valid = 0, in_sof = 0;")
+    a(f"    reg [{meta['in_bits']-1}:0] in_data;")
+    for name, bits in meta["params"]:
+        a(f"    reg [{bits-1}:0] param_{name};")
+    a("    wire out_valid, in_ready, out_sof, out_eol, out_last;")
+    a(f"    wire [{meta['out_bits']-1}:0] out_data;")
+    a("    integer i, fh; integer r, c, fr;")
+    a(f"    reg [{meta['in_bits']-1}:0] img [0:{len(frames)*W*H-1}];")
+    a("    always #5 clk = ~clk;")
+    a(f"    {mod} #(.WIDTH({W}), .HEIGHT({H})) dut (")
+    a("        .clk(clk), .rst(rst), .in_valid(in_valid),")
+    a("        .in_ready(in_ready), .in_sof(in_sof), .in_data(in_data),")
+    for name, _ in meta["params"]:
+        a(f"        .param_{name}(param_{name}),")
+    a("        .out_valid(out_valid), .out_ready(1'b1), .out_sof(out_sof),")
+    a("        .out_eol(out_eol), .out_last(out_last), "
+      ".out_data(out_data));")
+    a("    always @(posedge clk) if (out_valid) "
+      "$fdisplay(fh, \"%0d\", out_data);")
+    a("    initial begin")
+    a("        $readmemh(\"in.hex\", img);")
+    a("        fh = $fopen(\"out.txt\", \"w\");")
+    for name, _ in meta["params"]:
+        a(f"        param_{name} = {int(values.get(name, 0))};")
+    a("        @(negedge clk); rst = 0;")
+    a(f"        for (fr = 0; fr < {len(frames)}; fr = fr + 1) begin")
+    a(f"            for (r = 0; r < {H}; r = r + 1) begin")
+    a(f"                for (c = 0; c < {W}; c = c + 1) begin")
+    a(f"                    in_data = img[fr*{W*H} + r*{W} + c];")
+    a("                    in_valid = 1;")
+    a("                    in_sof = (r == 0) && (c == 0);")
+    a("                    @(negedge clk);")
+    a("                end")
+    a("                in_valid = 0; in_sof = 0;")
+    a(f"                for (c = 0; c < {hb}; c = c + 1) @(negedge clk);")
+    a("            end")
+    a(f"            for (c = 0; c < {vd}; c = c + 1) @(negedge clk);")
+    a("        end")
+    a("        $fclose(fh); $finish;")
+    a("    end")
+    a("endmodule")
+
+    with open(os.path.join(BUILD, f"{mod}.v"), "w") as fh:
+        fh.write(meta["verilog"] + "\n")
+    with open(os.path.join(BUILD, "tb2f.v"), "w") as fh:
+        fh.write("\n".join(L) + "\n")
+    flat = np.concatenate([f.ravel() for f in frames])
+    with open(os.path.join(BUILD, "in.hex"), "w") as fh:
+        fh.write("\n".join(f"{int(p):02x}" for p in flat) + "\n")
+    subprocess.run(["iverilog", "-o", "sim2f.vvp", f"{mod}.v", "tb2f.v"],
+                   check=True, cwd=BUILD, capture_output=True)
+    subprocess.run(["vvp", "sim2f.vvp"], check=True, cwd=BUILD,
+                   capture_output=True)
+    return np.loadtxt(os.path.join(BUILD, "out.txt"), dtype=np.int64)
 
 
 def main():
@@ -214,6 +280,21 @@ def main():
         refused, named = True, "window read" in str(error)
     result("stencil: below the window read's own depth refuses, named",
            refused and named)
+
+    # Two frames, back to back, in_sof pulsed on each first pixel: the
+    # split stencil's registered line-buffer write leaves one write
+    # pending ACROSS the frame boundary, and this is where it would
+    # corrupt. Both frames must be bit-exact, independently.
+    A2 = rng.integers(0, (1 << SBITS), (SH, SW)).astype(np.uint8)
+    two = _two_frames(meta_s, SW, SH, [As, A2], {"py": 1, "px": 0})
+    exp = [np.stack([c.astype(np.int64) & 0xFF for c in
+                     np.moveaxis(demosaic(f, 1, 0), -1, 0)], 0) for f in
+           (As, A2)]
+    packed = [sum(e[c] << (8 * c) for c in range(3)).ravel() for e in exp]
+    ok = (two is not None and two.size == 2 * SH * SW
+          and np.array_equal(two[:SH * SW], packed[0])
+          and np.array_equal(two[SH * SW:], packed[1]))
+    result("stencil: two frames across a SOF, both bit-exact", ok)
 
     wbp = [Param("py", bits=1, description="Row parity"),
            Param("px", bits=1, description="Column parity"),

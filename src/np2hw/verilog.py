@@ -1838,19 +1838,34 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             a(f"    reg [{in_bits-1}:0] q_px_{r}_{d};")
         a("    reg q_selr, q_selc;")
         a("    reg q_v, q_sof, q_eol, q_last;")
+        a("    // The line-buffer WRITE is registered too: its data is a")
+        a("    // memory read away, and read-mux-write in one beat is the")
+        a("    // other half of the window cone. One beat late is safe by")
+        a("    // schedule: a column's next read is a full line away, and")
+        a("    // a frame boundary's pending write lands on a cell row 0")
+        a("    // rewrites before its first read.")
+        a("    reg [31:0] wr_col;")
+        a("    reg wr_en;")
+        for k in range(1, M + 1):
+            a(f"    reg [{in_bits-1}:0] wr_d{k};")
         a("    always @(posedge clk) begin")
         a("        if (rst) begin")
         a("            q_v <= 1'b0; q_sof <= 1'b0; "
           "q_eol <= 1'b0; q_last <= 1'b0;")
+        a("            wr_en <= 1'b0;")
         a("        end else if (!stall) begin")
         a(f"            q_v <= en && {okv};")
         a(f"            q_sof <= en && {sof};")
         a(f"            q_eol <= en && {eol};")
         a(f"            q_last <= en && {last};")
+        a("            wr_en <= en && (!hf || in_sof);")
         a("            if (en) begin")
         for r, d in qpairs:
             a(f"                q_px_{r}_{d} <= {pixel(r, N - d)};")
         a("                q_selr <= sel_row; q_selc <= sel_col;")
+        a("                wr_col <= ecol;")
+        for k in range(1, M + 1):
+            a(f"                wr_d{k} <= vbc ? chain0 : chain{k-1};")
         a("            end")
         a("        end")
         a("    end")
@@ -2005,18 +2020,25 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     a("            if (!stall) begin")
     if stages == 2:
         # the output registers read the snapshot's flags every advancing
-        # beat: bubbles carry q_v = 0, so no en-gate here
+        # beat: bubbles carry q_v = 0, so no en-gate here -- and the
+        # registered line-buffer write fires on its own captured enable
         a("            out_valid <= q_v; out_sof <= q_sof;")
         a("            out_eol <= q_eol; out_last <= q_last;")
         a(f"            out_data <= {result};")
+        a("            if (wr_en) begin")
+        for k in range(1, M + 1):
+            a(f"                mem{k}[wr_col] <= wr_d{k};")
+        a("            end")
     a("            if (en) begin")
     if stages == 1:
         a(f"                out_valid <= {okv};")
         a(f"                out_sof <= {sof}; out_eol <= {eol}; "
           f"out_last <= {last};")
         a(f"                out_data <= {result};")
-    for k in range(1, M + 1):
-        a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : chain{k-1};")
+    if stages == 1:
+        for k in range(1, M + 1):
+            a(f"                if (!hf || in_sof) mem{k}[ecol] <= "
+              f"vbc ? chain0 : chain{k-1};")
     for r in rows_used:
         for d in range(N, 0, -1):
             src = f"cur{r}" if d == 1 else f"row{r}_d{d-1}"
