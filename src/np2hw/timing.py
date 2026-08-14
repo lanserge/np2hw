@@ -17,10 +17,14 @@ register overhead) measured from real routed designs. The first
 curve's gather+multiply+add at 11.4 ns routed -- and is deliberately
 conservative; refine it from CI sweeps, never per block.
 
-What this is NOT, yet: automatic pipelining. When a stage exceeds the
-budget, `check()` names it and the depth arithmetic says where the
-cut belongs; inserting the register mechanically is the follow-on --
-the streams are elastic, so added latency is free by construction.
+The same arithmetic drives automatic pipelining: `assign_stages()`
+walks the DAG in dependency order and starts a new pipeline stage the
+moment the accumulated path would exceed the budget, so the emitters
+can place the registers mechanically. The streams are elastic, so the
+added latency is free by construction; the values are untouched, so
+the twin stays bit-exact by construction. The one thing a register
+cannot fix is a single operation deeper than the clock -- that is the
+floor, and it refuses with the operation named.
 """
 from __future__ import annotations
 
@@ -90,46 +94,114 @@ class Depth:
 
 
 def expr_depth(node) -> Depth:
-    """Worst-path structural depth of a PExpr DAG.
-
-    Leaves cost nothing (they are registers, constants, or the wires
-    of a register array); each interior node adds what its hardware
-    is: adds and subtracts one level plus a carry as wide as the
-    result, a multiply one DSP, a clip a compare-and-select, a mask
-    or constant shift nothing at all, a gather the mux tree its table
-    size dictates.
-    """
+    """Worst-path structural depth of a PExpr DAG: node_cost summed
+    along the worst path, sibling branches compared by nanosecond
+    total. One cost table (node_cost) owns every op's hardware shape;
+    this walk and the stage cutter both read it."""
     if not isinstance(node, PExpr):
         return Depth()
+    below = Depth()
+    for a in node.args:
+        if isinstance(a, PExpr):
+            below = below.worst(expr_depth(a))
+    return below + node_cost(node)
+
+
+def mux_levels(size: int) -> int:
+    """LUT6 select-tree depth for a size-entry read -- the law behind a
+    gather's register array and a line buffer's column read alike."""
+    return max(1, (_clog2(max(size, 2)) + 1) // 2)
+
+
+def node_cost(node) -> Depth:
+    """The hardware shape of ONE node: what it adds to any path through
+    it. Leaves cost nothing (they are registers, constants, or the
+    wires of a register array); adds and subtracts one level plus a
+    carry as wide as the result, a multiply one DSP, a clip a
+    compare-and-select, a mask or constant shift nothing at all, a
+    gather the mux tree its table size dictates."""
     if node.op in ("acc", "const", "param", "tap"):
-        # registers, constants, and window taps: wires into the stage
         return Depth()
     if node.op == "gather":
-        parent, index = node.args
-        size = int(parent.shape[0])
-        mux_levels = max(1, (_clog2(max(size, 2)) + 1) // 2)  # LUT6 = 4:1
-        return expr_depth(index) + Depth(levels=mux_levels)
-    args = [a for a in node.args if isinstance(a, PExpr)]
-    below = Depth()
-    for a in args:
-        below = below.worst(expr_depth(a))
+        parent, _index = node.args
+        return Depth(levels=mux_levels(int(parent.shape[0])))
     if node.op in ("add", "sub"):
-        return below + Depth(levels=1, carry_bits=_bits(node))
+        return Depth(levels=1, carry_bits=_bits(node))
     if node.op == "mul":
-        return below + Depth(dsps=1)
+        return Depth(dsps=1)
     if node.op == "clip":
-        return below + Depth(levels=2, carry_bits=_bits(node))
+        return Depth(levels=2, carry_bits=_bits(node))
     if node.op in ("shr", "mask"):
-        return below                       # wiring, when the amount is fixed
+        return Depth()
     if node.op == "lt":
-        return below + Depth(levels=1, carry_bits=_bits(node.args[0])
-                             if isinstance(node.args[0], PExpr) else 0)
+        return Depth(levels=1, carry_bits=_bits(node.args[0])
+                     if isinstance(node.args[0], PExpr) else 0)
     if node.op == "abs":
-        return below + Depth(levels=1, carry_bits=_bits(node))
+        return Depth(levels=1, carry_bits=_bits(node))
     if node.op == "sel":
-        return below + Depth(levels=1)     # the compare rode in through args
+        return Depth(levels=1)
     raise ValueError(f"no depth rule for PExpr op {node.op!r} -- a new op "
                      "needs a hardware shape here before it ships")
+
+
+# param and const leaves FLOAT: a register port is stable across a
+# pixel's flight through the pipeline and a literal is wiring, so both
+# feed any stage directly and never ride a delay line. acc and tap are
+# PINNED to stage 0 -- they read the input word of THIS pixel.
+FLOATING = ("const", "param")
+
+
+def assign_stages(roots, clk_ns: float, family: str = "7series",
+                  label: str = "stage"):
+    """Cut a PExpr DAG into pipeline stages that each fit the budget.
+
+    Walks in dependency order with ONE memo shared across all roots
+    (lanes sharing subexpressions must agree on where the registers
+    go). A node lands in the latest stage any of its arguments lives
+    in; when the accumulated path there would exceed the budget, the
+    node starts the next stage instead -- its arguments arrive through
+    the boundary registers, which is exactly the greedy cut the depth
+    arithmetic recommends, and it falls naturally around the DSPs.
+
+    Returns ({id(node): stage}, n_stages). Raises when one operation
+    ALONE exceeds the budget: that is the floor -- a pipeline register
+    cannot land inside one operation.
+    """
+    fam = FAMILIES[family]
+    stage_of = {}
+    depth_in = {}
+
+    def visit(node):
+        key = id(node)
+        if key in stage_of:
+            return
+        args = [a for a in node.args if isinstance(a, PExpr)]
+        for a in args:
+            visit(a)
+        cost = node_cost(node)
+        if cost.ns(fam) > clk_ns:
+            raise ValueError(
+                f"{label}: operation {node.op!r} alone estimates "
+                f"{cost.ns(fam):.1f} ns against the {clk_ns:.1f} ns budget "
+                f"on {fam.name} -- a pipeline register cannot land inside "
+                "one operation. Slow the clock or restructure the model.")
+        staged = [a for a in args if a.op not in FLOATING]
+        s = max((stage_of[id(a)] for a in staged), default=0)
+        below = Depth()
+        for a in staged:
+            if stage_of[id(a)] == s:
+                below = below.worst(depth_in[id(a)])
+        d = below + cost
+        if d.ns(fam) > clk_ns:
+            s += 1            # cut here: every argument arrives registered
+            d = cost
+        stage_of[key] = s
+        depth_in[key] = d
+
+    for root in roots:
+        visit(root)
+    n_stages = max((stage_of[id(root)] for root in roots), default=0) + 1
+    return stage_of, n_stages
 
 
 def check(root, clk_ns: float, family: str = "7series",

@@ -32,7 +32,7 @@ from dataclasses import dataclass, replace as dc_replace
 import numpy as np
 
 from .ir import (SourceLine, HProcLine, VProcLine, Image2D, Const, Param,
-                 ExprLine, PhaseRef)
+                 ExprLine, PExpr, PhaseRef)
 from .regmap import AddrMap, Reg
 
 
@@ -266,19 +266,70 @@ def _datapath_signed(spatial_line, range_signed, params):
     return declared_signed or range_signed or any(ps for _, _, ps, _, _ in params)
 
 
-def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None):
+def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
+               clk_ns=None, base=None, no_cut_before=(), staging=None,
+               label="chain"):
     """Emit the trailing pointwise stages; return (result_wire, bits, signed).
 
     `emit(line)` appends one Verilog line. `prefix` namespaces the wires so
     multiple datapaths (mux branches) don't collide. `signal` maps a Param name
     to the signal that carries it, defaulting to the input port `param_<name>`;
     a phase-sliced datapath passes a mapping so its operands come from muxes
-    rather than straight from ports."""
+    rather than straight from ports.
+
+    With clk_ns, the chain is CUT where the traced depth would exceed
+    the budget: the running value is registered (!stall-enabled) and
+    the rest of the chain reads the register -- the linear-chain twin
+    of the DAG cutter. `base` is the depth already spent in front of
+    the chain (tap adds, a coefficient mux); ops in `no_cut_before`
+    (position-muxed operands, timed at ingest) refuse a cut in front
+    of them; each cut appends to `staging`, whose length is the number
+    of boundaries the caller must delay its framing by."""
     if signal is None:
         def signal(name):
             return f"param_{name}"
+    budget_fam = None
+    if clk_ns is not None:
+        from .timing import Depth, FAMILIES
+        budget_fam = FAMILIES["7series"]
+        spent = base if base is not None else Depth()
+
+        def op_cost(op, bits):
+            if op[0] in ("shr", "trunc"):
+                return Depth()
+            if op[0] == "clip":
+                return Depth(levels=2, carry_bits=bits)
+            if op[0] == "addp":
+                return Depth(levels=1, carry_bits=bits)
+            return Depth(dsps=1)                 # mulc / mulp
     prev, cur_bits, cur_signed = f"{prefix}acc", acc_bits, acc_signed
     for i, op in enumerate(post):
+        if budget_fam is not None:
+            cost = op_cost(op, cur_bits)
+            if cost.ns(budget_fam) > clk_ns:
+                raise ValueError(
+                    f"{label}: operation {op[0]!r} alone estimates "
+                    f"{cost.ns(budget_fam):.1f} ns against the {clk_ns:.1f} "
+                    f"ns budget -- a register cannot land inside one "
+                    "operation. Slow the clock or restructure the model.")
+            if (spent + cost).ns(budget_fam) > clk_ns:
+                if i in no_cut_before:
+                    raise ValueError(
+                        f"{label}: the budget asks for a register in front "
+                        f"of {op[0]!r}, but its coefficient is selected by "
+                        "the pixel's position at ingest; this version cuts "
+                        "only after the position-muxed operations. Slow "
+                        "the clock or restructure the model.")
+                emit(f"    reg {'signed ' if cur_signed else ''}"
+                     f"[{cur_bits-1}:0] {prev}_q;")
+                emit(f"    always @(posedge clk) if (!stall) "
+                     f"{prev}_q <= {prev};")
+                prev = f"{prev}_q"
+                if staging is not None:
+                    staging.append(i)
+                spent = cost
+            else:
+                spent = spent + cost
         if op[0] == "shr":
             cur_bits = max(1, cur_bits - op[1])
             rhs = f"{prev} >>> {op[1]}" if cur_signed else f"{prev} >> {op[1]}"
@@ -470,11 +521,217 @@ def _common_name(names):
 
 
 
-def _generate_expr(line, module_name) -> dict:
+def _emit_expr_dag(a, roots, image, plan=None):
+    """Emit the shared wire namespace of one or more expression roots,
+    optionally cut into pipeline stages.
+
+    Without a plan this is the classic single-stage combinational DAG.
+    With one -- (stage_of, n_stages) from timing.assign_stages -- each
+    node's wire is emitted in its stage's group, and any value read
+    across a boundary rides a !stall-enabled delay register per stage
+    crossed, so every pixel's operands are always from the same input
+    word: retiming, never resampling. param and const leaves float
+    (a register port is stable across a pixel's flight, a literal is
+    wiring); acc and tap pin to stage 0 with the input word.
+
+    Returns (per-root references as read at the FINAL stage, per-root
+    widths, node count).
+    """
+    stage_of, n_stages = plan if plan else ({}, 1)
+    final = n_stages - 1
+    emitted = {}                 # id(node) -> (text, stage-or-None, width)
+    counter = [0]
+    bucket = [[] for _ in range(n_stages)]
+    pipes = {}                   # wire name -> [width, max stages crossed]
+
+    def width(node):
+        negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
+        return max(node.hi.bit_length(), negative) + 1     # +1: signed carrier
+
+    def ref(node, use_stage):
+        text, born, w = emitted[id(node)]
+        if born is None:                       # const literal / floating param
+            return text
+        delta = use_stage - born
+        if delta <= 0:
+            return text
+        have = pipes.setdefault(text, [w, 0])
+        have[1] = max(have[1], delta)
+        return f"{text}_q{delta}"
+
+    def emit(node):
+        key = id(node)
+        if key in emitted:
+            return
+        for child in node.args:
+            if isinstance(child, PExpr):
+                emit(child)
+        s = stage_of.get(key, 0)
+        w = width(node)
+        floating = False
+        if node.op == "acc":
+            expr = ("$signed(in_data)" if image.signed
+                    else "$signed({1'b0, in_data})")
+        elif node.op == "tap":
+            r, c, shift, fld = node.args
+            if (r, c) != (0, 0):
+                raise NotImplementedError(
+                    "a window tap in a pointwise datapath: this model has "
+                    "no line buffers; pad the image and use the windowed "
+                    "emitters")
+            base = ("in_data" if fld is None
+                    else f"in_data[{shift + fld - 1}:{shift}]")
+            expr = (f"$signed({base})" if image.signed and fld is None
+                    else f"$signed({{1'b0, {base}}})")
+        elif node.op == "abs":
+            inner = ref(node.args[0], s)
+            expr = f"({inner} < 0) ? -{inner} : {inner}"
+        elif node.op == "lt":
+            expr = (f"({ref(node.args[0], s)} < {ref(node.args[1], s)}) "
+                    "? 2'sd1 : 2'sd0")
+        elif node.op == "sel":
+            expr = (f"({ref(node.args[0], s)} != 0) ? "
+                    f"{ref(node.args[1], s)} : {ref(node.args[2], s)}")
+        elif node.op == "const":
+            emitted[key] = (str(node.args[0]), None, w)
+            return
+        elif node.op == "param":
+            leaf = node.args[0]
+            expr = (f"$signed(param_{leaf.name})" if leaf.signed
+                    else f"$signed({{1'b0, param_{leaf.name}}})")
+            floating = True
+        elif node.op == "gather":
+            parent, index = node.args
+            idx = ref(index, s)
+            kb = max(1, (parent.shape[0] - 1).bit_length())
+            read = f"{parent.name}_lut[{idx}[{kb-1}:0]]"
+            expr = (f"$signed({read})" if parent.signed
+                    else f"$signed({{1'b0, {read}}})")
+        elif node.op in ("add", "sub", "mul"):
+            op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
+            expr = f"{ref(node.args[0], s)} {op} {ref(node.args[1], s)}"
+        elif node.op == "shr":
+            expr = f"{ref(node.args[0], s)} >>> {node.args[1]}"
+        elif node.op == "mask":
+            expr = (f"$signed({{1'b0, "
+                    f"{ref(node.args[0], s)}[{node.args[1]-1}:0]}})")
+        elif node.op == "clip":
+            source, lo, hi = node.args
+            inner = ref(source, s)
+            expr = (f"({inner} > {hi}) ? {hi} : "
+                    f"(({inner} < {lo}) ? {lo} : {inner})")
+        else:
+            raise NotImplementedError(f"expression op {node.op!r}")
+        name = f"e{counter[0]}"
+        counter[0] += 1
+        bucket[s].append(f"    wire signed [{w-1}:0] {name} = {expr};")
+        emitted[key] = (name, None if floating else s, w)
+
+    for root in roots:
+        emit(root)
+    lanes = [ref(root, final) for root in roots]
+    widths = [width(root) for root in roots]
+
+    if pipes:
+        a("    // stage-boundary delay lines: one register per boundary a")
+        a("    // value crosses, advancing with the pipe (!stall), so every")
+        a("    // consumer sees operands from the same input word")
+        for name, (w, deep) in pipes.items():
+            regs = ", ".join(f"{name}_q{k}" for k in range(1, deep + 1))
+            a(f"    reg signed [{w-1}:0] {regs};")
+        a("")
+    for s in range(n_stages):
+        if n_stages > 1:
+            a(f"    // ---- pipeline stage {s} ----")
+        for line_text in bucket[s]:
+            a(line_text)
+    if pipes:
+        a("    always @(posedge clk) if (!stall) begin")
+        for name, (_w, deep) in pipes.items():
+            for k in range(1, deep + 1):
+                src = name if k == 1 else f"{name}_q{k-1}"
+                a(f"        {name}_q{k} <= {src};")
+        a("    end")
+    return lanes, widths, counter[0]
+
+
+def _emit_expr_framing(a, gate, plan, data_line):
+    """The registered framing of a pointwise core: counters at ingest,
+    flags riding delay lines beside the data, outputs at the far end.
+    Without a plan this is the classic one-register framing; with one,
+    the valid/sof/eol/last quartet is computed at stage 0 and shifted
+    n_stages-1 times, and the counters stay at ingest untouched."""
+    stages = (plan[1] if plan else 1) - 1
+    if stages == 0:
+        a("    always @(posedge clk) begin")
+        a("        if (rst) begin")
+        a("            col <= 0; row <= 0; out_valid <= 1'b0;")
+        a("            out_sof <= 1'b0; out_eol <= 1'b0; out_last <= 1'b0;")
+        a("        end else begin")
+        a("            if (!stall) begin")
+        a("            if (in_valid) begin")
+        a(f"                out_valid <= {gate};")
+        a(f"                out_sof <= ({gate}) && (erow == 0) && (ecol == 0);")
+        a(f"                out_eol <= ({gate}) && (ecol == WIDTH-1);")
+        a(f"                out_last <= ({gate}) && (erow == HEIGHT-1) && "
+          f"(ecol == WIDTH-1);")
+        a(f"                {data_line}")
+        a("                if (in_sof) begin col <= 1; row <= 0; end")
+        a("                else if (col == WIDTH-1) begin")
+        a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+        a("                end else col <= col + 1;")
+        a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
+        a("                out_eol <= 1'b0; out_last <= 1'b0; end")
+        a("            end")
+        a("        end")
+        a("    end")
+        return
+    names = [f"{f}_q{k}" for k in range(1, stages + 1)
+             for f in ("vld", "sof", "eol", "lst")]
+    clears = " ".join(n + " <= 1'b0;" for n in names)
+    a(f"    reg {', '.join(names)};")
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin")
+    a(f"            {clears}")
+    a("        end else if (!stall) begin")
+    a(f"            vld_q1 <= in_valid && ({gate});")
+    a(f"            sof_q1 <= in_valid && ({gate}) && (erow == 0) && "
+      f"(ecol == 0);")
+    a(f"            eol_q1 <= in_valid && ({gate}) && (ecol == WIDTH-1);")
+    a(f"            lst_q1 <= in_valid && ({gate}) && (erow == HEIGHT-1) && "
+      f"(ecol == WIDTH-1);")
+    for k in range(2, stages + 1):
+        a(f"            vld_q{k} <= vld_q{k-1}; sof_q{k} <= sof_q{k-1}; "
+          f"eol_q{k} <= eol_q{k-1}; lst_q{k} <= lst_q{k-1};")
+    a("        end")
+    a("    end")
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin col <= 0; row <= 0; end")
+    a("        else if (!stall && in_valid) begin")
+    a("            if (in_sof) begin col <= 1; row <= 0; end")
+    a("            else if (col == WIDTH-1) begin")
+    a("                col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+    a("            end else col <= col + 1;")
+    a("        end")
+    a("    end")
+    a("    always @(posedge clk) begin")
+    a("        if (rst) begin")
+    a("            out_valid <= 1'b0; out_sof <= 1'b0;")
+    a("            out_eol <= 1'b0; out_last <= 1'b0;")
+    a("        end else if (!stall) begin")
+    a(f"            out_valid <= vld_q{stages}; out_sof <= sof_q{stages};")
+    a(f"            out_eol <= eol_q{stages}; out_last <= lst_q{stages};")
+    a(f"            {data_line}")
+    a("        end")
+    a("    end")
+
+
+def _generate_expr(line, module_name, plan=None) -> dict:
     """Emit a pointwise expression-DAG model: LUTs, forks, recombination.
 
-    One full-rate combinational datapath with the standard registered
-    framing, like the phase cores. Every internal wire is SIGNED and sized
+    One full-rate datapath with the standard registered framing, like
+    the phase cores -- combinational in one stage, or cut into pipeline
+    stages by a timing plan. Every internal wire is SIGNED and sized
     from its node's exact value range -- uniform signedness costs one bit on
     some wires and removes the whole class of "signed by one bit too few"
     defects; the range does the narrowing that matters. A gather becomes a
@@ -497,10 +754,6 @@ def _generate_expr(line, module_name) -> dict:
             params.append((declared.name, declared.bits, declared.signed,
                            declared.default, declared.description))
 
-    def width(node):
-        negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
-        return max(node.hi.bit_length(), negative) + 1     # +1: signed carrier
-
     L = []
     a = L.append
     a(f"// generated by np2hw -- pointwise expression datapath "
@@ -509,6 +762,9 @@ def _generate_expr(line, module_name) -> dict:
     a("// Wires are signed and sized from each node's exact value range;")
     a("// lookups are register arrays muxed by a data-derived index whose")
     a("// range was proven at trace time.")
+    if plan:
+        a(f"// timing: cut into {plan[1]} pipeline stages by the traced "
+          f"depth model")
     a(f"module {module_name} #(")
     a(f"    parameter WIDTH  = {image.width},")
     a(f"    parameter HEIGHT = {image.height}")
@@ -545,101 +801,14 @@ def _generate_expr(line, module_name) -> dict:
               f"param_{parent.name}_{index};")
         a("")
 
-    emitted = {}
-    counter = [0]
-
-    def emit(node):
-        key = id(node)
-        if key in emitted:
-            return emitted[key]
-        w = width(node)
-        if node.op == "acc":
-            expr = ("$signed(in_data)" if image.signed
-                    else "$signed({1'b0, in_data})")
-        elif node.op == "tap":
-            r, c, shift, fld = node.args
-            if (r, c) != (0, 0):
-                raise NotImplementedError(
-                    "a window tap in a pointwise datapath: this model has "
-                    "no line buffers; pad the image and use the windowed "
-                    "emitters")
-            base = ("in_data" if fld is None
-                    else f"in_data[{shift + fld - 1}:{shift}]")
-            expr = (f"$signed({base})" if image.signed and fld is None
-                    else f"$signed({{1'b0, {base}}})")
-        elif node.op == "abs":
-            inner = emit(node.args[0])
-            expr = f"({inner} < 0) ? -{inner} : {inner}"
-        elif node.op == "lt":
-            expr = (f"({emit(node.args[0])} < {emit(node.args[1])}) "
-                    "? 2'sd1 : 2'sd0")
-        elif node.op == "sel":
-            cond = emit(node.args[0])
-            expr = (f"({cond} != 0) ? {emit(node.args[1])} : "
-                    f"{emit(node.args[2])}")
-        elif node.op == "const":
-            value = node.args[0]
-            emitted[key] = str(value)
-            return emitted[key]
-        elif node.op == "param":
-            leaf = node.args[0]
-            expr = (f"$signed(param_{leaf.name})" if leaf.signed
-                    else f"$signed({{1'b0, param_{leaf.name}}})")
-        elif node.op == "gather":
-            parent, index = node.args
-            idx = emit(index)
-            kb = max(1, (parent.shape[0] - 1).bit_length())
-            read = f"{parent.name}_lut[{idx}[{kb-1}:0]]"
-            expr = (f"$signed({read})" if parent.signed
-                    else f"$signed({{1'b0, {read}}})")
-        elif node.op in ("add", "sub", "mul"):
-            op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
-            expr = f"{emit(node.args[0])} {op} {emit(node.args[1])}"
-        elif node.op == "shr":
-            expr = f"{emit(node.args[0])} >>> {node.args[1]}"
-        elif node.op == "mask":
-            expr = f"$signed({{1'b0, {emit(node.args[0])}[{node.args[1]-1}:0]}})"
-        elif node.op == "clip":
-            source, lo, hi = node.args
-            inner = emit(source)
-            expr = (f"({inner} > {hi}) ? {hi} : "
-                    f"(({inner} < {lo}) ? {lo} : {inner})")
-        else:
-            raise NotImplementedError(f"expression op {node.op!r}")
-        name = f"e{counter[0]}"
-        counter[0] += 1
-        a(f"    wire signed [{w-1}:0] {name} = {expr};")
-        emitted[key] = name
-        return name
-
-    result = emit(root)
+    (result,), _widths, nodes = _emit_expr_dag(a, [root], image, plan)
     out_signed = root.lo < 0
     magnitude = max(root.hi, -root.lo - 1 if root.lo < 0 else 0)
     out_bits = max(1, magnitude.bit_length() + (1 if out_signed else 0))
     a("")
     gate = "(erow < HEIGHT) && (ecol < WIDTH)"
-    a("    always @(posedge clk) begin")
-    a("        if (rst) begin")
-    a("            col <= 0; row <= 0; out_valid <= 1'b0;")
-    a("            out_sof <= 1'b0; out_eol <= 1'b0; out_last <= 1'b0;")
-    a("        end else begin")
-    a("            if (!stall) begin")
-    a("            if (in_valid) begin")
-    a(f"                out_valid <= {gate};")
-    a(f"                out_sof <= ({gate}) && (erow == 0) && (ecol == 0);")
-    a(f"                out_eol <= ({gate}) && (ecol == WIDTH-1);")
-    a(f"                out_last <= ({gate}) && (erow == HEIGHT-1) && "
-      f"(ecol == WIDTH-1);")
-    a(f"                out_data <= {result}[OUT_BITS-1:0];")
-    a("                if (in_sof) begin col <= 1; row <= 0; end")
-    a("                else if (col == WIDTH-1) begin")
-    a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
-    a("                end else col <= col + 1;")
-    a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
-    a("                out_eol <= 1'b0; out_last <= 1'b0; end")
-    a("            end")
-    a("        end")
-    a("    end")
+    _emit_expr_framing(a, gate, plan,
+                       f"out_data <= {result}[OUT_BITS-1:0];")
     a("endmodule")
 
     verilog = ("\n".join(L)
@@ -659,7 +828,9 @@ def _generate_expr(line, module_name) -> dict:
         "out_rows": image.height, "out_cols": image.width,
         "module": module_name,
         "image": image,
-        "expr_nodes": counter[0],
+        "expr_nodes": nodes,
+        "pipeline_stages": plan[1] if plan else 1,
+        "flush_cycles": (plan[1] if plan else 1) + 1,
     })
 
 def _walk_expr_params(roots):
@@ -711,14 +882,16 @@ def _wexpr_taps(root):
     return taps
 
 
-def _generate_expr_stack(stack, module_name) -> Core:
+def _generate_expr_stack(stack, module_name, plan=None) -> Core:
     """Emit np.stack of pointwise expression lanes: C datapaths, one word.
 
     The matrix-mix case (a colour matrix: unpacked channels in, three dot
     products out). Every channel's DAG is emitted into ONE wire namespace,
     so subexpressions shared between channels fold, and the results
     concatenate into the output word -- channel 0 in the low bits, each
-    field as wide as the input's samples.
+    field as wide as the input's samples. A timing plan cuts the shared
+    namespace once for all lanes: shallow lanes ride delay lines to the
+    final stage so the word always assembles from one input pixel.
     """
     image = stack.channels[0].image
     roots = [t.expr for t in stack.channels]
@@ -749,16 +922,15 @@ def _generate_expr_stack(stack, module_name) -> Core:
             params.append((declared.name, declared.bits, declared.signed,
                            declared.default, declared.description))
 
-    def width(node):
-        negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
-        return max(node.hi.bit_length(), negative) + 1
-
     L = []
     a = L.append
     a(f"// generated by np2hw -- {len(roots)}-channel pointwise expression "
       f"datapath, one shared wire namespace")
     a("// Channels concatenate into the output word, channel 0 in the low")
     a("// bits; the field width is the input's sample width.")
+    if plan:
+        a(f"// timing: cut into {plan[1]} pipeline stages by the traced "
+          f"depth model")
     a(f"module {module_name} #(")
     a(f"    parameter WIDTH  = {image.width},")
     a(f"    parameter HEIGHT = {image.height}")
@@ -794,77 +966,10 @@ def _generate_expr_stack(stack, module_name) -> Core:
               f"param_{parent.name}_{index};")
         a("")
 
-    emitted = {}
-    counter = [0]
-
-    def emit(node):
-        key = id(node)
-        if key in emitted:
-            return emitted[key]
-        w = width(node)
-        if node.op == "acc":
-            expr = ("$signed(in_data)" if image.signed
-                    else "$signed({1'b0, in_data})")
-        elif node.op == "tap":
-            r, c, shift, fld = node.args
-            if (r, c) != (0, 0):
-                raise NotImplementedError(
-                    "a window tap in a pointwise datapath: this model has "
-                    "no line buffers; pad the image and use the windowed "
-                    "emitters")
-            base = ("in_data" if fld is None
-                    else f"in_data[{shift + fld - 1}:{shift}]")
-            expr = (f"$signed({base})" if image.signed and fld is None
-                    else f"$signed({{1'b0, {base}}})")
-        elif node.op == "abs":
-            inner = emit(node.args[0])
-            expr = f"({inner} < 0) ? -{inner} : {inner}"
-        elif node.op == "lt":
-            expr = (f"({emit(node.args[0])} < {emit(node.args[1])}) "
-                    "? 2'sd1 : 2'sd0")
-        elif node.op == "sel":
-            cond = emit(node.args[0])
-            expr = (f"({cond} != 0) ? {emit(node.args[1])} : "
-                    f"{emit(node.args[2])}")
-        elif node.op == "const":
-            emitted[key] = str(node.args[0])
-            return emitted[key]
-        elif node.op == "param":
-            leaf = node.args[0]
-            expr = (f"$signed(param_{leaf.name})" if leaf.signed
-                    else f"$signed({{1'b0, param_{leaf.name}}})")
-        elif node.op == "gather":
-            parent, index = node.args
-            idx = emit(index)
-            kb = max(1, (parent.shape[0] - 1).bit_length())
-            read = f"{parent.name}_lut[{idx}[{kb-1}:0]]"
-            expr = (f"$signed({read})" if parent.signed
-                    else f"$signed({{1'b0, {read}}})")
-        elif node.op in ("add", "sub", "mul"):
-            op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
-            expr = f"{emit(node.args[0])} {op} {emit(node.args[1])}"
-        elif node.op == "shr":
-            expr = f"{emit(node.args[0])} >>> {node.args[1]}"
-        elif node.op == "mask":
-            expr = f"$signed({{1'b0, {emit(node.args[0])}[{node.args[1]-1}:0]}})"
-        elif node.op == "clip":
-            source, lo, hi = node.args
-            inner = emit(source)
-            expr = (f"({inner} > {hi}) ? {hi} : "
-                    f"(({inner} < {lo}) ? {lo} : {inner})")
-        else:
-            raise NotImplementedError(f"expression op {node.op!r}")
-        name = f"e{counter[0]}"
-        counter[0] += 1
-        a(f"    wire signed [{w-1}:0] {name} = {expr};")
-        emitted[key] = name
-        return name
-
-    lanes = [emit(root) for root in roots]
+    lanes, widths, nodes = _emit_expr_dag(a, roots, image, plan)
     out_bits = field * len(roots)
     parts = []
-    for name, root in zip(reversed(lanes), reversed(roots)):
-        have = width(root)
+    for name, have in zip(reversed(lanes), reversed(widths)):
         if have >= field:
             parts.append(f"{name}[{field-1}:0]")
         else:
@@ -872,28 +977,7 @@ def _generate_expr_stack(stack, module_name) -> Core:
     a("")
     a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
     gate = "(erow < HEIGHT) && (ecol < WIDTH)"
-    a("    always @(posedge clk) begin")
-    a("        if (rst) begin")
-    a("            col <= 0; row <= 0; out_valid <= 1'b0;")
-    a("            out_sof <= 1'b0; out_eol <= 1'b0; out_last <= 1'b0;")
-    a("        end else begin")
-    a("            if (!stall) begin")
-    a("            if (in_valid) begin")
-    a(f"                out_valid <= {gate};")
-    a(f"                out_sof <= ({gate}) && (erow == 0) && (ecol == 0);")
-    a(f"                out_eol <= ({gate}) && (ecol == WIDTH-1);")
-    a(f"                out_last <= ({gate}) && (erow == HEIGHT-1) && "
-      f"(ecol == WIDTH-1);")
-    a("                out_data <= word;")
-    a("                if (in_sof) begin col <= 1; row <= 0; end")
-    a("                else if (col == WIDTH-1) begin")
-    a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
-    a("                end else col <= col + 1;")
-    a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
-    a("                out_eol <= 1'b0; out_last <= 1'b0; end")
-    a("            end")
-    a("        end")
-    a("    end")
+    _emit_expr_framing(a, gate, plan, "out_data <= word;")
     a("endmodule")
 
     verilog = ("\n".join(L)
@@ -917,11 +1001,13 @@ def _generate_expr_stack(stack, module_name) -> Core:
         "out_rows": image.height, "out_cols": image.width,
         "module": module_name,
         "image": image,
-        "expr_nodes": counter[0],
+        "expr_nodes": nodes,
+        "pipeline_stages": plan[1] if plan else 1,
+        "flush_cycles": (plan[1] if plan else 1) + 1,
     })
 
 
-def _generate_phase(canvas, module_name) -> dict:
+def _generate_phase(canvas, module_name, clk_ns=None, label=None) -> dict:
     """Emit a phase-sliced model: one datapath, coefficients muxed by position.
 
     The model wrote four interleaved planes and they partition the image, so at
@@ -1051,31 +1137,30 @@ def _generate_phase(canvas, module_name) -> dict:
         else:
             effective.append(op)
     wires = {name: name for name, _, _, _, _, _ in muxed}
+    # The chain's own cutter handles the budget: the depth in front of
+    # it is the coefficient mux and the tap adds, and a cut may not
+    # land before a position-muxed operation (its select is ingest-
+    # timed). Each cut registers the running value; the framing below
+    # delays the flags to match.
+    base = None
+    no_cut = ()
+    staging = []
+    if clk_ns is not None:
+        from .timing import Depth
+        base = Depth(levels=(1 if muxed else 0) + max(len(template.taps) - 1,
+                                                      0),
+                     carry_bits=acc_bits * max(len(template.taps) - 1, 0))
+        no_cut = tuple(i for i, op in enumerate(effective)
+                       if op[0] in ("addp", "mulp"))
     result, out_bits, out_signed = _emit_post(
-        a, effective, acc_bits, signed, signal=lambda n: wires.get(n, f"param_{n}"))
+        a, effective, acc_bits, signed,
+        signal=lambda n: wires.get(n, f"param_{n}"),
+        clk_ns=clk_ns, base=base, no_cut_before=no_cut, staging=staging,
+        label=label or module_name)
+    plan = (None, len(staging) + 1) if staging else None
 
     gate = "(erow < HEIGHT) && (ecol < WIDTH)"
-    a("    always @(posedge clk) begin")
-    a("        if (rst) begin")
-    a("            col <= 0; row <= 0; out_valid <= 1'b0;")
-    a("            out_sof <= 1'b0; out_eol <= 1'b0; out_last <= 1'b0;")
-    a("        end else begin")
-    a("            if (!stall) begin")
-    a("            if (in_valid) begin")
-    a(f"                out_valid <= {gate};")
-    a(f"                out_sof <= ({gate}) && (erow == 0) && (ecol == 0);")
-    a(f"                out_eol <= ({gate}) && (ecol == WIDTH-1);")
-    a(f"                out_last <= ({gate}) && (erow == HEIGHT-1) && (ecol == WIDTH-1);")
-    a(f"                out_data <= {result};")
-    a("                if (in_sof) begin col <= 1; row <= 0; end")
-    a("                else if (col == WIDTH-1) begin")
-    a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
-    a("                end else col <= col + 1;")
-    a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
-    a("                out_eol <= 1'b0; out_last <= 1'b0; end")
-    a("            end")
-    a("        end")
-    a("    end")
+    _emit_expr_framing(a, gate, plan, f"out_data <= {result};")
     a("endmodule")
 
     verilog = ("\n".join(L)
@@ -1096,6 +1181,8 @@ def _generate_phase(canvas, module_name) -> dict:
         "module": module_name,
         "image": image,
         "phases": len(flat),
+        "pipeline_stages": len(staging) + 1,
+        "flush_cycles": len(staging) + 2,
     })
 
 
@@ -1127,26 +1214,35 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     (wrap / EOL / right-edge). So one synthesized core processes any line length
     <= MAX_WIDTH, set live. Combine with framing='eof' for full dynamic
     resolution (a reprogrammable sensor: active_width register + VSYNC height)."""
+    plan = None
     if clk_ns is not None:
-        # Timing is a TRACED property: refuse a stage the clock cannot
-        # hold at generation time, with the stage named -- not after
-        # place-and-route, with a net named.
-        from .timing import check
-        for root, where in _timing_roots(out_line):
-            check(root, clk_ns, label=f"{label or module_name}.{where}")
+        # Timing is a TRACED property: a stage the clock cannot hold is
+        # cut into pipeline stages at generation time -- pure retiming,
+        # so the twin stays bit-exact. The only refusal left is the
+        # floor: one operation deeper than the clock, named.
+        from .timing import assign_stages
+        roots = [root for root, _ in _timing_roots(out_line)]
+        if roots:
+            stage_of, n_stages = assign_stages(
+                roots, clk_ns, label=label or module_name)
+            if n_stages > 1:
+                plan = (stage_of, n_stages)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
         return _generate_mux(out_line, module_name)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
-        return _generate_expr(out_line, module_name)
+        return _generate_expr(out_line, module_name, plan=plan)
     if type(out_line).__name__ == "ChannelStack":        # np.stack([...], axis=-1)
         if out_line.kind == "expr":
-            return _generate_expr_stack(out_line, module_name)
-        return _generate_phase_stencil(out_line, module_name)
+            return _generate_expr_stack(out_line, module_name, plan=plan)
+        return _generate_phase_stencil(out_line, module_name,
+                                       clk_ns=clk_ns, label=label)
     if type(out_line).__name__ == "PhaseCanvas":         # out[py::2, px::2] = ...
         if any(value.taps != {(0, 0): 1} or value.mode != "none"
                for _, _, value in out_line.branches):
-            return _generate_phase_stencil(out_line, module_name)
-        return _generate_phase(out_line, module_name)
+            return _generate_phase_stencil(out_line, module_name,
+                                           clk_ns=clk_ns, label=label)
+        return _generate_phase(out_line, module_name,
+                               clk_ns=clk_ns, label=label)
     image = find_image(out_line)
     if image is None:
         raise ValueError("no image source found in pipeline")
@@ -1476,7 +1572,8 @@ def _post_range(lo, hi, post):
     return lo, hi
 
 
-def _generate_phase_stencil(stack, module_name) -> Core:
+def _generate_phase_stencil(stack, module_name, clk_ns=None,
+                            label=None) -> Core:
     channels = (stack.channels if type(stack).__name__ == "ChannelStack"
                 else [stack])
     image = channels[0].image
@@ -1576,12 +1673,59 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     vrow_lo = pb if v_edge else M
     hcol_lo = pr if h_edge else N
 
+    # Timing as a traced property, stencil flavour. The module has two
+    # natural cones: the WINDOW (a WIDTH-deep line-buffer column read
+    # plus the edge muxes in front of it) and the ARITHMETIC (the
+    # deepest plane's adder tree, its post ops, the phase select, the
+    # pack). When their sum misses the budget, a snapshot register
+    # between them is the cut -- the window machinery, counters and
+    # write-backs are untouched, so the split is retiming by
+    # construction. One cut is this shape's whole repertoire: a half
+    # that still misses refuses, named.
+    stages = 1
+    if clk_ns is not None:
+        from .timing import Depth, FAMILIES, expr_depth, mux_levels
+        fam = FAMILIES["7series"]
+        window = Depth(levels=(mux_levels(realW) if M else 0) + 2)
+        worst = Depth()
+        for plane in chains:
+            taps = len(plane.taps)
+            lv = max(taps - 1, 0).bit_length()          # adder tree depth
+            acc_bits = _range_bits_as(
+                *_acc_range(plane.taps, in_lo, in_hi), signed)
+            d = Depth(levels=lv, carry_bits=lv * acc_bits)
+            for op in plane.post:
+                if op[0] == "clip":
+                    d = d + Depth(levels=2, carry_bits=acc_bits)
+                elif op[0] == "mulc":
+                    d = d + Depth(dsps=1)
+            worst = worst.worst(d)
+        for plane in exprs:
+            worst = worst.worst(expr_depth(plane.expr))
+        arith = worst + Depth(levels=1)                  # the phase select
+        stage_label = label or module_name
+        if (window + arith).ns(fam) > clk_ns:
+            stages = 2
+            for half, what in ((window, "window read"),
+                               (arith, "plane arithmetic")):
+                if half.ns(fam) > clk_ns:
+                    raise ValueError(
+                        f"{stage_label}: the stencil's {what} alone "
+                        f"estimates {half.ns(fam):.1f} ns against the "
+                        f"{clk_ns:.1f} ns budget on {fam.name}; one window "
+                        "snapshot register is this emitter's only cut. "
+                        "Slow the clock or restructure the model.")
+
     L = []
     a = L.append
     a(f"// generated by np2hw -- phase-selected stencils over one shared "
       f"{M+1}x{N+1} window,")
     a(f"// {len(flat)} plane datapath(s), {len(channels)} channel(s), "
       f"{mode} edges")
+    if stages == 2:
+        a("// timing: window snapshot registered -- the line-buffer read")
+        a("// cone and the arithmetic cone each fit the clock; their sum")
+        a("// did not (traced depth model, stencil flavour)")
     a(f"module {module_name} #(parameter WIDTH = {realW}, "
       f"parameter HEIGHT = {realH}) (")
     a("    input  wire clk, input wire rst, input wire in_valid,")
@@ -1649,8 +1793,15 @@ def _generate_phase_stencil(stack, module_name) -> Core:
             return f"((!hf && ecol < {delay}) ? 0 : {base})"
         return base
 
+    def px_read(r, dc):
+        # what the arithmetic reads: the live window in one-stage form,
+        # the snapshot registers behind the cut in two-stage form
+        if stages == 2:
+            return f"q_px_{r}_{N - dc}"
+        return pixel(r, dc)
+
     def term(r, c, w):
-        px = pixel(r, c)
+        px = px_read(r, c)
         if signed:
             px = f"$signed({px})" if image.signed else f"$signed({{1'b0, {px}}})"
         return px if w == 1 else f"{w}*{px}"
@@ -1670,6 +1821,40 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     a(f"    wire sel_row = o_row[0]{f' ^ {row_x}' if row_x else ''};")
     a(f"    wire sel_col = o_col[0]{f' ^ {col_x}' if col_x else ''};")
     a("")
+
+    rowok = f"(vf || (erow >= {vrow_lo}))"
+    colok = f"(hf || (ecol >= {hcol_lo}))"
+    okv = f"({rowok} && {colok})"
+    eol = f"{okv} && (o_col == ({OCv} - 1))"
+    sof = f"{okv} && (o_row == 0) && (o_col == 0)"
+    last = f"{okv} && (o_row == ({ORv} - 1)) && (o_col == ({OCv} - 1))"
+
+    if stages == 2:
+        qpairs = sorted({(r, N - c) for (r, c) in keys})
+        a("    // window snapshot: the stage boundary. The planes below")
+        a("    // read these registers; the window machinery, counters and")
+        a("    // write-backs above are untouched -- pure retiming.")
+        for r, d in qpairs:
+            a(f"    reg [{in_bits-1}:0] q_px_{r}_{d};")
+        a("    reg q_selr, q_selc;")
+        a("    reg q_v, q_sof, q_eol, q_last;")
+        a("    always @(posedge clk) begin")
+        a("        if (rst) begin")
+        a("            q_v <= 1'b0; q_sof <= 1'b0; "
+          "q_eol <= 1'b0; q_last <= 1'b0;")
+        a("        end else if (!stall) begin")
+        a(f"            q_v <= en && {okv};")
+        a(f"            q_sof <= en && {sof};")
+        a(f"            q_eol <= en && {eol};")
+        a(f"            q_last <= en && {last};")
+        a("            if (en) begin")
+        for r, d in qpairs:
+            a(f"                q_px_{r}_{d} <= {pixel(r, N - d)};")
+        a("                q_selr <= sel_row; q_selc <= sel_col;")
+        a("            end")
+        a("        end")
+        a("    end")
+        a("")
 
     # One wire namespace for every windowed expression in the module, so a
     # gradient shared between planes -- or between CHANNELS -- is computed
@@ -1691,7 +1876,7 @@ def _generate_phase_stencil(stack, module_name) -> Core:
             return wemitted[key]
         if node.op == "tap":
             r, c, shift, field = node.args
-            base = pixel(r, c)
+            base = px_read(r, c)
             if field is not None:
                 base = f"{base}[{shift + field - 1}:{shift}]"
             expr = (f"$signed({base})" if image.signed and field is None
@@ -1777,9 +1962,10 @@ def _generate_phase_stencil(stack, module_name) -> Core:
             # A broadcast channel: the same value at every site, no mux.
             a(f"    wire {kind}[{cb-1}:0] chan{ci} = {ext[0]};")
         else:
+            sel = "{q_selr, q_selc}" if stages == 2 else "{sel_row, sel_col}"
             a(f"    reg {kind}[{cb-1}:0] chan{ci};")
             a("    always @(*) begin")
-            a("        case ({sel_row, sel_col})")
+            a(f"        case ({sel})")
             for code, expr in zip(("2'b00", "2'b01", "2'b10"), ext[:3]):
                 a(f"            {code}:   chan{ci} = {expr};")
             a(f"            default: chan{ci} = {ext[3]};")
@@ -1810,12 +1996,6 @@ def _generate_phase_stencil(stack, module_name) -> Core:
         a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
         result = "word"
 
-    rowok = f"(vf || (erow >= {vrow_lo}))"
-    colok = f"(hf || (ecol >= {hcol_lo}))"
-    okv = f"({rowok} && {colok})"
-    eol = f"{okv} && (o_col == ({OCv} - 1))"
-    sof = f"{okv} && (o_row == 0) && (o_col == 0)"
-    last = f"{okv} && (o_row == ({ORv} - 1)) && (o_col == ({OCv} - 1))"
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
     a("            col<=0; row<=0; fcol<=0; frow<=0;")
@@ -1823,10 +2003,18 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     a("            out_sof<=1'b0; out_eol<=1'b0; out_last<=1'b0;")
     a("        end else begin")
     a("            if (!stall) begin")
+    if stages == 2:
+        # the output registers read the snapshot's flags every advancing
+        # beat: bubbles carry q_v = 0, so no en-gate here
+        a("            out_valid <= q_v; out_sof <= q_sof;")
+        a("            out_eol <= q_eol; out_last <= q_last;")
+        a(f"            out_data <= {result};")
     a("            if (en) begin")
-    a(f"                out_valid <= {okv};")
-    a(f"                out_sof <= {sof}; out_eol <= {eol}; out_last <= {last};")
-    a(f"                out_data <= {result};")
+    if stages == 1:
+        a(f"                out_valid <= {okv};")
+        a(f"                out_sof <= {sof}; out_eol <= {eol}; "
+          f"out_last <= {last};")
+        a(f"                out_data <= {result};")
     for k in range(1, M + 1):
         a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : chain{k-1};")
     for r in rows_used:
@@ -1852,8 +2040,11 @@ def _generate_phase_stencil(stack, module_name) -> Core:
     _emit_row_advance(a, pb, v_edge, 24)
     a("                    end else fcol <= fcol + 1;")
     a("                end")
-    a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
-    a("                out_eol <= 1'b0; out_last <= 1'b0; end")
+    if stages == 1:
+        a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
+        a("                out_eol <= 1'b0; out_last <= 1'b0; end")
+    else:
+        a("            end")
     a("            end")
     a("        end")
     a("    end")
@@ -1889,6 +2080,7 @@ def _generate_phase_stencil(stack, module_name) -> Core:
         "aw_bits": 0,
         "hblank": pr + 2,
         "vdrain": (pb + 1) * (realW + pr) + 8,
+        "pipeline_stages": stages,
     })
 
 

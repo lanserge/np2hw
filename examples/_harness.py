@@ -50,17 +50,20 @@ def _write_hex(A, bits):
                            for p in A.flatten()) + "\n")
 
 
-def check_bp(name, fn, A, params=None, param_values=None, iface="core", bits=8):
+def check_bp(name, fn, A, params=None, param_values=None, iface="core", bits=8,
+             clk_ns=None):
     """Validate under RANDOMIZED ready/valid backpressure on one of:
       'core' — generic streaming core (out_last frames the frame)
       'sb'   — Switchboard adapter (last rides sb_out_flags[0])
       'axis' — AXI4-Stream Video adapter (tuser=SOF, tlast=EOL per line)
-    Verifies output pixels AND the framing signals against the oracle."""
+    Verifies output pixels AND the framing signals against the oracle.
+    clk_ns applies the traced timing budget: a too-deep stage generates
+    as a pipeline, and this harness must not notice."""
     params = params or []
     param_values = param_values or {}
     H, W = A.shape
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params)
-    core = generate(out, module_name=name)
+    core = generate(out, module_name=name, clk_ns=clk_ns)
     expected = _oracle(fn, A, params, param_values, bits)
     out_cols = core["out_cols"]
 
@@ -146,15 +149,16 @@ def check_sb_packed(name, fn, A, params=None, param_values=None, bits=8):
 
 
 def check(name, fn, A, params=None, param_values=None, show=0, bits=8,
-          channels=1):
+          channels=1, clk_ns=None):
     """`bits` is the WORD width; with channels > 1 the input A is (H, W, C)
-    and rides the wire as packed words, channel 0 in the low bits."""
+    and rides the wire as packed words, channel 0 in the low bits.
+    clk_ns applies the traced timing budget (auto-split when too deep)."""
     params = params or []
     param_values = param_values or {}
     H, W = A.shape[0], A.shape[1]
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params,
                    channels=channels)
-    meta = generate(out, module_name=name)
+    meta = generate(out, module_name=name, clk_ns=clk_ns)
 
     with open(os.path.join(BUILD, f"{name}.v"), "w") as fh:
         fh.write(meta["verilog"] + "\n")
