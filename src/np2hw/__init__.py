@@ -3,8 +3,8 @@
 Public API for writing model files and driving the compiler:
     from np2hw import Param, Image2D, to_ir, generate
 """
-from .ir import Param, Params, Const, Image2D, Indexer, PhaseRef
-from .frontend import to_ir
+from .ir import Param, Params, Const, Image2D, Indexer, PhaseRef, Rom
+from .frontend import coords, to_ir
 from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
@@ -13,7 +13,8 @@ from .video_in import bayerlink_in
 
 __all__ = [
     "Param", "Params", "Const", "Image2D", "Indexer", "PhaseRef",
-    "to_ir", "generate",
+    "Rom",
+    "to_ir", "generate", "coords",
     # Structural composition: instantiate generated cores and wire them.
     "compose", "Instance", "Connection", "Port", "StreamType",
     # The netlist as a validated structure, before emission: the graph checks

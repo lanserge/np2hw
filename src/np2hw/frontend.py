@@ -425,6 +425,23 @@ class Traced:
         hi = (1 << (parent.bits - (1 if parent.signed else 0))) - 1
         return self._expr_derive(PExpr("gather", (parent, index), lo, hi))
 
+    def _rom_from(self, table):
+        """`rom[traced_index]`: a constant table read, through a register.
+
+        Same law as the register-array gather -- the index's RANGE must
+        sit inside the table, proven here at trace time rather than read
+        as garbage in hardware.
+        """
+        index = self._as_expr()
+        size = len(table)
+        if index.lo < 0 or index.hi >= size:
+            raise ValueError(
+                f"rom {table.name!r}[{size}]: the index can reach "
+                f"[{index.lo}, {index.hi}], which falls outside the table. "
+                "Mask or clip the index first; hardware has no IndexError.")
+        return self._expr_derive(
+            PExpr("rom", (table, index), table.lo, table.hi))
+
     def _expr_binary(self, o, op):
         if isinstance(o, (int, np.integer)):
             other = PExpr("const", (int(o),), int(o), int(o))
@@ -476,6 +493,42 @@ class Traced:
     def __gt__(self, o):
         return self._compare(o, flip=True)
 
+    def _negate(self):
+        """NOT of a 0/1 predicate: a select between the two constants."""
+        node = self._any_expr()
+        zero = PExpr("const", (0,), 0, 0)
+        one = PExpr("const", (1,), 1, 1)
+        return self._wexpr_derive(PExpr("sel", (node, zero, one), 0, 1))
+
+    def __ge__(self, o):
+        return self._compare(o, flip=False)._negate()      # not (a < b)
+
+    def __le__(self, o):
+        return self._compare(o, flip=True)._negate()       # not (a > b)
+
+    def _logical(self, o, both):
+        """AND / OR of two 0/1 predicates, as a select.
+
+        Written `&` and `|` because that is how a window test reads in
+        NumPy. Only PREDICATES compose this way: values that are not
+        0/1 are refused here rather than silently becoming arithmetic.
+        """
+        if not isinstance(o, Traced):
+            return NotImplemented
+        for side in (self, o):
+            node = side._any_expr()
+            if node.lo < 0 or node.hi > 1:
+                raise NotImplementedError(
+                    f"{'&' if both else '|'} between values that reach "
+                    f"[{node.lo}, {node.hi}]: only 0/1 predicates combine "
+                    "this way (a general bitwise op is different hardware)")
+        a, b = self._any_expr(), o._any_expr()
+        zero = PExpr("const", (0,), 0, 0)
+        one = PExpr("const", (1,), 1, 1)
+        node = (PExpr("sel", (a, b, zero), 0, 1) if both
+                else PExpr("sel", (a, one, b), 0, 1))
+        return self._wexpr_derive(node, o)
+
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         if method != "__call__" or kwargs:
             return NotImplemented
@@ -513,7 +566,12 @@ class Traced:
         return self._expr_derive(PExpr("shr", (node, int(o)),
                                        node.lo >> int(o), node.hi >> int(o)))
 
+    def __or__(self, o):
+        return self._logical(o, both=False)
+
     def __and__(self, o):
+        if isinstance(o, Traced):        # predicate AND, not a bit mask
+            return self._logical(o, both=True)
         if not isinstance(o, (int, np.integer)):
             return NotImplemented
         mask = int(o)
@@ -663,6 +721,42 @@ class Traced:
 # --------------------------------------------------------------------------- #
 # Lowering to the line IR
 # --------------------------------------------------------------------------- #
+
+def coords(img):
+    """Pixel POSITION as traced values: (row, col).
+
+    On real arrays these are ordinary NumPy ramps, so a model that uses
+    them stays runnable and stays its own oracle. Traced, the two become
+    leaves the emitters already keep: every core counts the row and
+    column it is on, because its framing depends on them. Position costs
+    no logic -- it is a register that already exists -- which is why an
+    overlay, a lens-shading profile or a windowed statistic can be
+    written as plain arithmetic on where the pixel is.
+
+    The ramps are BROADCAST-SHAPED -- ``(H, 1)`` and ``(1, W)`` rather
+    than ``np.indices``' two full grids. Every elementwise use is
+    identical by NumPy's broadcasting rules, and the shapes say the
+    thing that matters about position: a row-only value is CONSTANT
+    ALONG A LINE, and a column-only value repeats every line. That is a
+    hardware distinction, not a memory one -- a row-invariant
+    subexpression changes once per line, so it can be computed at line
+    rate rather than pixel rate, which is what separable shading
+    profiles and per-column corrections are made of. The traced leaves
+    already carry the same fact in their op names, so the analysis has
+    somewhere to stand when it is written.
+    """
+    # A multi-channel model is handed a Channels view, not the word
+    # itself; position belongs to the pixel either way.
+    if isinstance(img, Channels):
+        img = img.word
+    if not isinstance(img, Traced):
+        height, width = np.asarray(img).shape[:2]
+        return (np.arange(height, dtype=np.int64).reshape(height, 1),
+                np.arange(width, dtype=np.int64).reshape(1, width))
+    height, width = int(img.shape[0]), int(img.shape[1])
+    return (img._expr_derive(PExpr("row", (), 0, height - 1)),
+            img._expr_derive(PExpr("col", (), 0, width - 1)))
+
 
 def lower(traced: Traced):
     if getattr(traced, "expr", None) is not None:

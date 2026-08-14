@@ -71,6 +71,52 @@ def _coeff_str(c) -> str:
 # Leaf descriptors
 # --------------------------------------------------------------------------- #
 
+class Rom:
+    """A CONSTANT lookup table: contents fixed at generation time.
+
+    A `Param` array is one register per entry -- exactly right for the
+    33 knots of a tone curve, and absurd for the 16384 pixels of a
+    logo. A Rom is the same read with the contents baked: an
+    initialised memory, addressed by a data-derived index, and read
+    through a register so the tools infer block RAM rather than
+    building a mux tree the size of the table.
+
+    Indexed by a TRACED value it becomes hardware; indexed by an
+    ordinary integer or array it is plain NumPy, so a model that reads
+    a table stays runnable -- and stays its own oracle.
+    """
+
+    def __init__(self, data, name="rom", bits=None, signed=None):
+        self.data = np.asarray(data)
+        if self.data.ndim != 1:
+            raise NotImplementedError(
+                f"Rom {name!r}: only 1-D tables in this version; flatten "
+                "the index (row*WIDTH + col) in the model, where the "
+                "arithmetic is visible")
+        self.name = name
+        self.lo = int(self.data.min()) if self.data.size else 0
+        self.hi = int(self.data.max()) if self.data.size else 0
+        self.signed = (self.lo < 0) if signed is None else bool(signed)
+        span = max(self.hi.bit_length(),
+                   (-self.lo - 1).bit_length() if self.lo < 0 else 0)
+        self.bits = bits if bits is not None else max(
+            1, span + (1 if self.signed else 0))
+
+    @property
+    def shape(self):
+        return self.data.shape
+
+    def __len__(self):
+        return int(self.data.shape[0])
+
+    def __getitem__(self, idx):
+        # A traced index is a hardware read; anything else is the model
+        # reading its own table.
+        if hasattr(idx, "_rom_from"):
+            return idx._rom_from(self)
+        return self.data[idx]
+
+
 @dataclass
 class PExpr:
     """One node of a POINTWISE expression DAG.

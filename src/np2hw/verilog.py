@@ -543,6 +543,8 @@ def _emit_expr_dag(a, roots, image, plan=None):
     counter = [0]
     bucket = [[] for _ in range(n_stages)]
     pipes = {}                   # wire name -> [width, max stages crossed]
+    roms = {}                    # id(table) -> table, in first-use order
+    reads = []                   # (reg name, width, table name, address)
 
     def width(node):
         negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
@@ -572,6 +574,12 @@ def _emit_expr_dag(a, roots, image, plan=None):
         if node.op == "acc":
             expr = ("$signed(in_data)" if image.signed
                     else "$signed({1'b0, in_data})")
+        elif node.op in ("row", "col"):
+            # The position counters the core already keeps for its own
+            # framing: free to read, and pinned to this pixel (they ride
+            # the delay lines like any other stage-0 value).
+            wire = "erow" if node.op == "row" else "ecol"
+            expr = f"$signed({{1'b0, {wire}[{max(1, w - 1) - 1}:0]}})"
         elif node.op == "tap":
             r, c, shift, fld = node.args
             if (r, c) != (0, 0):
@@ -607,6 +615,19 @@ def _emit_expr_dag(a, roots, image, plan=None):
             read = f"{parent.name}_lut[{idx}[{kb-1}:0]]"
             expr = (f"$signed({read})" if parent.signed
                     else f"$signed({{1'b0, {read}}})")
+        elif node.op == "rom":
+            # The address is captured at the END of the previous stage;
+            # the data lands here. Emitted as a REGISTER, which is what
+            # makes the tools build a block RAM.
+            table, index = node.args
+            roms.setdefault(id(table), table)
+            addr = ref(index, s - 1)
+            kb = max(1, (len(table) - 1).bit_length())
+            name = f"e{counter[0]}"
+            counter[0] += 1
+            reads.append((name, w, table.name, f"{addr}[{kb-1}:0]"))
+            emitted[key] = (name, s, w)
+            return
         elif node.op in ("add", "sub", "mul"):
             op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
             expr = f"{ref(node.args[0], s)} {op} {ref(node.args[1], s)}"
@@ -632,6 +653,24 @@ def _emit_expr_dag(a, roots, image, plan=None):
     lanes = [ref(root, final) for root in roots]
     widths = [width(root) for root in roots]
 
+    for table in roms.values():
+        size = len(table)
+        a(f"    // {table.name}: {size}-entry constant table, read through a")
+        a("    // register so the tools infer block RAM. The contents travel")
+        a("    // INSIDE this file: a generated design that needs a loose")
+        a("    // .mem beside it is a design that breaks when it moves.")
+        a(f"    reg [{table.bits-1}:0] {table.name} [0:{size-1}];")
+        a("    initial begin")
+        digits = (table.bits + 3) // 4
+        for i, value in enumerate(table.data.tolist()):
+            v = int(value) & ((1 << table.bits) - 1)
+            a(f"        {table.name}[{i}] = {table.bits}'h{v:0{digits}x};")
+        a("    end")
+        a("")
+    if reads:
+        for name, w, _t, _addr in reads:
+            a(f"    reg signed [{w-1}:0] {name};")
+        a("")
     if pipes:
         a("    // stage-boundary delay lines: one register per boundary a")
         a("    // value crosses, advancing with the pipe (!stall), so every")
@@ -645,8 +684,10 @@ def _emit_expr_dag(a, roots, image, plan=None):
             a(f"    // ---- pipeline stage {s} ----")
         for line_text in bucket[s]:
             a(line_text)
-    if pipes:
+    if pipes or reads:
         a("    always @(posedge clk) if (!stall) begin")
+        for name, _w, table_name, addr in reads:
+            a(f"        {name} <= {table_name}[{addr}];")
         for name, (_w, deep) in pipes.items():
             for k in range(1, deep + 1):
                 src = name if k == 1 else f"{name}_q{k-1}"
@@ -1201,6 +1242,20 @@ def _timing_roots(out_line):
             yield channel.expr, f"channel{i}"
 
 
+def _reads_memory(root) -> bool:
+    """Does this DAG read a constant table anywhere?"""
+    seen, stack = set(), [root]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, PExpr) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.op == "rom":
+            return True
+        stack.extend(node.args)
+    return False
+
+
 def generate(out_line, module_name="np2hw_top", framing="height",
              max_width=None, clk_ns=None, label=None) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
@@ -1215,18 +1270,21 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     <= MAX_WIDTH, set live. Combine with framing='eof' for full dynamic
     resolution (a reprogrammable sensor: active_width register + VSYNC height)."""
     plan = None
-    if clk_ns is not None:
+    roots = [root for root, _ in _timing_roots(out_line)]
+    # A memory read is registered whatever the clock is, so a model that
+    # reads a constant table gets staged even with no budget stated.
+    budget = clk_ns if clk_ns is not None else (
+        float("inf") if any(_reads_memory(r) for r in roots) else None)
+    if budget is not None and roots:
         # Timing is a TRACED property: a stage the clock cannot hold is
         # cut into pipeline stages at generation time -- pure retiming,
         # so the twin stays bit-exact. The only refusal left is the
         # floor: one operation deeper than the clock, named.
         from .timing import assign_stages
-        roots = [root for root, _ in _timing_roots(out_line)]
-        if roots:
-            stage_of, n_stages = assign_stages(
-                roots, clk_ns, label=label or module_name)
-            if n_stages > 1:
-                plan = (stage_of, n_stages)
+        stage_of, n_stages = assign_stages(
+            roots, budget, label=label or module_name)
+        if n_stages > 1:
+            plan = (stage_of, n_stages)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
         return _generate_mux(out_line, module_name)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs

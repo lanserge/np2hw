@@ -54,6 +54,10 @@ class Family:
     carry_ns_per_bit: float
     dsp_ns: float
     overhead_ns: float
+    # A block RAM's clock-to-out: a DATASHEET number, not a function of
+    # the table's depth. Costing a memory read this way (instead of by
+    # analogy to a mux tree) is the whole reason reads are registered.
+    mem_ns: float = 2.1
 
 
 # Anchored to the bench: an 11-level, 28-carry-bit, one-DSP stage
@@ -71,16 +75,17 @@ class Depth:
     levels: int = 0
     carry_bits: int = 0
     dsps: int = 0
+    mems: int = 0
 
     def ns(self, family: Family) -> float:
         return (family.overhead_ns + self.levels * family.level_ns
                 + self.carry_bits * family.carry_ns_per_bit
-                + self.dsps * family.dsp_ns)
+                + self.dsps * family.dsp_ns + self.mems * family.mem_ns)
 
     def __add__(self, other: "Depth") -> "Depth":
         return Depth(self.levels + other.levels,
                      self.carry_bits + other.carry_bits,
-                     self.dsps + other.dsps)
+                     self.dsps + other.dsps, self.mems + other.mems)
 
     def worst(self, other: "Depth") -> "Depth":
         # Along the worst PATH the components add per node; across
@@ -90,7 +95,7 @@ class Depth:
     def _key(self):
         return (self.levels * SERIES7.level_ns
                 + self.carry_bits * SERIES7.carry_ns_per_bit
-                + self.dsps * SERIES7.dsp_ns)
+                + self.dsps * SERIES7.dsp_ns + self.mems * SERIES7.mem_ns)
 
 
 def expr_depth(node) -> Depth:
@@ -120,11 +125,18 @@ def node_cost(node) -> Depth:
     carry as wide as the result, a multiply one DSP, a clip a
     compare-and-select, a mask or constant shift nothing at all, a
     gather the mux tree its table size dictates."""
-    if node.op in ("acc", "const", "param", "tap"):
+    if node.op in ("acc", "const", "param", "tap", "row", "col"):
+        # registers, constants, window taps, and the position counters
+        # every core already keeps: wires into the stage
         return Depth()
     if node.op == "gather":
         parent, _index = node.args
         return Depth(levels=mux_levels(int(parent.shape[0])))
+    if node.op == "rom":
+        # A registered memory read: it OWNS its stage, so what it costs
+        # the following stage is the memory's clock-to-out, and nothing
+        # in front of it can share the cycle.
+        return Depth(mems=1)
     if node.op in ("add", "sub"):
         return Depth(levels=1, carry_bits=_bits(node))
     if node.op == "mul":
@@ -146,8 +158,10 @@ def node_cost(node) -> Depth:
 
 # param and const leaves FLOAT: a register port is stable across a
 # pixel's flight through the pipeline and a literal is wiring, so both
-# feed any stage directly and never ride a delay line. acc and tap are
-# PINNED to stage 0 -- they read the input word of THIS pixel.
+# feed any stage directly and never ride a delay line. acc, tap, row
+# and col are PINNED to stage 0 -- they describe THIS pixel (its input
+# word, its position), so a later stage must see them through the
+# delay line, not as the counter's current value.
 FLOATING = ("const", "param")
 
 
@@ -187,6 +201,15 @@ def assign_stages(roots, clk_ns: float, family: str = "7series",
                 "one operation. Slow the clock or restructure the model.")
         staged = [a for a in args if a.op not in FLOATING]
         s = max((stage_of[id(a)] for a in staged), default=0)
+        if node.op == "rom":
+            # A memory read is registered by construction: its address
+            # is captured at the end of the previous stage and its data
+            # appears in this one. So it ALWAYS starts a stage, budget
+            # or no budget -- that is what makes it a block RAM instead
+            # of a mux tree as deep as the table.
+            stage_of[key] = s + 1
+            depth_in[key] = cost
+            return
         below = Depth()
         for a in staged:
             if stage_of[id(a)] == s:
