@@ -161,6 +161,19 @@ NumPy-level feature that unblocks everyone downstream, ISP or otherwise:
   the same pipeline as a plain C function, bit-exact against the NumPy that
   generated the Verilog: a golden model that runs beside the hardware, from
   the one source of truth.
+- **Measured device profiles** ([#8](https://github.com/lanserge/np2hw/issues/8))
+  -- np2hw prices a pipeline before it emits it, from a handful of per-device
+  constants, and a wrong constant is a failed build or a wasted register. Those
+  constants are currently FITTED to a few observed paths on one part. Attribute
+  a vendor timing report back to the traced nodes it came from -- the
+  generator's own wire names survive synthesis, so a path is not "7.5 ns
+  somewhere" but "these nodes, priced at 5.6" -- and solve each term from its
+  own evidence rather than curve-fitting slack, which would put the model
+  inside its own feedback loop. Fitted at a stated conservative quantile, with
+  the device's utilisation recorded beside it, and emitted as a Device subclass
+  the user owns: a new part becomes calibration data, not a patch to np2hw.
+  What it unblocks: refusals you can trust on silicon nobody here has, which is
+  the precondition for every claim about how fast a generated pipeline runs.
 - **Register context banks** ([#7](https://github.com/lanserge/np2hw/issues/7)) --
   N shadow copies of a core's full configuration, swapped atomically at frame
   boundaries: one pipeline serving several streams, context isolation proven
