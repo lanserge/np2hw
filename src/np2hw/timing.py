@@ -58,12 +58,20 @@ class Depth:
     """
     levels: int = 0
     carry_bits: int = 0
+    # HOW MANY separate carry chains, as distinct from how many bits of
+    # carry. Starting a chain costs a fixed amount -- the lookup table
+    # that forms its inputs, and the routed net out of it into whatever
+    # comes next -- and that cost is paid once per arithmetic operation,
+    # not once per bit. Four narrow adds in series are far slower than
+    # one wide one, and without this term the model cannot say so.
+    carries: int = 0
     dsps: int = 0
     mems: int = 0
 
     def __add__(self, other: "Depth") -> "Depth":
         return Depth(self.levels + other.levels,
                      self.carry_bits + other.carry_bits,
+                     self.carries + other.carries,
                      self.dsps + other.dsps, self.mems + other.mems)
 
 
@@ -88,10 +96,11 @@ class Device:
     dsp_ns = None              # a hard multiplier, in to out
     overhead_ns = None         # clock-to-out + setup + the first/last nets
     mem_ns = None              # a memory's clock-to-out (registered read)
+    carry_chain_ns = None      # starting one carry chain, and leaving it
     lut_inputs = None          # how many inputs one lookup table has
 
     _REQUIRED = ("name", "level_ns", "carry_ns_per_bit", "dsp_ns",
-                 "overhead_ns", "mem_ns", "lut_inputs")
+                 "overhead_ns", "mem_ns", "carry_chain_ns", "lut_inputs")
 
     def __init__(self):
         missing = [f for f in self._REQUIRED if getattr(self, f) is None]
@@ -110,6 +119,7 @@ class Device:
         """What a structural depth costs on THIS device."""
         return (self.overhead_ns + d.levels * self.level_ns
                 + d.carry_bits * self.carry_ns_per_bit
+                + d.carries * self.carry_chain_ns
                 + d.dsps * self.dsp_ns + d.mems * self.mem_ns)
 
     def worst(self, a: Depth, b: Depth) -> Depth:
@@ -133,26 +143,43 @@ class Device:
         per = _clog2(self.mux_arity())
         return max(1, -(-_clog2(max(size, 2)) // per))
 
+    def reduce_levels(self, terms: int) -> int:
+        """Depth of a tree that reduces `terms` signals to one -- the OR
+        over the bits a constant compare has to test, for instance. Set
+        by how many inputs a lookup table has, like every tree here."""
+        per = _clog2(self.lut_inputs)
+        return max(1, -(-_clog2(max(terms, 2)) // per))
+
     def wire(self) -> Depth:
         """Costs nothing: a register output, a constant, a mask, a
         constant shift -- wiring into the stage that uses it."""
         return Depth()
 
     def add(self, bits: int) -> Depth:
-        return Depth(levels=1, carry_bits=bits)
+        return Depth(levels=1, carry_bits=bits, carries=1)
 
     def compare(self, bits: int) -> Depth:
-        return Depth(levels=1, carry_bits=bits)
+        return Depth(levels=1, carry_bits=bits, carries=1)
 
     def select(self) -> Depth:
         return Depth(levels=1)
 
     def absolute(self, bits: int) -> Depth:
-        return Depth(levels=1, carry_bits=bits)
+        # a negate is a subtract, and the select is on top of it
+        return Depth(levels=1, carry_bits=bits, carries=1)
 
     def clip(self, bits: int) -> Depth:
-        """A compare against each bound and the select between them."""
-        return Depth(levels=2, carry_bits=bits)
+        """A compare against each bound and the select between them.
+
+        The bounds are CONSTANTS, so neither comparison is a subtract:
+        the synthesiser resolves a constant compare in lookup tables.
+        But it is not free of width either -- testing whether a wide
+        value has left its range is a reduction over the bits above
+        that range, and that tree deepens as the value widens. So:
+        the two bounds' reductions, which run in parallel, and the
+        select between three values on top.
+        """
+        return Depth(levels=2 + self.reduce_levels(bits), carry_bits=0)
 
     def mul(self) -> Depth:
         return Depth(dsps=1)
@@ -172,13 +199,14 @@ class Device:
         """A balanced tree summing `terms` values: log2 levels, each one
         a carry chain."""
         lv = max(terms - 1, 0).bit_length()
-        return Depth(levels=lv, carry_bits=lv * bits)
+        return Depth(levels=lv, carry_bits=lv * bits, carries=lv)
 
     def adder_chain(self, terms: int, bits: int, muxed=False) -> Depth:
         """A linear accumulation of `terms` values, optionally behind a
         position select -- what a tap chain becomes before its post ops."""
         n = max(terms - 1, 0)
-        return Depth(levels=(1 if muxed else 0) + n, carry_bits=bits * n)
+        return Depth(levels=(1 if muxed else 0) + n, carry_bits=bits * n,
+                     carries=n)
 
     def window(self, has_line_buffers: bool) -> Depth:
         """The read cone of a stencil's window: a registered memory read
@@ -192,11 +220,29 @@ class Device:
 class Series7(Device):
     """Xilinx 7-series, speed grade -1.
 
-    Anchored to the bench: an 11-level, 28-carry-bit, one-DSP stage
-    routed at ~11.4 ns on xc7z020-1. 1.6 + 11*0.62 + 28*0.03 + 3.2 =
-    12.5, conservative by about a nanosecond on the anchor, as
-    intended. One anchor is one equation, so these are fitted rather
-    than solved; a sweep of known depths would solve them.
+    These are FITTED, not solved. Measured on xc7z020-1 at 6.734 ns,
+    worst path per module, from placed designs:
+
+      white balance   +0.252   1 level    2.590 ns   (a DSP and a clip)
+      gamma           +0.942   6 levels   5.483 ns
+      black level     +1.266   6 levels   5.148 ns
+      line-buffer     +0.165   7 levels   5.965 ns   (address, not data)
+      adaptive green  -0.815  12 levels   7.497 ns   (4 chained adds)
+
+    carry_chain_ns was solved from the last of those. It over-predicts
+    an older uncut gamma anchor -- 13.5 against 11.4 routed -- and the
+    direction of that error is deliberate: a stage the model calls too
+    slow costs pipeline registers, which the elastic streams make
+    free, while a stage it calls fast enough and is not costs a build.
+
+    Two lessons are recorded here rather than in a commit. Constant
+    bounds are not subtracts, and modelling a clip as one made a DSP
+    plus a clip look like two stages for the wrong reason. And the
+    line-buffer ADDRESS, not the data, was the closest thing to
+    critical in a working design -- the model still has no term for
+    a control path, and 0.165 ns is not much of a margin.
+
+    Resolving this properly needs a sweep of known depths.
     """
     name = "7series-1"
     level_ns = 0.62
@@ -204,6 +250,11 @@ class Series7(Device):
     dsp_ns = 3.2
     overhead_ns = 1.6
     mem_ns = 2.1
+    # MEASURED, on the path that exposed the need for the term: a
+    # 13-bit add in a chain costs about 1.6 ns end to end, of which the
+    # level and the per-bit carry account for about 1.0. Solved from one
+    # path, so still fitted rather than swept.
+    carry_chain_ns = 0.5
     lut_inputs = 6
 
 
