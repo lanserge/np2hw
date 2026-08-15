@@ -36,6 +36,14 @@ from .ir import (SourceLine, HProcLine, VProcLine, Image2D, Const, Param,
 from .regmap import AddrMap, Reg
 
 
+# Video geometry is 16 bits wherever it is stated -- the protocol
+# header says so, and the register map repeats it. The position
+# counters used to be 32-bit integers doing an 11-bit job, which put a
+# 32-bit carry chain on a block RAM's address port and made the column
+# counter, not the arithmetic, a stencil's critical path.
+POS = 16
+
+
 def _clog2(n: int) -> int:
     return math.ceil(math.log2(n)) if n > 1 else 0
 
@@ -819,12 +827,12 @@ def _generate_expr(line, module_name, plan=None) -> dict:
     a("    output reg  out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
     a(");")
-    a("    integer col;")
-    a("    integer row;")
+    a(f"    reg [{POS-1}:0] col;")
+    a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")
     a("    assign in_ready = !stall;")
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     a("")
 
     for parent in arrays:
@@ -985,12 +993,12 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
     a("    output reg  out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
     a(");")
-    a("    integer col;")
-    a("    integer row;")
+    a(f"    reg [{POS-1}:0] col;")
+    a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")
     a("    assign in_ready = !stall;")
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     a("")
     for parent in arrays:
         size = parent.shape[0]
@@ -1132,12 +1140,12 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     a("    output reg  out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
     a(");")
-    a("    integer col;")
-    a("    integer row;")
+    a(f"    reg [{POS-1}:0] col;")
+    a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")
     a("    assign in_ready = !stall;")
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     a("")
     a("    // Which plane this pixel belongs to. A plane taken at `p::2` holds the")
     a("    // positions where (position & 1) == p, so XOR against the phase")
@@ -1352,15 +1360,15 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         out_rows, out_cols = out_line.shape
     else:
         out_rows, out_cols = image.height - M, image.width - N
-    a("    integer col;")
-    a("    integer row;")
+    a(f"    reg [{POS-1}:0] col;")
+    a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")       # holding an unaccepted output
     a("    assign in_ready = !stall;")
     # SOF re-anchors the current pixel to frame (0,0); tie in_sof=0 to free-run.
     # Output framing is DERIVED from the (effective) input position, so it tracks
     # SOF too -- no separate output counter to drift on re-anchor.
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
 
     # line buffers: chain0 = in_data; chainK = input delayed K rows
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
@@ -1517,11 +1525,11 @@ def _generate_mux(mux, module_name) -> dict:
     a("    output reg  out_sof, output reg out_eol, output reg out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
     a(");")
-    a("    integer col; integer row;")
+    a(f"    reg [{POS-1}:0] col; reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")
     a("    assign in_ready = !stall;")
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")          # SOF anchors to (0,0)
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")          # SOF anchors to (0,0)
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     # shared window
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     for k in range(1, M + 1):
@@ -1815,10 +1823,11 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     a("    output reg  out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
     a(");")
-    a("    integer col; integer row; integer fcol; integer frow;")
+    a(f"    reg [{POS-1}:0] col; reg [{POS-1}:0] row; "
+      f"reg [{POS-1}:0] fcol; reg [{POS-1}:0] frow;")
     a("    reg hf; reg vf; reg done;")
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     a("    wire stall = out_valid && !out_ready;")
     a("    wire in_active = !done && !hf && !vf;")
     a("    assign in_ready = !stall && (in_active || in_sof);")
@@ -1848,7 +1857,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             end_of_line = "0"
         a("    // the column this block will read NEXT, from the counter's")
         a("    // own next-state: the address a cycle early, data on time")
-        a(f"    wire [31:0] rd_col = in_sof ? 32'd1")
+        a(f"    wire [{POS-1}:0] rd_col = in_sof ? {POS}\'d1")
         a(f"                       : (!hf ? ((col == WIDTH-1) ? {end_of_line}"
           f" : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1, 0)}) ? 0 : col));")
@@ -1914,8 +1923,8 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             else f"(erow - {vrow_lo})")
     ocolp = (f"(hf ? (({OCv} - {pr}) + fcol) : (ecol - {hcol_lo}))" if h_edge
              else f"(ecol - {hcol_lo})")
-    a(f"    wire [31:0] o_row = {orow};")
-    a(f"    wire [31:0] o_col = {ocolp};")
+    a(f"    wire [{POS-1}:0] o_row = {orow};")
+    a(f"    wire [{POS-1}:0] o_col = {ocolp};")
     row_x, col_x = _phase_expr(rows0[0]), _phase_expr(cols0[0])
     a(f"    wire sel_row = o_row[0]{f' ^ {row_x}' if row_x else ''};")
     a(f"    wire sel_col = o_col[0]{f' ^ {col_x}' if col_x else ''};")
@@ -2367,12 +2376,13 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a(");")
     out_rows = realH if v_edge else realH - M
     out_cols = realW if h_edge else realW - N
-    a("    integer col; integer row; integer fcol; integer frow;")
+    a(f"    reg [{POS-1}:0] col; reg [{POS-1}:0] row; "
+      f"reg [{POS-1}:0] fcol; reg [{POS-1}:0] frow;")
     a("    reg hf; reg vf; reg done;")
     if eof:
         a("    reg eof_l;")                               # latched: this frame's end was seen
-    a("    wire [31:0] ecol = in_sof ? 0 : col;")          # SOF anchors to frame (0,0)
-    a("    wire [31:0] erow = in_sof ? 0 : row;")
+    a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")          # SOF anchors to frame (0,0)
+    a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
     a("    wire stall = out_valid && !out_ready;")       # holding an unaccepted output
     a("    wire in_active = !done && !hf && !vf;")
     a("    assign in_ready = !stall && (in_active || in_sof);")  # SOF accepted even mid-flush
@@ -2389,7 +2399,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
     # was due: rd_col mirrors the control below, one cycle early.
     if M:
         eol = "col" if h_edge else "0"   # h_edge holds col and enters hflush
-        a("    wire [31:0] rd_col = in_sof ? 32'd1")
+        a(f"    wire [{POS-1}:0] rd_col = in_sof ? {POS}\'d1")
         a(f"                       : (!hf ? ((col == {aw}-1) ? {eol} : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1,0)}) ? 0 : col));")
     for k in range(1, M + 1):
