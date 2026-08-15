@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "np2hw"
-version = "0.3.0"
+version = "0.4.0"
 description = "NumPy -> streaming hardware (Verilog) compiler for image and 2-D pipelines"
 readme = "README.md"
 license = "MIT"

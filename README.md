@@ -133,6 +133,20 @@ register coefficients, so multi-channel packed streams (a CCM's shape) trace
 today. Next: reductions, >1 pixel/clock, and the FPGA bitstream flow via Logik
 — see [docs/zeroasic.md](docs/zeroasic.md) for the path to FPGA/Platypus.
 
+## What it generates, in hardware
+
+[revela](https://github.com/lanserge/revela) is an open image signal
+processor whose blocks are NumPy functions, compiled to Verilog by np2hw.
+It runs on a PYNQ-Z2: a Raspberry Pi camera's raw Bayer arrives over HDMI
+([bayerlink](https://github.com/bayerlink/bayerlink)), and black level,
+white balance, an adaptive Hamilton-Adams demosaic, a colour matrix and
+gamma all execute in fabric at 1920x1080, 10-bit, 148.5 MHz on one clock.
+Every block is checked bit-exact against the NumPy it came from before it
+is allowed to emit.
+
+That is the claim this compiler exists to make, on a board anyone can buy:
+the mathematical model IS the hardware.
+
 ## Funding
 
 Developed independently; recurring support via
