@@ -296,6 +296,19 @@ def main():
           and np.array_equal(two[SH * SW:], packed[1]))
     result("stencil: two frames across a SOF, both bit-exact", ok)
 
+    # A line buffer must be read THROUGH A REGISTER: block RAM has no
+    # asynchronous read port, so an async read forces distributed RAM
+    # plus a select tree that deepens with the line -- which is why the
+    # same stencil closed at 1280 and missed at 1920. Assert the shape,
+    # because simulation cannot see which primitive the tools pick.
+    src = generate(outs, module_name="dm_shape")["verilog"]
+    registered = ("chain1_q <= mem1[rd_col]" in src
+                  and "mem1[ecol]" not in src.split("rd_col")[0])
+    one_ahead = "rd_col = in_sof" in src
+    result("stencil: line buffers are read through a register", registered)
+    result("stencil: the address is one column AHEAD, so no schedule "
+           "shift", one_ahead)
+
     wbp = [Param("py", bits=1, description="Row parity"),
            Param("px", bits=1, description="Column parity"),
            Param("gain", bits=16, shape=(2, 2),

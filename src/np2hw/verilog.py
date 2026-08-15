@@ -1742,9 +1742,14 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     # that still misses refuses, named.
     stages = 1
     if clk_ns is not None:
-        from .timing import Depth, FAMILIES, expr_depth, mux_levels
+        from .timing import Depth, FAMILIES, expr_depth
         fam = FAMILIES["7series"]
-        window = Depth(levels=(mux_levels(realW) if M else 0) + 2)
+        # The line buffers are read THROUGH A REGISTER, so the window
+        # cone is a memory's clock-to-out plus the edge muxes -- a
+        # datasheet constant, NOT a select tree that deepens with the
+        # line. That is the whole point of the registered read: the
+        # depth of this cone no longer depends on the picture's width.
+        window = Depth(mems=1 if M else 0, levels=2)
         worst = Depth()
         for plane in chains:
             taps = len(plane.taps)
@@ -1812,18 +1817,43 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
     a(f"    wire vbc = {vbc};")
     a(f"    wire hbc = {hbc};")
-    # shared window: line buffers, vertical taps, per-row column delays
+    # Shared window: line buffers, vertical taps, per-row column delays.
+    #
+    # The line buffers are read THROUGH A REGISTER, which is the only way
+    # a memory becomes block RAM -- block RAM has no asynchronous read
+    # port. An asynchronous read forces distributed RAM plus a select
+    # tree whose depth grows with the LINE, which is why a stencil that
+    # closes at 1280 pixels misses at 1920 on the same clock.
+    #
+    # The register costs no schedule, because the address is a COUNTER:
+    # present the column the block will want NEXT, and the data lands
+    # exactly when the existing taps expect it. `chain{k}_q` at any cycle
+    # holds precisely what the asynchronous read held -- same values,
+    # same order, one cycle earlier in flight.
+    if M:
+        if h_edge:
+            end_of_line = "col"          # the block enters hflush; col holds
+        else:
+            end_of_line = "0"
+        a("    // the column this block will read NEXT, from the counter's")
+        a("    // own next-state: the address a cycle early, data on time")
+        a(f"    wire [31:0] rd_col = in_sof ? 32'd1")
+        a(f"                       : (!hf ? ((col == WIDTH-1) ? {end_of_line}"
+          f" : (col + 1))")
+        a(f"                              : ((fcol == {max(pr-1, 0)}) ? 0 : col));")
     for k in range(1, M + 1):
         a(f"    reg  [{in_bits-1}:0] mem{k} [0:WIDTH-1];")
-        a(f"    wire [{in_bits-1}:0] chain{k} = mem{k}[ecol];")
+        a(f"    reg  [{in_bits-1}:0] chain{k}_q;")
     if v_edge and M >= 1:
-        flush_src = "mem1[ecol]" if rep else "0"
+        # the vertical flush replays row 1, which is the same address the
+        # window is already reading -- one memory port, not two
+        flush_src = "chain1_q" if rep else "0"
         a(f"    wire [{in_bits-1}:0] chain0 = (vf && !in_sof) ? {flush_src} : in_data;")
     else:
         a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     for r in rows_used:
         delay = M - r
-        base = f"chain{delay}"
+        base = f"chain{delay}_q" if delay else "chain0"
         if rep or delay == 0 or not v_edge:
             a(f"    wire [{in_bits-1}:0] row{r} = {base};")
         else:
@@ -1923,7 +1953,8 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a("                q_selr <= sel_row; q_selc <= sel_col;")
         a("                wr_col <= ecol;")
         for k in range(1, M + 1):
-            a(f"                wr_d{k} <= vbc ? chain0 : chain{k-1};")
+            src = "chain0" if k == 1 else f"chain{k-1}_q"
+            a(f"                wr_d{k} <= vbc ? chain0 : {src};")
         a("            end")
         a("        end")
         a("    end")
@@ -2093,10 +2124,13 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a(f"                out_sof <= {sof}; out_eol <= {eol}; "
           f"out_last <= {last};")
         a(f"                out_data <= {result};")
+    for k in range(1, M + 1):
+        a(f"                chain{k}_q <= mem{k}[rd_col];")
     if stages == 1:
         for k in range(1, M + 1):
+            src = "chain0" if k == 1 else f"chain{k-1}_q"
             a(f"                if (!hf || in_sof) mem{k}[ecol] <= "
-              f"vbc ? chain0 : chain{k-1};")
+              f"vbc ? chain0 : {src};")
     for r in rows_used:
         for d in range(N, 0, -1):
             src = f"cur{r}" if d == 1 else f"row{r}_d{d-1}"
@@ -2266,6 +2300,12 @@ def _generate_edge(out_line, image, module_name, framing="height",
         a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     # vertical taps (top: replicate via broadcast, or zero via mux)
     for r in rows_used:
+        # NOTE: this emitter still reads its line buffers
+        # ASYNCHRONOUSLY, so they map to distributed RAM and a
+        # select tree that deepens with the line. The stencil
+        # emitter reads through a register (block RAM); porting
+        # that here needs this emitter's own next-address, which
+        # is harder because the width is a run-time value.
         delay = M - r
         base = f"chain{delay}"
         if rep or delay == 0 or not v_edge:
