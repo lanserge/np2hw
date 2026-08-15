@@ -3261,7 +3261,8 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
 
 
 def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
-                 frame_sync=True, commit=None, header=(), notes=()) -> dict:
+                 frame_sync=True, commit=None, header=(), notes=(),
+                 passthrough=()) -> dict:
     """Put an AXI4-Lite register file in front of ANY self-describing module.
 
     `control_top` does this for one generated core and folds in the geometry
@@ -3289,6 +3290,12 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
             which is the point at which a frame has finished and the next has
             not started, so no frame is ever processed with half its
             coefficients updated.
+        passthrough: ``[(name, bits), ...]`` extra INPUTS the wrapper
+            declares and does nothing with except make them available to
+            `bind`. This is how a port that is context rather than
+            configuration keeps its own source: geometry that arrives in a
+            stream's header belongs to the stream, and a register holding a
+            second copy of it would be a second answer to one question.
         header, notes: comment lines emitted before the module.
 
     Returns:
@@ -3359,6 +3366,9 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
       " output wire s_axil_arready,")
     a("    output wire [31:0] s_axil_rdata, output wire [1:0] s_axil_rresp,"
       " output wire s_axil_rvalid, input wire s_axil_rready")
+    for name, bits in passthrough:
+        a(f"    // context, not configuration: this arrives with the data")
+        a(f"    , input  wire [{bits-1}:0] {name}")
     for stream in streams:
         p, bits = stream["prefix"], stream["data_bits"]
         sign = "signed " if stream.get("signed") else ""
