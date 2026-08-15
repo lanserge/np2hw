@@ -77,6 +77,27 @@ def main():
     oh, ow = gaussian2d_edge(A).shape
     print(f"\n2D gaussian output = {oh}x{ow} (input {H}x{W}) -> "
           + ("SAME SIZE" if (oh, ow) == (H, W) else "shrunk!"))
+
+    # The line buffers must be read THROUGH A REGISTER, so they land in
+    # block RAM instead of distributed RAM behind a select tree that
+    # deepens with the line. Every check above stays green either way --
+    # the behaviour is identical and only the hardware differs -- so the
+    # emitted structure is what has to be asserted.
+    from np2hw import Image2D, to_ir, generate
+    _, out = to_ir(gaussian2d_edge, Image2D("img", H, W, bits=8))
+    src = generate(out, module_name="edge_shape")["verilog"]
+    registered = "chain1_q <= mem1[rd_col]" in src
+    one_ahead = "rd_col = in_sof" in src
+    # a READ is "= mem1[...]"; a write is "mem1[ecol] <= ...", so look
+    # for the read form anywhere, not merely before the first rd_col
+    async_read = "= mem1[ecol]" in src
+    print(f"  line buffers read through a register           "
+          f"{'PASS' if registered else 'FAIL'}")
+    print(f"  the address is one column AHEAD, no shift       "
+          f"{'PASS' if one_ahead else 'FAIL'}")
+    print(f"  no asynchronous read survives                   "
+          f"{'PASS' if not async_read else 'FAIL'}")
+    r += [registered, one_ahead, not async_read]
     return 0 if all(r) else 1
 
 

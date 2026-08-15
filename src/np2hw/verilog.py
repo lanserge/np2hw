@@ -2289,25 +2289,28 @@ def _generate_edge(out_line, image, module_name, framing="height",
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
     a(f"    wire vbc = {vbc};")               # top broadcast (replicate / SOF)
     a(f"    wire hbc = {hbc};")               # left broadcast (replicate / SOF)
-    # line buffers
+    # line buffers, read THROUGH A REGISTER so they land in block RAM
+    # rather than distributed RAM behind a select tree that deepens
+    # with the line. The address is a counter, so presenting the NEXT
+    # column costs nothing and the data still arrives on the beat it
+    # was due: rd_col mirrors the control below, one cycle early.
+    if M:
+        eol = "col" if h_edge else "0"   # h_edge holds col and enters hflush
+        a("    wire [31:0] rd_col = in_sof ? 32'd1")
+        a(f"                       : (!hf ? ((col == {aw}-1) ? {eol} : (col + 1))")
+        a(f"                              : ((fcol == {max(pr-1,0)}) ? 0 : col));")
     for k in range(1, M + 1):
         a(f"    reg  [{in_bits-1}:0] mem{k} [0:{wparam}-1];")
-        a(f"    wire [{in_bits-1}:0] chain{k} = mem{k}[ecol];")
+        a(f"    reg  [{in_bits-1}:0] chain{k}_q;")       # mem{k} at the current column
     if v_edge and M >= 1:                                # bottom flush recirculates
-        flush_src = "mem1[ecol]" if rep else "0"
+        flush_src = "chain1_q" if rep else "0"           # the same registered read
         a(f"    wire [{in_bits-1}:0] chain0 = (vf && !in_sof) ? {flush_src} : in_data;")
     else:
         a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     # vertical taps (top: replicate via broadcast, or zero via mux)
     for r in rows_used:
-        # NOTE: this emitter still reads its line buffers
-        # ASYNCHRONOUSLY, so they map to distributed RAM and a
-        # select tree that deepens with the line. The stencil
-        # emitter reads through a register (block RAM); porting
-        # that here needs this emitter's own next-address, which
-        # is harder because the width is a run-time value.
         delay = M - r
-        base = f"chain{delay}"
+        base = f"chain{delay}_q" if delay else "chain0"
         if rep or delay == 0 or not v_edge:
             a(f"    wire [{in_bits-1}:0] row{r} = {base};")
         else:                                            # zero-mode top
@@ -2385,7 +2388,9 @@ def _generate_edge(out_line, image, module_name, framing="height",
         a("                if (in_active && in_valid && in_eof) eof_l <= 1'b1;")
     # line-buffer write at real columns (or a SOF pixel), never during hflush
     for k in range(1, M + 1):
-        a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : chain{k-1};")
+        src = "chain0" if k == 1 else f"chain{k-1}_q"
+        a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : {src};")
+        a(f"                chain{k}_q <= mem{k}[rd_col];")
     # horizontal shift: broadcast col0, else shift cur into the register chain
     for r in rows_used:
         for d in range(N, 0, -1):
