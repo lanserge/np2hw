@@ -268,7 +268,7 @@ def _datapath_signed(spatial_line, range_signed, params):
 
 def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
                clk_ns=None, base=None, no_cut_before=(), staging=None,
-               label="chain"):
+               label="chain", dev=None):
     """Emit the trailing pointwise stages; return (result_wire, bits, signed).
 
     `emit(line)` appends one Verilog line. `prefix` namespaces the wires so
@@ -290,29 +290,23 @@ def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
             return f"param_{name}"
     budget_fam = None
     if clk_ns is not None:
-        from .timing import Depth, FAMILIES
-        budget_fam = FAMILIES["7series"]
+        from .timing import Depth, device, post_op_cost
+        budget_fam = device(dev)
         spent = base if base is not None else Depth()
 
         def op_cost(op, bits):
-            if op[0] in ("shr", "trunc"):
-                return Depth()
-            if op[0] == "clip":
-                return Depth(levels=2, carry_bits=bits)
-            if op[0] == "addp":
-                return Depth(levels=1, carry_bits=bits)
-            return Depth(dsps=1)                 # mulc / mulp
+            return post_op_cost(op, bits, budget_fam)
     prev, cur_bits, cur_signed = f"{prefix}acc", acc_bits, acc_signed
     for i, op in enumerate(post):
         if budget_fam is not None:
             cost = op_cost(op, cur_bits)
-            if cost.ns(budget_fam) > clk_ns:
+            if budget_fam.ns(cost) > clk_ns:
                 raise ValueError(
                     f"{label}: operation {op[0]!r} alone estimates "
-                    f"{cost.ns(budget_fam):.1f} ns against the {clk_ns:.1f} "
+                    f"{budget_fam.ns(cost):.1f} ns against the {clk_ns:.1f} "
                     f"ns budget -- a register cannot land inside one "
                     "operation. Slow the clock or restructure the model.")
-            if (spent + cost).ns(budget_fam) > clk_ns:
+            if budget_fam.ns(spent + cost) > clk_ns:
                 if i in no_cut_before:
                     raise ValueError(
                         f"{label}: the budget asks for a register in front "
@@ -1048,7 +1042,8 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
     })
 
 
-def _generate_phase(canvas, module_name, clk_ns=None, label=None) -> dict:
+def _generate_phase(canvas, module_name, clk_ns=None, label=None,
+                    dev=None) -> dict:
     """Emit a phase-sliced model: one datapath, coefficients muxed by position.
 
     The model wrote four interleaved planes and they partition the image, so at
@@ -1187,17 +1182,16 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None) -> dict:
     no_cut = ()
     staging = []
     if clk_ns is not None:
-        from .timing import Depth
-        base = Depth(levels=(1 if muxed else 0) + max(len(template.taps) - 1,
-                                                      0),
-                     carry_bits=acc_bits * max(len(template.taps) - 1, 0))
+        from .timing import device
+        base = device(dev).adder_chain(len(template.taps), acc_bits,
+                                       muxed=muxed)
         no_cut = tuple(i for i, op in enumerate(effective)
                        if op[0] in ("addp", "mulp"))
     result, out_bits, out_signed = _emit_post(
         a, effective, acc_bits, signed,
         signal=lambda n: wires.get(n, f"param_{n}"),
         clk_ns=clk_ns, base=base, no_cut_before=no_cut, staging=staging,
-        label=label or module_name)
+        label=label or module_name, dev=dev)
     plan = (None, len(staging) + 1) if staging else None
 
     gate = "(erow < HEIGHT) && (ecol < WIDTH)"
@@ -1257,7 +1251,7 @@ def _reads_memory(root) -> bool:
 
 
 def generate(out_line, module_name="np2hw_top", framing="height",
-             max_width=None, clk_ns=None, label=None) -> dict:
+             max_width=None, clk_ns=None, label=None, dev=None) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
     framing='eof': height-agnostic -- an `in_eof` input (the sensor's frame-end /
     VSYNC, pulsed on the last input pixel) triggers the bottom flush, and output
@@ -1282,7 +1276,7 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         # floor: one operation deeper than the clock, named.
         from .timing import assign_stages
         stage_of, n_stages = assign_stages(
-            roots, budget, label=label or module_name)
+            roots, budget, dev, label=label or module_name)
         if n_stages > 1:
             plan = (stage_of, n_stages)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
@@ -1293,14 +1287,15 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         if out_line.kind == "expr":
             return _generate_expr_stack(out_line, module_name, plan=plan)
         return _generate_phase_stencil(out_line, module_name,
-                                       clk_ns=clk_ns, label=label)
+                                       clk_ns=clk_ns, label=label, dev=dev)
     if type(out_line).__name__ == "PhaseCanvas":         # out[py::2, px::2] = ...
         if any(value.taps != {(0, 0): 1} or value.mode != "none"
                for _, _, value in out_line.branches):
             return _generate_phase_stencil(out_line, module_name,
-                                           clk_ns=clk_ns, label=label)
+                                           clk_ns=clk_ns, label=label,
+                                           dev=dev)
         return _generate_phase(out_line, module_name,
-                               clk_ns=clk_ns, label=label)
+                               clk_ns=clk_ns, label=label, dev=dev)
     image = find_image(out_line)
     if image is None:
         raise ValueError("no image source found in pipeline")
@@ -1631,7 +1626,7 @@ def _post_range(lo, hi, post):
 
 
 def _generate_phase_stencil(stack, module_name, clk_ns=None,
-                            label=None) -> Core:
+                            label=None, dev=None) -> Core:
     channels = (stack.channels if type(stack).__name__ == "ChannelStack"
                 else [stack])
     image = channels[0].image
@@ -1741,43 +1736,56 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     # construction. One cut is this shape's whole repertoire: a half
     # that still misses refuses, named.
     stages = 1
+    aplan = None                 # (stage_of, n) for the arithmetic DAG
+    stage_label = label or module_name
     if clk_ns is not None:
-        from .timing import Depth, FAMILIES, expr_depth
-        fam = FAMILIES["7series"]
-        # The line buffers are read THROUGH A REGISTER, so the window
-        # cone is a memory's clock-to-out plus the edge muxes -- a
-        # datasheet constant, NOT a select tree that deepens with the
-        # line. That is the whole point of the registered read: the
-        # depth of this cone no longer depends on the picture's width.
-        window = Depth(mems=1 if M else 0, levels=2)
+        from .timing import (Depth, assign_stages, device, expr_depth,
+                             post_op_cost)
+        fam = device(dev)
+        window = fam.window(bool(M))
         worst = Depth()
+        chain_worst = Depth()
         for plane in chains:
-            taps = len(plane.taps)
-            lv = max(taps - 1, 0).bit_length()          # adder tree depth
             acc_bits = _range_bits_as(
                 *_acc_range(plane.taps, in_lo, in_hi), signed)
-            d = Depth(levels=lv, carry_bits=lv * acc_bits)
+            d = fam.adder_tree(len(plane.taps), acc_bits)
             for op in plane.post:
-                if op[0] == "clip":
-                    d = d + Depth(levels=2, carry_bits=acc_bits)
-                elif op[0] == "mulc":
-                    d = d + Depth(dsps=1)
-            worst = worst.worst(d)
+                if op[0] in ("clip", "mulc"):
+                    d = d + post_op_cost(op, acc_bits, fam)
+            chain_worst = fam.worst(chain_worst, d)
+        worst = chain_worst
         for plane in exprs:
-            worst = worst.worst(expr_depth(plane.expr))
-        arith = worst + Depth(levels=1)                  # the phase select
-        stage_label = label or module_name
-        if (window + arith).ns(fam) > clk_ns:
+            worst = fam.worst(worst, expr_depth(plane.expr, fam))
+        arith = worst + fam.select()                     # the phase select
+        if fam.ns(window + arith) > clk_ns:
             stages = 2
-            for half, what in ((window, "window read"),
-                               (arith, "plane arithmetic")):
-                if half.ns(fam) > clk_ns:
+            if fam.ns(window) > clk_ns:
+                raise ValueError(
+                    f"{stage_label}: the stencil's window read alone "
+                    f"estimates {fam.ns(window):.1f} ns against the "
+                    f"{clk_ns:.1f} ns budget on {fam.name}. That read is one "
+                    "memory and the edge selects -- there is nothing inside "
+                    "it to cut. Slow the clock.")
+            if fam.ns(arith) > clk_ns:
+                # Behind the snapshot the planes read REGISTERS, so the
+                # arithmetic is an ordinary pointwise DAG and cuts like
+                # one. A tap chain is emitted as a single summed wire and
+                # has no interior to cut, so a chain deeper than the clock
+                # is still the floor -- and says which it was.
+                if fam.ns(chain_worst) > clk_ns:
                     raise ValueError(
-                        f"{stage_label}: the stencil's {what} alone "
-                        f"estimates {half.ns(fam):.1f} ns against the "
-                        f"{clk_ns:.1f} ns budget on {fam.name}; one window "
-                        "snapshot register is this emitter's only cut. "
-                        "Slow the clock or restructure the model.")
+                        f"{stage_label}: a tap chain alone estimates "
+                        f"{fam.ns(chain_worst):.1f} ns against the "
+                        f"{clk_ns:.1f} ns budget on {fam.name}. A weighted "
+                        "sum is emitted as one expression; only window "
+                        "EXPRESSIONS carry pipeline stages today.")
+                # one level is reserved for the phase select, which rides
+                # the last arithmetic stage
+                stage_of, n = assign_stages(
+                    [pl.expr for pl in exprs], clk_ns - fam.level_ns,
+                    fam, label=stage_label)
+                if n > 1:
+                    aplan = (stage_of, n)
 
     L = []
     a = L.append
@@ -1789,6 +1797,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a("// timing: window snapshot registered -- the line-buffer read")
         a("// cone and the arithmetic cone each fit the clock; their sum")
         a("// did not (traced depth model, stencil flavour)")
+    if aplan:
+        a(f"// timing: the arithmetic is cut into {aplan[1]} further stages,")
+        a("// the plane expressions being deeper than one clock alone")
     a(f"module {module_name} #(parameter WIDTH = {realW}, "
       f"parameter HEIGHT = {realH}) (")
     a("    input  wire clk, input wire rst, input wire in_valid,")
@@ -1966,6 +1977,35 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     wemitted = {}
     wcounter = [0]
 
+    # Arithmetic pipeline. Behind the window snapshot the planes read
+    # registers, so a plane deeper than one clock is cut exactly as a
+    # pointwise DAG is: a value consumed in a later stage than the one
+    # that computed it rides a delay line to get there.
+    astage = aplan[0] if aplan else {}
+    afinal = (aplan[1] - 1) if aplan else 0
+    amark = len(L)               # pipeline regs are SPLICED in here: a
+    # continuous assignment may not read a reg declared further down
+    apipe = []                   # (reg, width, source, signed), in order
+    aseen = set()
+
+    def adelay(name, width, frm, to, sg=True):
+        prev = name
+        for k in range(1, to - frm + 1):
+            rn = f"{name}_s{k}"
+            if rn not in aseen:
+                aseen.add(rn)
+                apipe.append((rn, width, prev, sg))
+            prev = rn
+        return prev
+
+    def warg(node, want):
+        """An argument as the stage that consumes it sees it."""
+        nm = wemit(node)
+        if node.op in ("const", "param"):
+            return nm            # a literal is wiring; a register port is
+        s = astage.get(id(node), 0)   # stable across the pixel's flight
+        return adelay(nm, wwidth(node), s, want) if want > s else nm
+
     def wwidth(node):
         negative = (-node.lo - 1).bit_length() if node.lo < 0 else 0
         return max(node.hi.bit_length(), negative) + 1
@@ -1975,6 +2015,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         if key in wemitted:
             return wemitted[key]
         w = wwidth(node)
+        ns = astage.get(key, 0)          # the stage this node computes in
         if node.op == "const":
             wemitted[key] = str(node.args[0])
             return wemitted[key]
@@ -1991,25 +2032,26 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
                     else f"$signed({{1'b0, param_{leaf.name}}})")
         elif node.op in ("add", "sub", "mul"):
             op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
-            expr = f"{wemit(node.args[0])} {op} {wemit(node.args[1])}"
+            expr = f"{warg(node.args[0], ns)} {op} {warg(node.args[1], ns)}"
         elif node.op == "shr":
-            expr = f"{wemit(node.args[0])} >>> {node.args[1]}"
+            expr = f"{warg(node.args[0], ns)} >>> {node.args[1]}"
         elif node.op == "mask":
-            expr = f"$signed({{1'b0, {wemit(node.args[0])}[{node.args[1]-1}:0]}})"
+            expr = (f"$signed({{1'b0, {warg(node.args[0], ns)}"
+                    f"[{node.args[1]-1}:0]}})")
         elif node.op == "clip":
             source, lo, hi = node.args
-            inner = wemit(source)
+            inner = warg(source, ns)
             expr = (f"({inner} > {hi}) ? {hi} : "
                     f"(({inner} < {lo}) ? {lo} : {inner})")
         elif node.op == "abs":
-            inner = wemit(node.args[0])
+            inner = warg(node.args[0], ns)
             expr = f"({inner} < 0) ? -{inner} : {inner}"
         elif node.op == "lt":
-            expr = (f"({wemit(node.args[0])} < {wemit(node.args[1])}) "
+            expr = (f"({warg(node.args[0], ns)} < {warg(node.args[1], ns)}) "
                     "? 2'sd1 : 2'sd0")
         elif node.op == "sel":
-            cond = wemit(node.args[0])
-            yes, no = wemit(node.args[1]), wemit(node.args[2])
+            cond = warg(node.args[0], ns)
+            yes, no = warg(node.args[1], ns), warg(node.args[2], ns)
             expr = f"({cond} != 0) ? {yes} : {no}"
         elif node.op == "acc":
             raise NotImplementedError(
@@ -2037,7 +2079,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
                 # tap, never on the word's weighted sum.
                 root = plane.expr if plane.expr is not None \
                     else plane._as_wexpr()
-                res = wemit(root)
+                res = warg(root, afinal)
                 results.append((res, wwidth(root), root.lo < 0))
                 value_lo = min(value_lo, root.lo)
                 value_hi = max(value_hi, root.hi)
@@ -2047,8 +2089,12 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             acc_bits = _range_bits_as(acc_lo, acc_hi, signed)
             terms = [term(r, c, w) for (r, c), w in sorted(plane.taps.items())]
             a(f"    wire {sgn}[{acc_bits-1}:0] {prefix}acc = {' + '.join(terms)};")
-            results.append(_emit_post(a, list(plane.post), acc_bits, signed,
-                                      prefix))
+            _cres, _cbits, _csg = _emit_post(a, list(plane.post), acc_bits,
+                                             signed, prefix)
+            # a shallow chain beside a cut expression must still arrive
+            # with it: the mux reads one stage, not several
+            results.append((adelay(_cres, _cbits, 0, afinal, _csg)
+                            if afinal else _cres, _cbits, _csg))
             plane_lo, plane_hi = _post_range(acc_lo, acc_hi, plane.post)
             value_lo = min(value_lo, plane_lo)
             value_hi = max(value_hi, plane_hi)
@@ -2066,7 +2112,12 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             # A broadcast channel: the same value at every site, no mux.
             a(f"    wire {kind}[{cb-1}:0] chan{ci} = {ext[0]};")
         else:
-            sel = "{q_selr, q_selc}" if stages == 2 else "{sel_row, sel_col}"
+            if afinal:
+                sel = f"{{q_selr_s{afinal}, q_selc_s{afinal}}}"
+            elif stages == 2:
+                sel = "{q_selr, q_selc}"
+            else:
+                sel = "{sel_row, sel_col}"
             a(f"    reg {kind}[{cb-1}:0] chan{ci};")
             a("    always @(*) begin")
             a(f"        case ({sel})")
@@ -2100,6 +2151,45 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
         result = "word"
 
+    if afinal:
+        decl = ["",
+                f"    // arithmetic pipeline: {afinal + 1} stages behind the",
+                "    // window snapshot. The planes were deeper than one",
+                "    // clock, so the DAG is cut exactly as a pointwise",
+                "    // datapath is -- a value consumed later than it is",
+                "    // computed rides a delay line, and the flags and the",
+                "    // phase select ride beside it, so the pixel that",
+                "    // reaches the output is the one being described."]
+        for rn, w, _src, sg in apipe:
+            kind = "signed " if sg else ""
+            decl.append(f"    reg {kind}[{w-1}:0] {rn};")
+        for k in range(1, afinal + 1):
+            decl.append(f"    reg q_v_s{k}, q_sof_s{k}, "
+                        f"q_eol_s{k}, q_last_s{k};")
+            decl.append(f"    reg q_selr_s{k}, q_selc_s{k};")
+        L[amark:amark] = decl
+        a("    always @(posedge clk) begin")
+        a("        if (rst) begin")
+        for k in range(1, afinal + 1):
+            a(f"            q_v_s{k} <= 1'b0; q_sof_s{k} <= 1'b0;")
+            a(f"            q_eol_s{k} <= 1'b0; q_last_s{k} <= 1'b0;")
+        a("        end else if (!stall) begin")
+        for rn, _w, src, _sg in apipe:
+            a(f"            {rn} <= {src};")
+        for k in range(1, afinal + 1):
+            pv = "q_v" if k == 1 else f"q_v_s{k-1}"
+            ps = "q_sof" if k == 1 else f"q_sof_s{k-1}"
+            pe = "q_eol" if k == 1 else f"q_eol_s{k-1}"
+            pl = "q_last" if k == 1 else f"q_last_s{k-1}"
+            pr_ = "q_selr" if k == 1 else f"q_selr_s{k-1}"
+            pc_ = "q_selc" if k == 1 else f"q_selc_s{k-1}"
+            a(f"            q_v_s{k} <= {pv}; q_sof_s{k} <= {ps};")
+            a(f"            q_eol_s{k} <= {pe}; q_last_s{k} <= {pl};")
+            a(f"            q_selr_s{k} <= {pr_}; q_selc_s{k} <= {pc_};")
+        a("        end")
+        a("    end")
+        a("")
+
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
     a("            col<=0; row<=0; fcol<=0; frow<=0;")
@@ -2111,8 +2201,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         # the output registers read the snapshot's flags every advancing
         # beat: bubbles carry q_v = 0, so no en-gate here -- and the
         # registered line-buffer write fires on its own captured enable
-        a("            out_valid <= q_v; out_sof <= q_sof;")
-        a("            out_eol <= q_eol; out_last <= q_last;")
+        sfx = f"_s{afinal}" if afinal else ""
+        a(f"            out_valid <= q_v{sfx}; out_sof <= q_sof{sfx};")
+        a(f"            out_eol <= q_eol{sfx}; out_last <= q_last{sfx};")
         a(f"            out_data <= {result};")
         a("            if (wr_en) begin")
         for k in range(1, M + 1):
@@ -2194,7 +2285,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         "aw_bits": 0,
         "hblank": pr + 2,
         "vdrain": (pb + 1) * (realW + pr) + 8,
-        "pipeline_stages": stages,
+        # the snapshot boundary plus however many the arithmetic needed:
+        # the module's real depth, not the shape of the cut
+        "pipeline_stages": stages + afinal,
     })
 
 

@@ -27,7 +27,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from np2hw.ir import PExpr
-from np2hw.timing import SERIES7, check, expr_depth
+from np2hw.timing import SERIES7, Device, check, expr_depth
 
 
 class _Table:
@@ -78,10 +78,10 @@ def main():
 
     print("timing_budget:")
 
-    gm = expr_depth(gamma_stage())
-    est = gm.ns(SERIES7)
+    gm = expr_depth(gamma_stage(), SERIES7)
+    est = SERIES7.ns(gm)
     try:
-        check(gamma_stage(), clk_ns=10.0, label="gamma")
+        check(gamma_stage(), 10.0, SERIES7, label="gamma")
         anchored = False
     except ValueError:
         anchored = True
@@ -89,30 +89,61 @@ def main():
            anchored, f"est {est:.1f} ns, {gm.levels} levels, {gm.dsps} DSP")
     ok = True
     try:
-        check(gamma_stage(), clk_ns=15.0, label="gamma")
+        check(gamma_stage(), 15.0, SERIES7, label="gamma")
     except ValueError:
         ok = False
     result("anchor: the same stage fits the 15 ns island it runs on", ok)
 
-    bl = expr_depth(blacklevel_stage())
+    bl = expr_depth(blacklevel_stage(), SERIES7)
     ok = True
     try:
-        check(blacklevel_stage(), clk_ns=6.7, label="blacklevel")
+        check(blacklevel_stage(), 6.7, SERIES7, label="blacklevel")
     except ValueError:
         ok = False
     result("shallow: black level fits the 148.5 MHz pixel budget", ok,
-           f"est {bl.ns(SERIES7):.1f} ns")
+           f"est {SERIES7.ns(bl):.1f} ns")
 
-    small = expr_depth(gamma_stage(knot_count=9))
+    small = expr_depth(gamma_stage(knot_count=9), SERIES7)
+    big = expr_depth(gamma_stage(knot_count=257), SERIES7)
     result("monotone: a deeper table cannot get faster",
-           expr_depth(gamma_stage(knot_count=257))._key() >= small._key())
+           SERIES7.ns(big) >= SERIES7.ns(small))
 
     try:
-        expr_depth(PExpr("modulo", (acc(),), 0, 1))
+        expr_depth(PExpr("modulo", (acc(),), 0, 1), SERIES7)
         refused = False
     except ValueError:
         refused = True
     result("refusal: an op without a hardware shape is an error", refused)
+
+    # The device is a DRIVER: it owns the shapes, not only the numbers.
+    # A narrower lookup table does not merely run slower, it builds a
+    # DEEPER select tree -- so if any LUT6 assumption still lurked in
+    # np2hw, this claim could not move.
+    class Narrow(SERIES7.__class__):
+        name = "hypothetical-4LUT"
+        lut_inputs = 4
+    narrow = Narrow()
+    result("device: a 6-input LUT selects 4:1, a 4-input LUT only 2:1",
+           SERIES7.mux_arity() == 4 and narrow.mux_arity() == 2)
+    result("device: the same table is a deeper tree on a narrower LUT",
+           narrow.mux_levels(256) > SERIES7.mux_levels(256),
+           f"{SERIES7.mux_levels(256)} vs {narrow.mux_levels(256)} levels")
+    deep = expr_depth(gamma_stage(), narrow)
+    result("device: that depth reaches the estimate, not just the helper",
+           deep.levels > gm.levels)
+
+    # A calibration number has no default: a family that forgets one
+    # must refuse, not silently inherit another family's silicon.
+    class Forgetful(Device):
+        name = "no-numbers"
+        level_ns = 0.5
+    try:
+        Forgetful()
+        named = False
+    except ValueError as e:
+        named = "mem_ns" in str(e) and "lut_inputs" in str(e)
+    result("device: an unset constant refuses, and names what is missing",
+           named)
 
     ok = all(checks)
     print("\n" + ("TIMING_BUDGET PASS" if ok else "FAIL"))

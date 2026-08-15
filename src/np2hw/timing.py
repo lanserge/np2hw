@@ -10,12 +10,17 @@ synthesis-time discovery: the budget check runs in microseconds and
 names the expression, where a place-and-route run takes half an hour
 and names a net.
 
-The nanosecond mapping is CALIBRATION, once per device family: a few
-constants (effective LUT level, carry per bit, DSP through-delay,
-register overhead) measured from real routed designs. The first
-7-series table below is anchored to a bench-measured stage -- a tone
-curve's gather+multiply+add at 11.4 ns routed -- and is deliberately
-conservative; refine it from CI sweeps, never per block.
+The device is a DRIVER, not a table of numbers. `Device` owns both
+halves of the mapping -- the calibration constants AND the hardware
+each operation becomes -- because the two cannot be separated: a
+family with a narrower LUT does not merely have different delays, it
+builds a mux tree of a different depth, and a family without a DSP
+column does not multiply the same way at all. A bag of constants can
+only misdescribe such a device; a subclass can override the method.
+
+Nothing outside this file may contain a device constant. The emitters
+ask the device for a shape and for nanoseconds, and adding a family is
+subclassing `Device` -- not editing np2hw.
 
 The same arithmetic drives automatic pipelining: `assign_stages()`
 walks the DAG in dependency order and starts a new pipeline stage the
@@ -40,120 +45,258 @@ def _bits(node: PExpr) -> int:
     return width + (1 if lo < 0 else 0)
 
 
-@dataclass(frozen=True)
-class Family:
-    """Per-device-family calibration constants, nanoseconds.
-
-    level_ns is an EFFECTIVE LUT level: logic plus its average routed
-    net. overhead_ns covers clock-to-out, the final setup, and the
-    first/last nets. Conservative by intent -- a pass here should
-    survive routing, not merely hope to.
-    """
-    name: str
-    level_ns: float
-    carry_ns_per_bit: float
-    dsp_ns: float
-    overhead_ns: float
-    # A block RAM's clock-to-out: a DATASHEET number, not a function of
-    # the table's depth. Costing a memory read this way (instead of by
-    # analogy to a mux tree) is the whole reason reads are registered.
-    mem_ns: float = 2.1
-
-
-# Anchored to the bench: an 11-level, 28-carry-bit, one-DSP stage
-# routed at ~11.4 ns on xc7z020-1. 1.6 + 11*0.62 + 28*0.03 + 3.2 = 12.5:
-# conservative by about a nanosecond on the anchor, as intended.
-SERIES7 = Family("7series-1", level_ns=0.62, carry_ns_per_bit=0.03,
-                 dsp_ns=3.2, overhead_ns=1.6)
-
-FAMILIES = {"7series": SERIES7}
-
-
 @dataclass
 class Depth:
-    """Worst path of one expression, in structural units."""
+    """Worst path of one expression, in STRUCTURAL units only.
+
+    Deliberately knows nothing about nanoseconds: a count of logic
+    levels, carry bits, DSPs and memories is what the generator can
+    derive on its own. Turning it into time is the device's job, and
+    so is deciding which of two paths is worse -- that ordering
+    depends on the ratio between a DSP and a LUT level, which is a
+    property of the silicon, not of the expression.
+    """
     levels: int = 0
     carry_bits: int = 0
     dsps: int = 0
     mems: int = 0
-
-    def ns(self, family: Family) -> float:
-        return (family.overhead_ns + self.levels * family.level_ns
-                + self.carry_bits * family.carry_ns_per_bit
-                + self.dsps * family.dsp_ns + self.mems * family.mem_ns)
 
     def __add__(self, other: "Depth") -> "Depth":
         return Depth(self.levels + other.levels,
                      self.carry_bits + other.carry_bits,
                      self.dsps + other.dsps, self.mems + other.mems)
 
-    def worst(self, other: "Depth") -> "Depth":
-        # Along the worst PATH the components add per node; across
-        # siblings the slower branch wins by its nanosecond total.
-        return self if self._key() >= other._key() else other
 
-    def _key(self):
-        return (self.levels * SERIES7.level_ns
-                + self.carry_bits * SERIES7.carry_ns_per_bit
-                + self.dsps * SERIES7.dsp_ns + self.mems * SERIES7.mem_ns)
+class Device:
+    """A device family: its calibration AND how operations map to it.
+
+    Subclass, set the constants, and override any method whose shape
+    differs. Every constant is declared None here on purpose -- a
+    calibration number has no sensible default, and a family that
+    silently inherited another family's memory delay would be wrong
+    in a way the model could not see.
+
+    level_ns is an EFFECTIVE LUT level: logic plus its average routed
+    net. overhead_ns covers clock-to-out, the final setup, and the
+    first/last nets. Conservative by intent -- a pass here should
+    survive routing, not merely hope to.
+    """
+
+    name = None
+    level_ns = None            # one LUT level, including its routed net
+    carry_ns_per_bit = None    # a carry chain, per bit
+    dsp_ns = None              # a hard multiplier, in to out
+    overhead_ns = None         # clock-to-out + setup + the first/last nets
+    mem_ns = None              # a memory's clock-to-out (registered read)
+    lut_inputs = None          # how many inputs one lookup table has
+
+    _REQUIRED = ("name", "level_ns", "carry_ns_per_bit", "dsp_ns",
+                 "overhead_ns", "mem_ns", "lut_inputs")
+
+    def __init__(self):
+        missing = [f for f in self._REQUIRED if getattr(self, f) is None]
+        if missing:
+            raise ValueError(
+                f"{type(self).__name__} leaves {', '.join(missing)} unset. "
+                "A calibration constant has no default: measure it on the "
+                "device (a sweep of known depths, read from the timing "
+                "report) rather than inheriting another family's number.")
+
+    def __repr__(self):
+        return f"<{type(self).__name__} {self.name}>"
+
+    # -- structure to time ------------------------------------------------
+    def ns(self, d: Depth) -> float:
+        """What a structural depth costs on THIS device."""
+        return (self.overhead_ns + d.levels * self.level_ns
+                + d.carry_bits * self.carry_ns_per_bit
+                + d.dsps * self.dsp_ns + d.mems * self.mem_ns)
+
+    def worst(self, a: Depth, b: Depth) -> Depth:
+        """The slower of two sibling paths, by this device's own ratios."""
+        return a if self.ns(a) >= self.ns(b) else b
+
+    # -- the shapes -------------------------------------------------------
+    def mux_arity(self) -> int:
+        """Widest m:1 mux one lookup table implements: m data inputs plus
+        log2(m) select lines must fit. A 6-input LUT gives 4:1; a
+        4-input LUT gives only 2:1, which is why the tree's depth is a
+        device property and not a constant."""
+        m = 2
+        while (2 * m) + _clog2(2 * m) <= self.lut_inputs:
+            m *= 2
+        return m
+
+    def mux_levels(self, size: int) -> int:
+        """Select-tree depth for a size-entry read -- the law behind a
+        gather's register array and a distributed table alike."""
+        per = _clog2(self.mux_arity())
+        return max(1, -(-_clog2(max(size, 2)) // per))
+
+    def wire(self) -> Depth:
+        """Costs nothing: a register output, a constant, a mask, a
+        constant shift -- wiring into the stage that uses it."""
+        return Depth()
+
+    def add(self, bits: int) -> Depth:
+        return Depth(levels=1, carry_bits=bits)
+
+    def compare(self, bits: int) -> Depth:
+        return Depth(levels=1, carry_bits=bits)
+
+    def select(self) -> Depth:
+        return Depth(levels=1)
+
+    def absolute(self, bits: int) -> Depth:
+        return Depth(levels=1, carry_bits=bits)
+
+    def clip(self, bits: int) -> Depth:
+        """A compare against each bound and the select between them."""
+        return Depth(levels=2, carry_bits=bits)
+
+    def mul(self) -> Depth:
+        return Depth(dsps=1)
+
+    def mem(self) -> Depth:
+        """A registered memory read: it OWNS its stage, so what it costs
+        the stage that follows is the memory's clock-to-out, and nothing
+        in front of it can share the cycle."""
+        return Depth(mems=1)
+
+    def gather(self, size: int) -> Depth:
+        """A read from a register array: a select tree, whose depth the
+        table's size and this device's LUT width decide together."""
+        return Depth(levels=self.mux_levels(size))
+
+    def adder_tree(self, terms: int, bits: int) -> Depth:
+        """A balanced tree summing `terms` values: log2 levels, each one
+        a carry chain."""
+        lv = max(terms - 1, 0).bit_length()
+        return Depth(levels=lv, carry_bits=lv * bits)
+
+    def adder_chain(self, terms: int, bits: int, muxed=False) -> Depth:
+        """A linear accumulation of `terms` values, optionally behind a
+        position select -- what a tap chain becomes before its post ops."""
+        n = max(terms - 1, 0)
+        return Depth(levels=(1 if muxed else 0) + n, carry_bits=bits * n)
+
+    def window(self, has_line_buffers: bool) -> Depth:
+        """The read cone of a stencil's window: a registered memory read
+        plus the edge selects. A CONSTANT in the line's width -- that is
+        the whole point of reading line buffers through a register, and
+        the reason this is not a select tree that deepens with the
+        picture."""
+        return Depth(mems=1 if has_line_buffers else 0, levels=2)
 
 
-def expr_depth(node) -> Depth:
+class Series7(Device):
+    """Xilinx 7-series, speed grade -1.
+
+    Anchored to the bench: an 11-level, 28-carry-bit, one-DSP stage
+    routed at ~11.4 ns on xc7z020-1. 1.6 + 11*0.62 + 28*0.03 + 3.2 =
+    12.5, conservative by about a nanosecond on the anchor, as
+    intended. One anchor is one equation, so these are fitted rather
+    than solved; a sweep of known depths would solve them.
+    """
+    name = "7series-1"
+    level_ns = 0.62
+    carry_ns_per_bit = 0.03
+    dsp_ns = 3.2
+    overhead_ns = 1.6
+    mem_ns = 2.1
+    lut_inputs = 6
+
+
+SERIES7 = Series7()
+
+DEVICES = {"7series": SERIES7}
+
+# The default is a CHOICE OF PROFILE, not a constant: it selects which
+# calibration to read, and every number still comes from the device.
+# One place owns it, so a build for other silicon changes one name.
+DEFAULT_DEVICE = "7series"
+
+
+def device(spec) -> Device:
+    """Accept a registered name or a Device instance -- so a family that
+    np2hw has never heard of needs no entry here, only a subclass."""
+    if isinstance(spec, Device):
+        return spec
+    if spec is None:
+        spec = DEFAULT_DEVICE
+    try:
+        return DEVICES[spec]
+    except KeyError:
+        raise ValueError(
+            f"unknown device {spec!r}: known names are "
+            f"{sorted(DEVICES)}, or pass a Device instance") from None
+
+
+# -- np2hw's vocabularies, mapped onto the device's shapes ----------------
+# These carry NO numbers. They translate an op name into a request the
+# device answers, so every hardware shape has exactly one owner.
+
+def node_cost(node, dev: Device) -> Depth:
+    """The hardware shape of ONE PExpr node: what it adds to any path
+    through it. Leaves cost nothing -- they are registers, constants, or
+    the wires of a register array."""
+    op = node.op
+    if op in ("acc", "const", "param", "tap", "row", "col"):
+        # registers, constants, window taps, and the position counters
+        # every core already keeps: wires into the stage
+        return dev.wire()
+    if op in ("shr", "mask"):
+        return dev.wire()
+    if op == "gather":
+        parent, _index = node.args
+        return dev.gather(int(parent.shape[0]))
+    if op == "rom":
+        return dev.mem()
+    if op in ("add", "sub"):
+        return dev.add(_bits(node))
+    if op == "mul":
+        return dev.mul()
+    if op == "clip":
+        return dev.clip(_bits(node))
+    if op == "lt":
+        return dev.compare(_bits(node.args[0])
+                           if isinstance(node.args[0], PExpr) else 0)
+    if op == "abs":
+        return dev.absolute(_bits(node))
+    if op == "sel":
+        return dev.select()
+    raise ValueError(f"no depth rule for PExpr op {op!r} -- a new op "
+                     "needs a hardware shape here before it ships")
+
+
+def post_op_cost(op, bits: int, dev: Device) -> Depth:
+    """The same question for the POST-CHAIN vocabulary the tap emitters
+    speak (shr/trunc/clip/addp/mulc/mulp). One device, one set of
+    shapes: a clip costs here exactly what it costs above."""
+    kind = op[0]
+    if kind in ("shr", "trunc"):
+        return dev.wire()
+    if kind == "clip":
+        return dev.clip(bits)
+    if kind == "addp":
+        return dev.add(bits)
+    if kind in ("mulc", "mulp"):
+        return dev.mul()
+    raise ValueError(f"no depth rule for post op {kind!r} -- a new op "
+                     "needs a hardware shape here before it ships")
+
+
+def expr_depth(node, dev: Device) -> Depth:
     """Worst-path structural depth of a PExpr DAG: node_cost summed
-    along the worst path, sibling branches compared by nanosecond
-    total. One cost table (node_cost) owns every op's hardware shape;
-    this walk and the stage cutter both read it."""
+    along the worst path, sibling branches compared by the device's own
+    nanosecond ratios."""
     if not isinstance(node, PExpr):
         return Depth()
     below = Depth()
     for a in node.args:
         if isinstance(a, PExpr):
-            below = below.worst(expr_depth(a))
-    return below + node_cost(node)
-
-
-def mux_levels(size: int) -> int:
-    """LUT6 select-tree depth for a size-entry read -- the law behind a
-    gather's register array and a line buffer's column read alike."""
-    return max(1, (_clog2(max(size, 2)) + 1) // 2)
-
-
-def node_cost(node) -> Depth:
-    """The hardware shape of ONE node: what it adds to any path through
-    it. Leaves cost nothing (they are registers, constants, or the
-    wires of a register array); adds and subtracts one level plus a
-    carry as wide as the result, a multiply one DSP, a clip a
-    compare-and-select, a mask or constant shift nothing at all, a
-    gather the mux tree its table size dictates."""
-    if node.op in ("acc", "const", "param", "tap", "row", "col"):
-        # registers, constants, window taps, and the position counters
-        # every core already keeps: wires into the stage
-        return Depth()
-    if node.op == "gather":
-        parent, _index = node.args
-        return Depth(levels=mux_levels(int(parent.shape[0])))
-    if node.op == "rom":
-        # A registered memory read: it OWNS its stage, so what it costs
-        # the following stage is the memory's clock-to-out, and nothing
-        # in front of it can share the cycle.
-        return Depth(mems=1)
-    if node.op in ("add", "sub"):
-        return Depth(levels=1, carry_bits=_bits(node))
-    if node.op == "mul":
-        return Depth(dsps=1)
-    if node.op == "clip":
-        return Depth(levels=2, carry_bits=_bits(node))
-    if node.op in ("shr", "mask"):
-        return Depth()
-    if node.op == "lt":
-        return Depth(levels=1, carry_bits=_bits(node.args[0])
-                     if isinstance(node.args[0], PExpr) else 0)
-    if node.op == "abs":
-        return Depth(levels=1, carry_bits=_bits(node))
-    if node.op == "sel":
-        return Depth(levels=1)
-    raise ValueError(f"no depth rule for PExpr op {node.op!r} -- a new op "
-                     "needs a hardware shape here before it ships")
+            below = dev.worst(below, expr_depth(a, dev))
+    return below + node_cost(node, dev)
 
 
 # param and const leaves FLOAT: a register port is stable across a
@@ -165,8 +308,7 @@ def node_cost(node) -> Depth:
 FLOATING = ("const", "param")
 
 
-def assign_stages(roots, clk_ns: float, family: str = "7series",
-                  label: str = "stage"):
+def assign_stages(roots, clk_ns: float, dev, label: str = "stage"):
     """Cut a PExpr DAG into pipeline stages that each fit the budget.
 
     Walks in dependency order with ONE memo shared across all roots
@@ -181,7 +323,7 @@ def assign_stages(roots, clk_ns: float, family: str = "7series",
     ALONE exceeds the budget: that is the floor -- a pipeline register
     cannot land inside one operation.
     """
-    fam = FAMILIES[family]
+    fam = device(dev)
     stage_of = {}
     depth_in = {}
 
@@ -192,11 +334,11 @@ def assign_stages(roots, clk_ns: float, family: str = "7series",
         args = [a for a in node.args if isinstance(a, PExpr)]
         for a in args:
             visit(a)
-        cost = node_cost(node)
-        if cost.ns(fam) > clk_ns:
+        cost = node_cost(node, fam)
+        if fam.ns(cost) > clk_ns:
             raise ValueError(
                 f"{label}: operation {node.op!r} alone estimates "
-                f"{cost.ns(fam):.1f} ns against the {clk_ns:.1f} ns budget "
+                f"{fam.ns(cost):.1f} ns against the {clk_ns:.1f} ns budget "
                 f"on {fam.name} -- a pipeline register cannot land inside "
                 "one operation. Slow the clock or restructure the model.")
         staged = [a for a in args if a.op not in FLOATING]
@@ -213,9 +355,9 @@ def assign_stages(roots, clk_ns: float, family: str = "7series",
         below = Depth()
         for a in staged:
             if stage_of[id(a)] == s:
-                below = below.worst(depth_in[id(a)])
+                below = fam.worst(below, depth_in[id(a)])
         d = below + cost
-        if d.ns(fam) > clk_ns:
+        if fam.ns(d) > clk_ns:
             s += 1            # cut here: every argument arrives registered
             d = cost
         stage_of[key] = s
@@ -227,16 +369,15 @@ def assign_stages(roots, clk_ns: float, family: str = "7series",
     return stage_of, n_stages
 
 
-def check(root, clk_ns: float, family: str = "7series",
-          label: str = "stage") -> Depth:
+def check(root, clk_ns: float, dev, label: str = "stage") -> Depth:
     """The budget verdict for one stage, named and in nanoseconds.
 
     Raises when the estimate exceeds the clock: at generation time,
     in microseconds, instead of after place-and-route, in despair.
     """
-    fam = FAMILIES[family]
-    depth = expr_depth(root)
-    est = depth.ns(fam)
+    fam = device(dev)
+    depth = expr_depth(root, fam)
+    est = fam.ns(depth)
     if est > clk_ns:
         raise ValueError(
             f"{label}: estimated {est:.1f} ns ({depth.levels} levels, "

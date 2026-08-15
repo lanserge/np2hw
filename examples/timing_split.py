@@ -131,6 +131,34 @@ def demosaic(img, py, px):
     return np.stack([r, g, b], axis=-1).astype(np.uint8)
 
 
+def adaptive(img, py, px):
+    """A DIRECTION-ADAPTIVE plane, the Hamilton-Adams shape: second
+    differences, their magnitudes, a comparison and a select. Deep
+    enough that one clock cannot hold it, so the emitter must cut the
+    arithmetic into stages rather than refuse."""
+    value = img.astype(np.int32)
+    h, w = value.shape
+    x = np.pad(value, 2, mode="edge")
+
+    def at(r, c):
+        return x[2 + r:2 + r + h, 2 + c:2 + c + w]
+
+    c0 = at(0, 0)
+    lh = 2 * c0 - at(0, -2) - at(0, 2)
+    lv = 2 * c0 - at(-2, 0) - at(2, 0)
+    dh = np.abs(at(0, -1) - at(0, 1)) + np.abs(lh)
+    dv = np.abs(at(-1, 0) - at(1, 0)) + np.abs(lv)
+    gh = ((at(0, -1) + at(0, 1)) // 2 + lh // 4).clip(0, 255)
+    gv = ((at(-1, 0) + at(1, 0)) // 2 + lv // 4).clip(0, 255)
+    est = np.where(dh < dv, gh, gv)
+    out = np.empty_like(value)
+    out[py::2, px::2] = est[py::2, px::2]
+    out[py::2, 1 - px::2] = c0[py::2, 1 - px::2]
+    out[1 - py::2, px::2] = c0[1 - py::2, px::2]
+    out[1 - py::2, 1 - px::2] = est[1 - py::2, 1 - px::2]
+    return out.astype(np.uint8)
+
+
 def _two_frames(meta, W, H, frames, values):
     """Drive the core through consecutive frames, in_sof on each first
     pixel, edge-feed pacing; return the collected output words."""
@@ -308,6 +336,36 @@ def main():
     result("stencil: line buffers are read through a register", registered)
     result("stencil: the address is one column AHEAD, so no schedule "
            "shift", one_ahead)
+
+    # A plane deeper than the clock used to be the floor here: the
+    # window snapshot was this emitter's only cut. Behind that snapshot
+    # the planes read REGISTERS, so the arithmetic is an ordinary
+    # pointwise DAG and cuts like one -- and the flags and the phase
+    # select must ride the same delay, or the pixel that reaches the
+    # output is described by another pixel's position.
+    _, outad = to_ir(adaptive, Image2D("img", SW, SH, bits=SBITS), *cfa)
+    meta_ad = generate(outad, module_name="ha_148", clk_ns=CLK_148M5)
+    depth = meta_ad["pipeline_stages"]
+    ok = depth > 2 and check("ha_148", adaptive, As, params=cfa,
+                             param_values={"py": 1, "px": 0}, bits=SBITS,
+                             clk_ns=CLK_148M5)
+    result("stencil: a plane deeper than the clock CUTS, bit-exact", ok,
+           f"{depth} stages")
+
+    # A deeper pipeline means frame 2's first pixel is in flight while
+    # frame 1's tail is still draining: SOF must re-anchor the counters
+    # without the two frames meeting inside the delay lines.
+    A2a = rng.integers(0, (1 << SBITS), (SH, SW)).astype(np.uint8)
+    twoa = _two_frames(meta_ad, SW, SH, [As, A2a], {"py": 1, "px": 0})
+    expa = [adaptive(f, 1, 0).astype(np.int64).ravel() for f in (As, A2a)]
+    ok = (twoa is not None and twoa.size == 2 * SH * SW
+          and np.array_equal(twoa[:SH * SW], expa[0])
+          and np.array_equal(twoa[SH * SW:], expa[1]))
+    result("stencil: two frames across a SOF with the arithmetic cut", ok)
+
+    slow = generate(outad, module_name="ha_slow", clk_ns=20.0)
+    result("stencil: the same plane under a clock it fits stays whole",
+           slow["pipeline_stages"] == 1)
 
     wbp = [Param("py", bits=1, description="Row parity"),
            Param("px", bits=1, description="Column parity"),
