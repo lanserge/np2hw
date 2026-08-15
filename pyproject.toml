@@ -38,6 +38,11 @@ media = ["pillow"]            # CLI image/GIF IO
 camera = ["opencv-python"]    # `np2hw view --source camera` (webcam)
 switchboard = ["switchboard-hw", "umi"]   # `np2hw run --backend switchboard`
 fusesoc = ["PyYAML"]          # generator-protocol input parsing (FuseSoC ships it too)
+# bayerlink_in() generates a receiver FROM the reference codec's protocol
+# tables -- the fourcc and phase maps have one owner, and it is bayerlink.
+# 0.4.0 is the floor: the tables were renamed and grew a row per payload
+# family after 0.3.0, so an older bayerlink cannot answer the import.
+bayerlink = ["bayerlink>=0.4.0"]
 
 [project.urls]
 Homepage = "https://github.com/lanserge/np2hw"
