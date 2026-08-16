@@ -758,6 +758,36 @@ def coords(img):
             img._expr_derive(PExpr("col", (), 0, width - 1)))
 
 
+def saturate(value, bits: int):
+    """Saturate to what fits in ``bits`` unsigned: the range [0, 2**bits - 1].
+
+    ``clip`` takes a lo and a hi, which is the general operation and the
+    honest one for an arbitrary bound. A DATAPATH bound is not arbitrary:
+    it is a width, and writing it as ``clip(0, (1 << bits) - 1)`` states
+    a width in the vocabulary of values. Every place that did so spelled
+    out the same conversion, and each of those spellings was free to be
+    a different one.
+
+    Stating it as bits also makes the traced range EXACT rather than
+    approximate. A clip to 1020 and a clip to 1023 both report ten bits,
+    so a width alone cannot say where full scale sits; a saturation
+    expressed in bits can only ever produce ``2**bits - 1``, so the
+    width IS the scale, and a consumer downstream can derive one from
+    the other without being told.
+
+    Runs on real arrays as readily as on traced ones -- both have
+    ``clip`` with NumPy's semantics -- so a model using it stays its own
+    oracle.
+
+    Not for signed intermediates. A difference stream (sharpening,
+    chroma) is bounded by a magnitude on both sides, which is a
+    different statement; write that ``clip`` out.
+    """
+    if bits < 1:
+        raise ValueError(f"saturate to {bits} bits: need at least 1")
+    return value.clip(0, (1 << int(bits)) - 1)
+
+
 def lower(traced: Traced):
     if getattr(traced, "expr", None) is not None:
         # A pointwise expression DAG: collect the gathered register arrays in
