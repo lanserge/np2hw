@@ -2,7 +2,7 @@
 
 bayerlink (github.com/bayerlink/bayerlink) carries packed raw Bayer over a
 display link. `np2hw.video_in.bayerlink_in()` emits the receiving end:
-parallel video from an HDMI receiver in, np2hw's elastic 16-bit stream out,
+parallel video from an HDMI receiver in, np2hw's elastic stream out at the build's depth,
 with each frame's header owning depth and geometry AT RUN TIME.
 
 The encoder here is not hand-rolled: containers come from the published
@@ -13,6 +13,11 @@ each a way the receiver could be wrong on a bench with a scope instead:
   EVERY DEPTH     8, 10, 12, 14 and 16-bit frames -- one of each, in ONE
                   run of ONE build, the header switching the unpack engine
                   frame by frame -- all bit-exact with exact framing.
+  ALIGNMENT       the header's depth is run-time, the build's is not, so
+                  samples leave aligned to the build's: full scale in is
+                  full scale out at every source depth, a deeper source
+                  shifts down rather than wrapping, and a source at the
+                  build's own depth passes through untouched.
   GEOMETRY        frames of different width and height in one run: the
                   header owns geometry, the build owns only capacity.
   LANES           a permuted byte-lane wiring, matched by `lane_map`,
@@ -56,8 +61,11 @@ module tb;
   reg [23:0] vid_data = 0;
   wire ov, refd, out_valid, out_sof, out_eol, out_last, hdrv;
   wire [2:0] rcode;
-  wire [15:0] out_data, hdrw, hdrh;
+  wire [%(OUTBITS)d-1:0] out_data;
+  wire [15:0] hdrw, hdrh;
   wire [4:0] hdrb;
+  wire [7:0] hdrsrc;
+  wire [31:0] hdrseq;
   wire [1:0] hdrp;
   reg out_ready = 0;
   integer stall = 0;
@@ -68,6 +76,7 @@ module tb;
     .out_sof(out_sof), .out_eol(out_eol), .out_last(out_last),
     .overflow(ov), .refused(refd), .refuse_code(rcode),
     .hdr_bits(hdrb), .hdr_width(hdrw), .hdr_height(hdrh),
+    .hdr_source_id(hdrsrc), .hdr_frame_seq(hdrseq),
     .hdr_phase(hdrp), .hdr_valid(hdrv));
 
   always #5 clk = ~clk;
@@ -117,7 +126,7 @@ module tb;
     repeat (DISPW*LINES*4 + 800) @(posedge clk);
     $fwrite(fd, "OVF %%0d\\n", ov);
     $fwrite(fd, "REF %%0d %%0d\\n", refd, rcode);
-    $fwrite(fd, "HDR %%0d %%0d %%0d %%0d %%0d\\n", hdrb, hdrw, hdrh, hdrp, hdrv);
+    $fwrite(fd, "HDR %%0d %%0d %%0d %%0d %%0d %%0d %%0d\\n", hdrb, hdrw, hdrh, hdrp, hdrv, hdrsrc, hdrseq);
     $fclose(fd);
     $finish;
   end
@@ -146,7 +155,8 @@ def rand_frame(rng, bits, w, h):
 
 
 def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
-        max_line_bytes=4096, fifo_depth=1024, stall=0, gap=200, burst=0):
+        max_line_bytes=4096, fifo_depth=1024, stall=0, gap=200, burst=0,
+        out_bits=12):
     """Build once, drive a LIST of frames (spec dicts or raw containers).
 
     Each frame spec: {"bits", "raw", "order"} -> encoded via the reference
@@ -154,7 +164,9 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
     good containers, so even the refused bytes come from the reference).
     """
     core = bayerlink_in(max_line_bytes=max_line_bytes, module_name=name,
-                        fifo_depth=fifo_depth, lane_map=lane_map)
+                        fifo_depth=fifo_depth, lane_map=lane_map,
+                        bits=out_bits)
+    assert core["out_bits"] == out_bits
     stream = []
     for i, spec in enumerate(frames):
         if "container" in spec:
@@ -162,7 +174,8 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
         else:
             container = encode_frame(
                 spec["raw"], spec.get("order", "RGGB"), frame_seq=i + 1,
-                display=(disp_w, disp_h), bits=spec["bits"])
+                display=(disp_w, disp_h), bits=spec["bits"],
+                source_id=spec.get("source_id", 0))
         stream.append(pack_lanes(container, lane_map))
     words = np.concatenate([s.ravel() for s in stream])
 
@@ -174,7 +187,8 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
     with open(os.path.join(BUILD, "tb.v"), "w") as fh:
         fh.write(TB % {"DISPW": disp_w, "LINES": disp_h, "BLANK": blank,
                        "MODULE": name, "FRAMES": len(frames),
-                       "STALL": stall or 1, "GAP": gap})
+                       "STALL": stall or 1, "GAP": gap,
+                       "OUTBITS": out_bits})
 
     subprocess.run(["iverilog", "-g2012", "-o", "sim.vvp", f"{name}.v", "tb.v"],
                    check=True, cwd=BUILD, capture_output=True)
@@ -199,15 +213,33 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
     return beats, overflow, refused, hdr
 
 
-def exact(beats, raws):
-    """Beats == the concatenation of raw frames, each with exact framing."""
+def align(raw, in_bits, out_bits):
+    """What the receiver must emit: `raw` at `in_bits`, full-scale-aligned
+    to `out_bits`. Shallower shifts UP with the top bits replicated into
+    what it vacated, so full scale lands on full scale; deeper shifts DOWN.
+
+    Written from the SPEC, not from the Verilog -- an oracle copied off
+    the implementation agrees with it by construction and proves nothing.
+    """
+    v = raw.astype(np.uint32)
+    if in_bits > out_bits:
+        return v >> (in_bits - out_bits)
+    shl = out_bits - in_bits
+    top = (v >> (in_bits - shl)) if shl < in_bits else 0
+    return ((v << shl) | top) & ((1 << out_bits) - 1)
+
+
+def exact(beats, raws, depths=None, out_bits=12):
+    """Beats == the aligned raw frames, each with exact framing."""
     at = 0
-    for raw in raws:
+    depths = list(depths or [out_bits] * len(raws))
+    for raw, in_bits in zip(raws, depths):
         h, w = raw.shape
         got = beats[at:at + raw.size]
         if len(got) != raw.size:
             return False
-        if not all(b.data == int(v) for b, v in zip(got, raw.ravel())):
+        want = align(raw, in_bits, out_bits)
+        if not all(b.data == int(v) for b, v in zip(got, want.ravel())):
             return False
         try:
             check_framing(got, w, h)
@@ -235,11 +267,46 @@ def main():
     beats, ov, refd, hdr = run("blv2_a", frames, disp_w=64, disp_h=10,
                                blank=24)
     check("five depths in one run, header-switched, bit-exact",
-          exact(beats, raws), f"{len(beats)} beats")
+          exact(beats, raws, depths), f"{len(beats)} beats")
     check("no overflow across the depth sweep", ov == 0)
     check("nothing refused across the depth sweep", refd == (0, 0))
-    check("hdr_* report the last header (16-bit, 56x6)",
-          hdr == (16, 56, 6, 0, 1), f"hdr={hdr}")
+    check("hdr_* report the last header (16-bit, 56x6, source 0)",
+          hdr[:6] == (16, 56, 6, 0, 1, 0), f"hdr={hdr}")
+
+    # 1b. WHICH CAMERA. Calibration belongs to a sensor and cannot be
+    # derived from the stream, so the one thing a hot swap needs that
+    # the pixels cannot tell it is identity -- and the protocol has
+    # carried it since v2. Report the ACCEPTED header's, per frame.
+    seen = []
+    for sid in (0, 7, 255):
+        raw = rand_frame(rng, 12, 56, 6)
+        _b, _o, _r, h = run(f"blv2_id{sid}",
+                            [{"bits": 12, "raw": raw, "source_id": sid}],
+                            disp_w=64, disp_h=10, blank=24)
+        seen.append(h[5] == sid)
+    check("hdr_source_id reports the header's camera", all(seen),
+          f"{sum(seen)}/3")
+
+    # Two sources in one run: the field must FOLLOW the frames, not
+    # latch once. This is the hot-swap case in miniature.
+    raws2 = [rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 56, 6)]
+    _b, _o, _r, h = run("blv2_id2",
+                        [{"bits": 12, "raw": raws2[0], "source_id": 3},
+                         {"bits": 12, "raw": raws2[1], "source_id": 9}],
+                        disp_w=64, disp_h=10, blank=24)
+    check("two cameras in one run: the last accepted one is reported",
+          h[5] == 9, f"hdr={h}")
+
+    # frame_seq: which frame these numbers belong to. A statistic read
+    # without it is a statistic about an unknown frame, and an exposure
+    # loop built on that oscillates.
+    raws3 = [rand_frame(rng, 12, 56, 6) for _ in range(3)]
+    _b, _o, _r, h = run("blv2_seq",
+                        [{"bits": 12, "raw": r} for r in raws3],
+                        disp_w=64, disp_h=10, blank=24)
+    # run() numbers frames from 1, so the third is 3
+    check("hdr_frame_seq reports the accepted frame's sequence",
+          h[6] == 3, f"hdr={h}")
 
     # 2. GEOMETRY is the header's, per frame.
     raws = [rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 30, 8),
@@ -248,7 +315,7 @@ def main():
     beats, ov, refd, _ = run("blv2_b", frames, disp_w=64, disp_h=10,
                              blank=24)
     check("three geometries in one run, header-owned",
-          exact(beats, raws) and ov == 0 and refd == (0, 0))
+          exact(beats, raws, [12] * 3) and ov == 0 and refd == (0, 0))
 
     # 3. LANES: permuted wiring, matched by lane_map.
     raws = [rand_frame(rng, 10, 56, 6)]
@@ -256,14 +323,14 @@ def main():
                              disp_w=64, disp_h=10, blank=24,
                              lane_map=(2, 0, 1))
     check("permuted byte lanes, matched by lane_map",
-          exact(beats, raws) and ov == 0)
+          exact(beats, raws, [10]) and ov == 0)
 
     # 4. RATE RULE: the reference budget, 2028 samples in 2200 slots.
     raws = [rand_frame(rng, 12, 2028, 3)]
     beats, ov, refd, _ = run("blv2_d", [{"bits": 12, "raw": raws[0]}],
                              disp_w=1920, disp_h=5, blank=280 - 1)
     check("reference geometry (2028 in 2200 slots), no overflow",
-          exact(beats, raws) and ov == 0, f"{len(beats)} samples")
+          exact(beats, raws, [12]) and ov == 0, f"{len(beats)} samples")
 
     # 5. REFUSAL: unknown fourcc, then capacity; good frames still decode.
     good = rand_frame(rng, 12, 56, 6)
@@ -276,14 +343,14 @@ def main():
         "blv2_e", [{"container": bad}, {"bits": 12, "raw": good}],
         disp_w=64, disp_h=10, blank=24)
     check("unknown fourcc: zero beats, sticky code 2, next frame OK",
-          exact(beats, [good]) and refd == (1, 2), f"refd={refd}")
+          exact(beats, [good], [12]) and refd == (1, 2), f"refd={refd}")
 
     wide = rand_frame(rng, 12, 200, 2)          # 300 bytes > 256 capacity
     beats, ov, refd, _ = run(
         "blv2_f", [{"bits": 12, "raw": wide}, {"bits": 12, "raw": good}],
         disp_w=128, disp_h=10, blank=24, max_line_bytes=256)
     check("line beyond capacity: refused code 4, next frame OK",
-          exact(beats, [good]) and refd == (1, 4), f"refd={refd}")
+          exact(beats, [good], [12]) and refd == (1, 4), f"refd={refd}")
 
     # 6. WRAP: a small sample FIFO wrapped many times by the one engine
     # whose batch stride (3) does not divide the depth -- the slot
@@ -292,7 +359,41 @@ def main():
     beats, ov, refd, _ = run("blv2_w", [{"bits": 8, "raw": raws[0]}],
                              disp_w=64, disp_h=44, blank=8, fifo_depth=256)
     check("8-bit through ~9 FIFO wraps, stride 3 vs depth 256",
-          exact(beats, raws) and ov == 0)
+          exact(beats, raws, [8]) and ov == 0)
+
+    # 6b. FULL SCALE lands on FULL SCALE. The subtle half of alignment: a
+    # plain left shift maps an 8-bit 255 to 4080 in 12 bits and leaves
+    # every white in the picture 0.4% dark, forever, in a way no chart
+    # measurement would separate from a gain error.
+    tops, bottoms = [], []
+    for b in (8, 10, 12, 14, 16):
+        frame = np.full((2, 8), (1 << b) - 1, dtype=np.uint16)
+        frame[1, :] = 0
+        beats, _ov, _rd, _h = run(f"blv2_fs{b}", [{"bits": b, "raw": frame}],
+                                  disp_w=64, disp_h=10, blank=24)
+        tops.append(all(x.data == 4095 for x in beats[:8]))
+        bottoms.append(all(x.data == 0 for x in beats[8:16]))
+    check("full scale in is full scale out, every depth into 12",
+          all(tops), f"{sum(tops)}/5 depths")
+    check("zero stays zero, every depth into 12", all(bottoms))
+
+    # 6c. DEEPER than the datapath: 16-bit into a 12-bit build keeps a
+    # picture and loses the low bits, rather than truncating the top and
+    # losing the picture.
+    deep = rand_frame(rng, 16, 56, 6)
+    beats, _ov, _rd, _h = run("blv2_deep", [{"bits": 16, "raw": deep}],
+                              disp_w=64, disp_h=10, blank=24)
+    check("16-bit source into a 12-bit build: shifted down, not wrapped",
+          exact(beats, [deep], [16]))
+
+    # 6d. The same link into a build of a DIFFERENT depth: 10-bit source
+    # into a 10-bit build passes through untouched.
+    ten = rand_frame(rng, 10, 56, 6)
+    beats, _ov, _rd, _h = run("blv2_ten", [{"bits": 10, "raw": ten}],
+                              disp_w=64, disp_h=10, blank=24, out_bits=10)
+    check("10-bit source into a 10-bit build: unshifted",
+          exact(beats, [ten], [10], out_bits=10)
+          and all(x.data == int(v) for x, v in zip(beats, ten.ravel())))
 
     # 7. LOSS RECOVERY: a hard stall mangles ONE frame's data, but the
     # framing comes from ingest tags, so the damage cannot leak -- the
