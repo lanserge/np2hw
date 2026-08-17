@@ -578,7 +578,7 @@ def main():
           and "assign out_valid" not in v,
           "output ports driven by the register slice")
     check("and the interface says so, for a composer that cannot look",
-          r["interface"].get("output_registered") is True)
+          r["interface"].get("combinational_outputs") == ())
 
     ok = all(checks)
     print("\n" + ("BAYERLINK_IN V2 PASS" if ok else "FAIL"))

@@ -223,6 +223,15 @@ def _interface(in_bits, out_bits, out_signed, params, in_flags=("sof",),
                     + ([] if stream_out is None
                        else [dict(stream_out, direction="out")])),
         "params": [(name, bits, signed) for name, bits, signed, _, _ in params],
+        # What this module costs the modules around it. `out_*` leave the
+        # last pipeline register, so the FORWARD boundary is clean. The
+        # backward one is not: `in_ready` is `!stall` and `stall` reads
+        # `out_ready`, so a chain of these passes `ready` straight
+        # through, combinationally, from the sink to the source -- and it
+        # gets one gate deeper with every block added to the pipeline.
+        # Said out loud because it is invisible from any single module,
+        # which is exactly why it survived this long.
+        "combinational_outputs": () if sink else ("in_ready",),
     }
 
 

@@ -870,11 +870,12 @@ def bayerlink_in(max_line_bytes: int = 4096,
         "streams": [{"prefix": "out", "direction": "out", "data_bits": bits,
                      "flags": ("sof", "eol", "last"), "domain": ""}],
         "params": [],
-        # Stated, not assumed: every output leaves a flop, so a consumer's
-        # first stage starts from a register and this module's timing is
-        # its own. A composer that cannot see inside can still check it,
-        # which is the point of saying it here rather than in a comment.
-        "output_registered": True,
+        # Stated, not assumed: nothing here is combinational, so a
+        # consumer's first stage starts from a register and this module's
+        # timing is its own. A composer that cannot see inside can still
+        # read it, which is the point of saying it here and not in a
+        # comment. (There is no `in_ready` to list: this is a source.)
+        "combinational_outputs": (),
     }
     return {"verilog": "\n".join(L), "module": module_name,
             "interface": interface, "max_line_bytes": max_line_bytes,

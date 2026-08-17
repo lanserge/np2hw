@@ -292,6 +292,13 @@ def scanout(mode: str = "1080p60",
         "data_bits": data_bits,
         "params": [("win_x0", 16), ("win_y0", 16), ("win_w", 16),
                    ("win_h", 16), ("center", 1)],
+        # The video side leaves flops -- a raster that jittered would be
+        # visible. The stream side does not: `s_axis_tready` is decided
+        # combinationally from the window state, so it lands in the
+        # producer's path. On a chain of traced cores, whose `in_ready`
+        # is also combinational, that path runs all the way back to the
+        # source without meeting a register.
+        "combinational_outputs": ("s_axis_tready",),
         "status_bits": {"sof_per_frame": (0, 3), "locked": 3, "armed": 4,
                         "underflow": 5, "misalign": 6, "refused": 7,
                         "alive": (8, 3), "vsyncs": (11, 4)},

@@ -71,26 +71,28 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
     a("    reg [W-1:0] out_data;")
     a("    reg         out_valid;")
     a("    reg [W-1:0] skid_data;   // the beat accepted while the sink")
-    a("    reg         skid_valid;  // was busy; there is never more than one")
+    a("    reg         slot_free;   // was busy; never more than one")
     a("")
-    a("    // Accept whenever the reserve slot is free. This is a register")
-    a("    // output, so the backward path is broken as well as the forward")
-    a("    // one -- which is the half people forget.")
-    a("    assign s_ready = !skid_valid;")
+    a("    // The reserve slot's state is kept in the polarity the PORT")
+    a("    // wants, so `s_ready` is a flop and not an inverter after one.")
+    a("    // An inverter is nearly free and that is exactly the reasoning")
+    a("    // this module exists to stop: `nearly free` is a claim about")
+    a("    // the consumer, made without seeing it.")
+    a("    assign s_ready = slot_free;")
     a("    assign m_data  = out_data;")
     a("    assign m_valid = out_valid;")
     a("")
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
-    a("            out_valid  <= 1'b0;")
-    a("            skid_valid <= 1'b0;")
-    a("        end else if (!skid_valid) begin")
+    a("            out_valid <= 1'b0;")
+    a("            slot_free <= 1'b1;")
+    a("        end else if (slot_free) begin")
     a("            if (out_valid && !m_ready) begin")
     a("                // The sink is busy and the source is offering: take")
     a("                // it into the reserve rather than refusing it.")
     a("                if (s_valid) begin")
-    a("                    skid_data  <= s_data;")
-    a("                    skid_valid <= 1'b1;")
+    a("                    skid_data <= s_data;")
+    a("                    slot_free <= 1'b0;")
     a("                end")
     a("            end else begin")
     a("                out_data  <= s_data;")
@@ -99,9 +101,9 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
     a("        end else if (m_ready) begin")
     a("            // Draining the reserve. s_ready is low this cycle, so")
     a("            // nothing arrives to overwrite it.")
-    a("            out_data   <= skid_data;")
-    a("            out_valid  <= 1'b1;")
-    a("            skid_valid <= 1'b0;")
+    a("            out_data  <= skid_data;")
+    a("            out_valid <= 1'b1;")
+    a("            slot_free <= 1'b1;")
     a("        end")
     a("    end")
     a("endmodule")
@@ -121,7 +123,68 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
                  "flags": (), "domain": ""},
             ],
             "params": [],
-            # The claim this module exists to make.
-            "output_registered": True,
+            # The claim this module exists to make. Empty is the good case.
+            "combinational_outputs": (),
         },
     }
+
+
+def combinational_outputs(interface) -> tuple:
+    """Which of a module's output ports do NOT leave a flop.
+
+    Empty means the module's timing is its own under any composition:
+    whatever it is wired to starts from a register. Anything listed is
+    depth this module hands to its neighbour, to be spent before that
+    neighbour reaches its own first register.
+
+    Stated as ONE fact rather than a boolean plus a list of exceptions,
+    because a boolean would be derivable from the list and two places to
+    read the same thing is two places for them to disagree.
+
+    Takes either a generator's whole result or its `interface`: not every
+    generator has an interface to put it in (`scanout` describes a video
+    sink, which is not an np2hw stream), and a caller should not have to
+    know which kind it is holding to ask a question about boundaries.
+    """
+    if interface is None:
+        return ()
+    if "combinational_outputs" in interface:
+        return tuple(interface["combinational_outputs"])
+    inner = interface.get("interface")
+    if isinstance(inner, dict):
+        return tuple(inner.get("combinational_outputs", ()))
+    return ()
+
+
+def boundary_report(instances) -> list:
+    """Where a composition's combinational paths cross module boundaries.
+
+    Args:
+        instances: ``(name, interface)`` pairs, in any order -- the
+            report is per module, not per connection, because a
+            combinational output costs whatever it is wired to and the
+            wiring is not always np2hw's to see.
+
+    Returns:
+        A list of ``(name, ports)`` for modules that hand depth on, IN
+        THE ORDER GIVEN. Empty means every boundary in the set is a
+        register, and each module's timing claim is its own.
+
+        The order is the caller's because the caller knows the topology
+        and this function does not. Sorting by how many ports a module
+        hands on would look like ranking by severity and would not be:
+        four ports on one boundary is one boundary, while one port
+        repeated down a chain of seven is a path seven deep. Given the
+        modules in pipeline order, the output reads as the path.
+
+    This REPORTS rather than refuses. A refusal belongs to a law that can
+    be obeyed, and today a traced core's `in_ready` is combinational by
+    construction, so refusing would only mean refusing everything. What
+    it can do is stop the fact being invisible.
+    """
+    found = []
+    for name, iface in instances:
+        ports = combinational_outputs(iface)
+        if ports:
+            found.append((name, tuple(ports)))
+    return found

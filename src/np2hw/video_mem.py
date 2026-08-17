@@ -333,6 +333,15 @@ def framebuffer_read(data_bits: int = 32,
                      "data_bits": data_bits,
                      "flags": ("tuser", "tlast"), "domain": ""}],
         "params": [],
+        # The same shape as the receiver had before it grew a slice: the
+        # stream side is the prefetch FIFO's head, read combinationally,
+        # so every one of these hands a memory read plus a select to
+        # whatever consumes it. Stated rather than fixed, for now --
+        # this engine has never fetched a byte on the bench, and adding
+        # a register to it before it works would change two things at
+        # once.
+        "combinational_outputs": ("m_axis_tdata", "m_axis_tvalid",
+                                  "m_axis_tuser", "m_axis_tlast"),
     }
     return {"verilog": "\n".join(L), "module": module_name,
             "interface": interface, "data_bits": data_bits,

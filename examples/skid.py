@@ -117,7 +117,7 @@ module tb;
   // Enough is enough: with the reserve slot empty the source must never
   // be refused. If this ever trips, one beat of reserve was not enough.
   always @(posedge clk)
-    if (!rst && s_valid && !s_ready && !dut.skid_valid)
+    if (!rst && s_valid && !s_ready && dut.slot_free)
       refused_free <= refused_free + 1;
 
   integer t0 = 0;
