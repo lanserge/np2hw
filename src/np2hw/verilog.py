@@ -3300,7 +3300,7 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
 
 def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                  frame_sync=True, commit=None, header=(), notes=(),
-                 passthrough=()) -> dict:
+                 passthrough=(), bus_clock=False) -> dict:
     """Put an AXI4-Lite register file in front of ANY self-describing module.
 
     `control_top` does this for one generated core and folds in the geometry
@@ -3394,6 +3394,17 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     a("    input  wire rst,")
     a("    // AXI4-Lite control interface. Every configuration register, and every")
     a("    // read-only identity word, is behind this port.")
+    if bus_clock:
+        a("    // ON ITS OWN CLOCK, and that is the whole point. `clk` above")
+        a("    // is the datapath's, and a datapath clock can STOP -- one")
+        a("    // recovered from an input link has no edges whenever the")
+        a("    // link is down, which includes just after the fabric is")
+        a("    // reprogrammed. AXI has no timeout, so a slave whose clock")
+        a("    // is absent never answers and the master waits for it")
+        a("    // forever. That hung a board here and needed the power")
+        a("    // pulled. A control interface may never depend on a clock")
+        a("    // that can stop.")
+        a("    input  wire s_axil_aclk, input wire s_axil_aresetn,")
     a(f"    input  wire [{A-1}:0] s_axil_awaddr, input wire s_axil_awvalid,"
       " output wire s_axil_awready,")
     a("    input  wire [31:0] s_axil_wdata, input wire [3:0] s_axil_wstrb,"
@@ -3435,7 +3446,10 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         a(f"    wire csr_commit = {commit};")
         a("")
     a(f"    {reg['module']} u_csr (")
-    a("        .aclk(clk), .aresetn(!rst),")
+    if bus_clock:
+        a("        .aclk(s_axil_aclk), .aresetn(s_axil_aresetn),")
+    else:
+        a("        .aclk(clk), .aresetn(!rst),")
     if frame_sync:
         a("        .update(csr_commit),")
     a("        .s_axil_awaddr(s_axil_awaddr), .s_axil_awvalid(s_axil_awvalid),"

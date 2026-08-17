@@ -261,6 +261,19 @@ class AxiLiteMaster:
     def _signal(self, name: str):
         return getattr(self.dut, f"{self.prefix}_{name}")
 
+    @property
+    def _clk(self):
+        """The BUS's clock, which is not always the datapath's.
+
+        A register file may deliberately run on another clock -- one that
+        keeps running when the datapath's stops, because an AXI slave
+        without a clock never answers and hangs the master that asked.
+        A master that sampled the datapath's clock would then be reading
+        the bus on a clock the bus does not use.
+        """
+        own = getattr(self.dut, f"{self.prefix}_aclk", None)
+        return own if own is not None else self.dut.clk
+
     async def idle(self) -> None:
         for name in ("awvalid", "wvalid", "bready", "arvalid", "rready"):
             self._signal(name).value = 0
@@ -270,7 +283,7 @@ class AxiLiteMaster:
         """Write one word. Returns the response code (OKAY / SLVERR)."""
         from cocotb.triggers import ReadOnly, RisingEdge
 
-        clk = self.dut.clk
+        clk = self._clk
         self._signal("awaddr").value = address
         self._signal("awvalid").value = 1
         self._signal("wdata").value = int(value) & 0xFFFFFFFF
@@ -299,7 +312,7 @@ class AxiLiteMaster:
         """Read one word. Returns ``(data, response)``."""
         from cocotb.triggers import ReadOnly, RisingEdge
 
-        clk = self.dut.clk
+        clk = self._clk
         self._signal("araddr").value = address
         self._signal("arvalid").value = 1
         self._signal("rready").value = 1
