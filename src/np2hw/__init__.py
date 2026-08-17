@@ -9,6 +9,7 @@ from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
+from .stream import skid
 from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
 from .video_out import MODES, mode_timing, scanout
@@ -23,6 +24,12 @@ __all__ = [
     # (undriven input, double driver, cycle, unbuffered fork) live with the
     # handshake they are laws of.
     "Netlist", "Node", "Endpoint",
+    # Stream plumbing. A core's timing claim is about its own registers
+    # and holds only while nothing else is on the path; a combinational
+    # output hands its depth to every consumer, so two cores that each
+    # meet timing alone can miss it together. `skid` is how a boundary
+    # stops being a place where that happens.
+    "skid",
     # Receivers for external links: parallel video in, elastic stream out.
     "bayerlink_in",
     # Memory: a frame of DDR fetched back at a raster's pace, by an
