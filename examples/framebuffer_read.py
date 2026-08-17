@@ -68,7 +68,7 @@ module tb;
   wire underflow, slverr;
 
   framebuffer_read dut (
-    .clk(clk), .rst(rst), .base_addr(base), .line_beats(lbeats),
+    .clk(clk), .rst_n(!rst), .base_addr(base), .line_beats(lbeats),
     .lines(lns), .stride_bytes(stride), .enable(en),
     .m_axi_arid(arid), .m_axi_araddr(araddr), .m_axi_arlen(arlen),
     .m_axi_arsize(arsize), .m_axi_arburst(arburst),

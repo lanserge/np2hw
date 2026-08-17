@@ -36,6 +36,7 @@ from __future__ import annotations
 
 
 def framebuffer_read(data_bits: int = 32,
+                     clk_hz: int = 0,
                      addr_bits: int = 32,
                      burst_len: int = 16,
                      fifo_depth: int = 512,
@@ -49,6 +50,11 @@ def framebuffer_read(data_bits: int = 32,
         addr_bits: address width of the memory port.
         burst_len: beats per burst, 1..256. Longer amortises the address
             phase; shorter needs less FIFO to keep a burst in flight.
+        clk_hz: the clock this runs at, declared on the interface. Zero
+            leaves it unstated, which a block design will accept and then
+            make its clock-domain decisions blind -- an AXI master whose
+            frequency is unknown is one the automation cannot size a
+            converter for. State it.
         fifo_depth: beats of prefetch, a power of two, at least four
             bursts. This is the whole tolerance for DDR latency and for
             other masters holding the interconnect, so it is the knob
@@ -83,13 +89,13 @@ def framebuffer_read(data_bits: int = 32,
     a("// so the first beat emitted IS the frame's first pixel and says so")
     a("// on tuser: there is no start offset to measure or correct.")
     a(f"module {module_name} (")
-    a('    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axi:m_axis, '
-      'ASSOCIATED_RESET rst" *)')
+    freq = f", FREQ_HZ {clk_hz}" if clk_hz else ""
+    a(f'    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axi:m_axis{freq}" *)')
     a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)')
     a("    input  wire        clk,")
-    a('    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst RST" *)')
-    a("    input  wire        rst,")
+    a('    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)')
+    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst_n RST" *)')
+    a("    input  wire        rst_n,   // AXI convention: active LOW")
     a("    // WHERE the frame is, and what shape. Ports, not registers:")
     a("    // a stream whose geometry changes moves these and the next")
     a("    // frame is already right. Sampled at each frame's start, so a")
@@ -107,6 +113,7 @@ def framebuffer_read(data_bits: int = 32,
     a("    // each would cost 80 flops to protect a value that is already")
     a("    // still. Enable rising is the handshake that says so.")
     a("    input  wire        enable,")
+    a('    (* X_INTERFACE_PARAMETER = "READ_WRITE_MODE READ_ONLY" *)')
     a("    // AXI4 read address")
     a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARID" *)')
     a("    output reg  [3:0]  m_axi_arid,")
@@ -151,8 +158,16 @@ def framebuffer_read(data_bits: int = 32,
     a("    // STICKY until reset, because a fetch that silently fell")
     a("    // behind is a picture nobody can explain later.")
     a("    output reg         underflow,      // the raster asked, we had none")
-    a("    output reg         slverr")
+    a("    output reg         slverr,")
+    a("    // WHY it is doing nothing, which a sticky error bit cannot")
+    a("    // say. Held in reset, never enabled, and asking a bus that")
+    a("    // never answers all look identical from outside: no data, no")
+    a("    // error. One bit each and they stop looking identical.")
+    a("    output wire [7:0]  dbg")
     a(");")
+    a("    // One name for it inside, so the logic reads the way it did")
+    a("    // before the port took the bus's convention.")
+    a("    wire rst = ~rst_n;")
     a(f"    localparam integer BEAT_BYTES = {bytes_per_beat};")
     a(f"    localparam integer BURST      = {burst_len};")
     a("")
@@ -303,6 +318,8 @@ def framebuffer_read(data_bits: int = 32,
     a("            if (push) ever_started <= 1'b1;")
     a("        end")
     a("    end")
+    a("    assign dbg = {2'b0, slverr, underflow, ever_started,")
+    a("                  m_axi_arvalid, en1, running};")
     a("endmodule")
 
     interface = {
