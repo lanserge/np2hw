@@ -66,17 +66,20 @@ module tb;
   wire [4:0] hdrb;
   wire [7:0] hdrsrc;
   wire [31:0] hdrseq;
+  wire [7:0] rescnt;
   wire [1:0] hdrp;
   reg out_ready = 0;
+  reg diagclr = 0;
   integer stall = 0;
 
-  %(MODULE)s dut (.clk(clk), .rst(rst),
+  %(MODULE)s dut (.clk(clk), .rst(rst), .diag_clear(diagclr),
     .vid_de(vid_de), .vid_vsync(vid_vsync), .vid_data(vid_data),
     .out_valid(out_valid), .out_ready(out_ready), .out_data(out_data),
     .out_sof(out_sof), .out_eol(out_eol), .out_last(out_last),
     .overflow(ov), .refused(refd), .refuse_code(rcode),
     .hdr_bits(hdrb), .hdr_width(hdrw), .hdr_height(hdrh),
     .hdr_source_id(hdrsrc), .hdr_frame_seq(hdrseq),
+    .resync_count(rescnt),
     .hdr_phase(hdrp), .hdr_valid(hdrv));
 
   always #5 clk = ~clk;
@@ -126,7 +129,23 @@ module tb;
     repeat (DISPW*LINES*4 + 800) @(posedge clk);
     $fwrite(fd, "OVF %%0d\\n", ov);
     $fwrite(fd, "REF %%0d %%0d\\n", refd, rcode);
-    $fwrite(fd, "HDR %%0d %%0d %%0d %%0d %%0d %%0d %%0d\\n", hdrb, hdrw, hdrh, hdrp, hdrv, hdrsrc, hdrseq);
+    $fwrite(fd, "HDR %%0d %%0d %%0d %%0d %%0d %%0d %%0d %%0d\\n", hdrb, hdrw, hdrh, hdrp, hdrv, hdrsrc, hdrseq, rescnt);
+    // Before and after a DELIBERATE clear. These tallies survive rst
+    // on purpose -- rst now arrives on every cable drop, and a counter
+    // reset by the event it counts tells you nothing -- so the one
+    // thing that does clear them has to be shown to.
+    $fwrite(fd, "TALLY %%0d %%0d %%0d\\n", ov, refd, rescnt);
+    // A LINK RESET must not touch them. This is the regression: rst
+    // arrives on every cable drop now, and the recovery was erasing
+    // the evidence of whatever went wrong just before it.
+    @(posedge clk); rst = 1;
+    repeat (4) @(posedge clk); rst = 0;
+    repeat (4) @(posedge clk);
+    $fwrite(fd, "SURVIVED %%0d %%0d %%0d\\n", ov, refd, rescnt);
+    @(posedge clk); diagclr = 1;
+    repeat (4) @(posedge clk); diagclr = 0;
+    repeat (4) @(posedge clk);
+    $fwrite(fd, "CLEARED %%0d %%0d %%0d\\n", ov, refd, rescnt);
     $fclose(fd);
     $finish;
   end
@@ -176,6 +195,13 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
                 spec["raw"], spec.get("order", "RGGB"), frame_seq=i + 1,
                 display=(disp_w, disp_h), bits=spec["bits"],
                 source_id=spec.get("source_id", 0))
+            # a spec may name its own frame_seq to stage a gap
+            if "frame_seq" in spec:
+                container = encode_frame(
+                    spec["raw"], spec.get("order", "RGGB"),
+                    frame_seq=spec["frame_seq"],
+                    display=(disp_w, disp_h), bits=spec["bits"],
+                    source_id=spec.get("source_id", 0))
         stream.append(pack_lanes(container, lane_map))
     words = np.concatenate([s.ravel() for s in stream])
 
@@ -199,6 +225,7 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
                    capture_output=True)
 
     beats, overflow, refused, hdr = [], None, None, None
+    tally = cleared = survived = None
     with open(os.path.join(BUILD, "out.txt")) as fh:
         for line in fh:
             if line.startswith("OVF"):
@@ -207,10 +234,16 @@ def run(name, frames, disp_w, disp_h, blank, lane_map=(0, 1, 2),
                 refused = tuple(int(v) for v in line.split()[1:])
             elif line.startswith("HDR"):
                 hdr = tuple(int(v) for v in line.split()[1:])
+            elif line.startswith("TALLY"):
+                tally = tuple(int(v) for v in line.split()[1:])
+            elif line.startswith("SURVIVED"):
+                survived = tuple(int(v) for v in line.split()[1:])
+            elif line.startswith("CLEARED"):
+                cleared = tuple(int(v) for v in line.split()[1:])
             else:
                 d, s, e, l = (int(v) for v in line.split())
                 beats.append(Beat(d, bool(s), bool(e), bool(l)))
-    return beats, overflow, refused, hdr
+    return beats, overflow, refused, hdr, tally, (survived, cleared)
 
 
 def align(raw, in_bits, out_bits):
@@ -264,7 +297,7 @@ def main():
     depths = (8, 10, 12, 14, 16)
     raws = [rand_frame(rng, b, 56, 6) for b in depths]
     frames = [{"bits": b, "raw": r} for b, r in zip(depths, raws)]
-    beats, ov, refd, hdr = run("blv2_a", frames, disp_w=64, disp_h=10,
+    beats, ov, refd, hdr, _t, _c = run("blv2_a", frames, disp_w=64, disp_h=10,
                                blank=24)
     check("five depths in one run, header-switched, bit-exact",
           exact(beats, raws, depths), f"{len(beats)} beats")
@@ -280,7 +313,7 @@ def main():
     seen = []
     for sid in (0, 7, 255):
         raw = rand_frame(rng, 12, 56, 6)
-        _b, _o, _r, h = run(f"blv2_id{sid}",
+        _b, _o, _r, h, _t, _c = run(f"blv2_id{sid}",
                             [{"bits": 12, "raw": raw, "source_id": sid}],
                             disp_w=64, disp_h=10, blank=24)
         seen.append(h[5] == sid)
@@ -290,7 +323,7 @@ def main():
     # Two sources in one run: the field must FOLLOW the frames, not
     # latch once. This is the hot-swap case in miniature.
     raws2 = [rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 56, 6)]
-    _b, _o, _r, h = run("blv2_id2",
+    _b, _o, _r, h, _t, _c = run("blv2_id2",
                         [{"bits": 12, "raw": raws2[0], "source_id": 3},
                          {"bits": 12, "raw": raws2[1], "source_id": 9}],
                         disp_w=64, disp_h=10, blank=24)
@@ -301,25 +334,99 @@ def main():
     # without it is a statistic about an unknown frame, and an exposure
     # loop built on that oscillates.
     raws3 = [rand_frame(rng, 12, 56, 6) for _ in range(3)]
-    _b, _o, _r, h = run("blv2_seq",
+    _b, _o, _r, h, _t, _c = run("blv2_seq",
                         [{"bits": 12, "raw": r} for r in raws3],
                         disp_w=64, disp_h=10, blank=24)
     # run() numbers frames from 1, so the third is 3
     check("hdr_frame_seq reports the accepted frame's sequence",
           h[6] == 3, f"hdr={h}")
 
+    # 1d. SELF-RECOVERY, which is the whole point of carrying identity.
+    # A hot swap is: one camera stops mid-stream, another starts. The
+    # buffers still hold a half-line belonging to a stream that ended,
+    # and draining it into the new frame corrupts the new frame. The
+    # receiver notices IN BAND -- the camera changed, or the sequence
+    # did not follow -- and empties itself. No reset, no host.
+    good_a = rand_frame(rng, 12, 56, 6)
+    good_b = rand_frame(rng, 12, 56, 6)
+    # camera 1 sends a frame; camera 2 then sends one, its own sequence
+    # starting over, as a freshly booted source does
+    beats, ov, refd, h, _t, _c = run(
+        "blv2_swap",
+        [{"bits": 12, "raw": good_a, "source_id": 1, "frame_seq": 41},
+         {"bits": 12, "raw": good_b, "source_id": 2, "frame_seq": 1}],
+        disp_w=64, disp_h=10, blank=24)
+    check("hot swap: both frames exact, no reset in between",
+          exact(beats, [good_a, good_b], [12, 12]) and refd == (0, 0),
+          f"{len(beats)} beats")
+    # 2, not 1: the FIRST frame after reset is a restart too, having
+    # nothing before it to follow. The swap is the second.
+    check("hot swap: the restart is counted", h[7] == 2, f"hdr={h}")
+
+    # A GAP from ONE camera -- a frame the link lost -- is a
+    # discontinuity too, and the frame after it must still be exact.
+    g1, g2 = rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 56, 6)
+    beats, ov, refd, h, _t, _c = run(
+        "blv2_gap",
+        [{"bits": 12, "raw": g1, "source_id": 4, "frame_seq": 10},
+         {"bits": 12, "raw": g2, "source_id": 4, "frame_seq": 40}],
+        disp_w=64, disp_h=10, blank=24)
+    check("a forward gap is a dropped frame, not a restart",
+          exact(beats, [g1, g2], [12, 12]) and h[7] == 1, f"hdr={h}")
+
+    # And the case that must NOT fire: consecutive frames from one
+    # camera. A tail draining under its own header is this design
+    # working; flushing there would cut a frame in half.
+    c1, c2, c3 = (rand_frame(rng, 12, 56, 6) for _ in range(3))
+    beats, ov, refd, h, _t, _c = run(
+        "blv2_cont",
+        [{"bits": 12, "raw": c1, "source_id": 6, "frame_seq": 100},
+         {"bits": 12, "raw": c2, "source_id": 6, "frame_seq": 101},
+         {"bits": 12, "raw": c3, "source_id": 6, "frame_seq": 102}],
+        disp_w=64, disp_h=10, blank=24)
+    check("a consecutive run counts ONE restart, not three",
+          exact(beats, [c1, c2, c3], [12] * 3) and h[7] == 1,
+          f"restarts={h[7]}")
+
+    # 1e. WHAT A REAL LINK LOOKS LIKE. The display repeats a container
+    # when the camera is slower than the raster, and drops one when it
+    # is not. Both are ordinary. Keyed on "the very next sequence" this
+    # counted a restart once per frame forever -- found on hardware,
+    # not here, because every case above counts cleanly.
+    r1, r2, r3, r4 = (rand_frame(rng, 12, 56, 6) for _ in range(4))
+    beats, ov, refd, h, _t, _c = run(
+        "blv2_real",
+        [{"bits": 12, "raw": r1, "source_id": 5, "frame_seq": 100},
+         {"bits": 12, "raw": r2, "source_id": 5, "frame_seq": 100},
+         {"bits": 12, "raw": r3, "source_id": 5, "frame_seq": 103},
+         {"bits": 12, "raw": r4, "source_id": 5, "frame_seq": 104}],
+        disp_w=64, disp_h=10, blank=24)
+    check("repeats and forward gaps are NOT restarts",
+          h[7] == 1 and exact(beats, [r1, r2, r3, r4], [12] * 4),
+          f"restarts={h[7]} (1 = the first frame only)")
+
+    # And what IS one: the sequence going backwards, as a freshly
+    # started source does.
+    b1, b2 = rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 56, 6)
+    beats, ov, refd, h, _t, _c = run(
+        "blv2_back",
+        [{"bits": 12, "raw": b1, "source_id": 5, "frame_seq": 900},
+         {"bits": 12, "raw": b2, "source_id": 5, "frame_seq": 2}],
+        disp_w=64, disp_h=10, blank=24)
+    check("a sequence going BACKWARDS is a restart", h[7] == 2, f"hdr={h}")
+
     # 2. GEOMETRY is the header's, per frame.
     raws = [rand_frame(rng, 12, 56, 6), rand_frame(rng, 12, 30, 8),
             rand_frame(rng, 12, 8, 3)]
     frames = [{"bits": 12, "raw": r} for r in raws]
-    beats, ov, refd, _ = run("blv2_b", frames, disp_w=64, disp_h=10,
+    beats, ov, refd, _, _t, _c = run("blv2_b", frames, disp_w=64, disp_h=10,
                              blank=24)
     check("three geometries in one run, header-owned",
           exact(beats, raws, [12] * 3) and ov == 0 and refd == (0, 0))
 
     # 3. LANES: permuted wiring, matched by lane_map.
     raws = [rand_frame(rng, 10, 56, 6)]
-    beats, ov, refd, _ = run("blv2_c", [{"bits": 10, "raw": raws[0]}],
+    beats, ov, refd, _, _t, _c = run("blv2_c", [{"bits": 10, "raw": raws[0]}],
                              disp_w=64, disp_h=10, blank=24,
                              lane_map=(2, 0, 1))
     check("permuted byte lanes, matched by lane_map",
@@ -327,7 +434,7 @@ def main():
 
     # 4. RATE RULE: the reference budget, 2028 samples in 2200 slots.
     raws = [rand_frame(rng, 12, 2028, 3)]
-    beats, ov, refd, _ = run("blv2_d", [{"bits": 12, "raw": raws[0]}],
+    beats, ov, refd, _, _t, _c = run("blv2_d", [{"bits": 12, "raw": raws[0]}],
                              disp_w=1920, disp_h=5, blank=280 - 1)
     check("reference geometry (2028 in 2200 slots), no overflow",
           exact(beats, raws, [12]) and ov == 0, f"{len(beats)} samples")
@@ -339,14 +446,14 @@ def main():
     # fourcc lives at header bytes 8..11: byte k is [0, k // 3, k % 3]
     for k, ch in zip(range(8, 12), b"XXXX"):
         bad[0, k // 3, k % 3] = ch
-    beats, ov, refd, hdr = run(
+    beats, ov, refd, hdr, _t, _c = run(
         "blv2_e", [{"container": bad}, {"bits": 12, "raw": good}],
         disp_w=64, disp_h=10, blank=24)
     check("unknown fourcc: zero beats, sticky code 2, next frame OK",
           exact(beats, [good], [12]) and refd == (1, 2), f"refd={refd}")
 
     wide = rand_frame(rng, 12, 200, 2)          # 300 bytes > 256 capacity
-    beats, ov, refd, _ = run(
+    beats, ov, refd, _, _t, _c = run(
         "blv2_f", [{"bits": 12, "raw": wide}, {"bits": 12, "raw": good}],
         disp_w=128, disp_h=10, blank=24, max_line_bytes=256)
     check("line beyond capacity: refused code 4, next frame OK",
@@ -356,7 +463,7 @@ def main():
     # whose batch stride (3) does not divide the depth -- the slot
     # addressing must wrap WITH the pointer, not run off the banks.
     raws = [rand_frame(rng, 8, 56, 40)]
-    beats, ov, refd, _ = run("blv2_w", [{"bits": 8, "raw": raws[0]}],
+    beats, ov, refd, _, _t, _c = run("blv2_w", [{"bits": 8, "raw": raws[0]}],
                              disp_w=64, disp_h=44, blank=8, fifo_depth=256)
     check("8-bit through ~9 FIFO wraps, stride 3 vs depth 256",
           exact(beats, raws, [8]) and ov == 0)
@@ -369,7 +476,7 @@ def main():
     for b in (8, 10, 12, 14, 16):
         frame = np.full((2, 8), (1 << b) - 1, dtype=np.uint16)
         frame[1, :] = 0
-        beats, _ov, _rd, _h = run(f"blv2_fs{b}", [{"bits": b, "raw": frame}],
+        beats, _ov, _rd, _h, _t, _c = run(f"blv2_fs{b}", [{"bits": b, "raw": frame}],
                                   disp_w=64, disp_h=10, blank=24)
         tops.append(all(x.data == 4095 for x in beats[:8]))
         bottoms.append(all(x.data == 0 for x in beats[8:16]))
@@ -381,7 +488,7 @@ def main():
     # picture and loses the low bits, rather than truncating the top and
     # losing the picture.
     deep = rand_frame(rng, 16, 56, 6)
-    beats, _ov, _rd, _h = run("blv2_deep", [{"bits": 16, "raw": deep}],
+    beats, _ov, _rd, _h, _t, _c = run("blv2_deep", [{"bits": 16, "raw": deep}],
                               disp_w=64, disp_h=10, blank=24)
     check("16-bit source into a 12-bit build: shifted down, not wrapped",
           exact(beats, [deep], [16]))
@@ -389,7 +496,7 @@ def main():
     # 6d. The same link into a build of a DIFFERENT depth: 10-bit source
     # into a 10-bit build passes through untouched.
     ten = rand_frame(rng, 10, 56, 6)
-    beats, _ov, _rd, _h = run("blv2_ten", [{"bits": 10, "raw": ten}],
+    beats, _ov, _rd, _h, _t, _c = run("blv2_ten", [{"bits": 10, "raw": ten}],
                               disp_w=64, disp_h=10, blank=24, out_bits=10)
     check("10-bit source into a 10-bit build: unshifted",
           exact(beats, [ten], [10], out_bits=10)
@@ -403,7 +510,7 @@ def main():
     from np2hw.testing import check_framing as _cf
     f1 = rand_frame(rng, 12, 56, 24)
     f2 = rand_frame(rng, 12, 56, 24)
-    beats, ov, refd, _ = run(
+    beats, ov, refd, _, _t, _c = run(
         "blv2_r", [{"bits": 12, "raw": f1}, {"bits": 12, "raw": f2}],
         disp_w=64, disp_h=26, blank=2, stall=1500,
         max_line_bytes=128, fifo_depth=16)
@@ -424,7 +531,7 @@ def main():
     # keeps its eol, and frame `last`s keep arriving to the end. (The
     # bench found the wedge: an orphan stub under the frame barrier.)
     raws = [rand_frame(rng, 10, 28, 6) for _ in range(4)]
-    beats, ov, refd, _ = run("blv2_y", [{"bits": 10, "raw": r} for r in raws],
+    beats, ov, refd, _, _t, _c = run("blv2_y", [{"bits": 10, "raw": r} for r in raws],
                              disp_w=32, disp_h=8, blank=4,
                              max_line_bytes=64, fifo_depth=16, burst=900)
     eols = sum(1 for b in beats if b.eol)
@@ -435,10 +542,20 @@ def main():
 
     # 9. OVERFLOW: stall downstream past the elastic; the flag fires.
     tight = rand_frame(rng, 12, 56, 24)
-    _, ov, _, _ = run("blv2_g", [{"bits": 12, "raw": tight}],
+    _, ov, _, _, _t, _c = run("blv2_g", [{"bits": 12, "raw": tight}],
                       disp_w=64, disp_h=26, blank=2, stall=3000,
                       max_line_bytes=128, fifo_depth=16)
     check("sticky overflow fires under a hard stall", ov == 1)
+
+    # A tally cleared by the event it counts is not a tally, which is
+    # why these survive rst -- rst now arrives on every cable drop. So
+    # the ONLY thing that clears them must be shown to.
+    check("the tallies survive to be read", _t is not None and _t[0] == 1,
+          f"before clear: ovf/refused/resyncs = {_t}")
+    check("a LINK RESET does not touch the tallies",
+          _c[0] == _t, f"after rst: {_c[0]} (was {_t})")
+    check("diag_clear clears them, and only a deliberate ask does",
+          _c[1] == (0, 0, 0), f"after clear: {_c[1]}")
 
     ok = all(checks)
     print("\n" + ("BAYERLINK_IN V2 PASS" if ok else "FAIL"))
