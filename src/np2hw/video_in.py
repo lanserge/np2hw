@@ -60,6 +60,8 @@ time, so the protocol tables have exactly one owner.
 """
 from __future__ import annotations
 
+from .stream import skid
+
 
 # depth code (3 bits, in hdr_bits order) -> (bits, bytes/emit, samples/emit)
 # One emit = one packing group, except 8-bit (three 1-byte groups per cycle
@@ -163,6 +165,7 @@ def bayerlink_in(max_line_bytes: int = 4096,
     a(f"// on video lane {tuple(lane_map)} (resolved per platform with a")
     a("// test pattern). Header CRC is host business; fabric refuses on")
     a("// magic, fourcc, group alignment and capacity -- sticky, coded.")
+    skid_name = f"{module_name}_slice"
     a(f"module {module_name} (")
     a("    input  wire        clk,     // the recovered pixel clock")
     a("    input  wire        rst,")
@@ -553,6 +556,11 @@ def bayerlink_in(max_line_bytes: int = 4096,
     a("    // the bank write is its own pipeline stage, so the rotation mux")
     a("    // never shares a cycle with the sample extraction.")
     a(f"    reg [{scntw-1}:0] scount_res, scount_avail;")
+    # The FIFO's read handshake is now with the output slice, not with
+    # the port: declared up here because the pointer logic below reads
+    # it, and driven where the head is muxed.
+    a("    wire raw_valid = (scount_avail != 0);")
+    a("    wire raw_ready;")
     a(f"    wire sroom = (scount_res <= {scntw}'d{fifo_depth - 8});")
     a("    wire emit = act_valid && ({1'b0, wcnt} >= {1'b0, need_r}) && sroom;")
     a("")
@@ -802,14 +810,14 @@ def bayerlink_in(max_line_bytes: int = 4096,
         a("                    end")
     a("                endcase")
     a("            end")
-    a("            if (out_valid && out_ready) srd <= srd + %d'd1;" % sptrw)
+    a("            if (raw_valid && raw_ready) srd <= srd + %d'd1;" % sptrw)
     a("            scount_res <= scount_res + (emit ? {%d'b0, se_eff} : %d'd0)"
       % (scntw - 3, scntw))
-    a("                             - ((out_valid && out_ready) ? %d'd1 : %d'd0);"
+    a("                             - ((raw_valid && raw_ready) ? %d'd1 : %d'd0);"
       % (scntw, scntw))
     a("            scount_avail <= scount_avail + (q_valid ? {%d'b0, q_se} : %d'd0)"
       % (scntw - 3, scntw))
-    a("                             - ((out_valid && out_ready) ? %d'd1 : %d'd0);"
+    a("                             - ((raw_valid && raw_ready) ? %d'd1 : %d'd0);"
       % (scntw, scntw))
     a("        end")
     a("    end")
@@ -821,11 +829,34 @@ def bayerlink_in(max_line_bytes: int = 4096,
     a("        2'd2: shead = sbank2[srd >> 2];")
     a("        default: shead = sbank3[srd >> 2];")
     a("    endcase")
-    a("    assign out_valid = (scount_avail != 0);")
     a("    // The head is already at this build's depth: alignment happened")
     a("    // on the way IN, so the read path is a mux and nothing else.")
-    a(f"    assign {{out_last, out_eol, out_sof, out_data}} = shead;")
+    a("    //")
+    a("    // ...and a mux is still too much to hand the next core. `shead`")
+    a("    // is a distributed-RAM read followed by a 4:1 select, all of it")
+    a("    // combinational from `srd`. Presented raw, that depth lands in")
+    a("    // front of whatever this feeds, BEFORE that core reaches its own")
+    a("    // first register -- so a receiver and a pipeline that each close")
+    a("    // timing alone can fail together, which is exactly what happened")
+    a("    // here twice: -1.424ns into one consumer's first stage, -1.792ns")
+    a("    // into another's. Neither module was wrong about itself.")
+    a("    //")
+    a("    // The slice ends the argument. Downstream sees flops, so this")
+    a("    // module's timing is its own no matter what it is wired to --")
+    a("    // which matters most when the wiring is done by a block design")
+    a("    // that np2hw never sees. One cycle of latency, no loss of rate.")
+    a(f"    {skid_name} #(.W({bits + 3})) u_out_slice (")
+    a("        .clk(clk), .rst(rst),")
+    a(f"        .s_data(shead[{bits + 2}:0]),")
+    a("        .s_valid(raw_valid), .s_ready(raw_ready),")
+    a("        .m_data({out_last, out_eol, out_sof, out_data}),")
+    a("        .m_valid(out_valid), .m_ready(out_ready));")
     a("endmodule")
+    a("")
+    # Named for this instance: two receivers in one design must not
+    # collide on a module name, and the slice is small enough that
+    # sharing one would buy nothing.
+    a(skid(bits + 3, module_name=skid_name)["verilog"])
 
     interface = {
         "clock": "clk",
@@ -839,6 +870,11 @@ def bayerlink_in(max_line_bytes: int = 4096,
         "streams": [{"prefix": "out", "direction": "out", "data_bits": bits,
                      "flags": ("sof", "eol", "last"), "domain": ""}],
         "params": [],
+        # Stated, not assumed: every output leaves a flop, so a consumer's
+        # first stage starts from a register and this module's timing is
+        # its own. A composer that cannot see inside can still check it,
+        # which is the point of saying it here rather than in a comment.
+        "output_registered": True,
     }
     return {"verilog": "\n".join(L), "module": module_name,
             "interface": interface, "max_line_bytes": max_line_bytes,

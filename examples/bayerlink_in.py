@@ -49,6 +49,7 @@ except ImportError:
           "codec's containers, so:  pip install bayerlink")
     sys.exit(0)
 
+from np2hw import bayerlink_in
 from np2hw.testing import Beat, check_framing
 from np2hw.video_in import bayerlink_in
 
@@ -556,6 +557,28 @@ def main():
           _c[0] == _t, f"after rst: {_c[0]} (was {_t})")
     check("diag_clear clears them, and only a deliberate ask does",
           _c[1] == (0, 0, 0), f"after clear: {_c[1]}")
+
+    # The boundary. Everything above is about what this module produces;
+    # this is about what it costs the module NEXT to it. The head of the
+    # sample FIFO is a distributed-RAM read and a 4:1 select, and handing
+    # that over raw puts it in front of the consumer's first stage --
+    # which cost this design -1.424ns into one consumer and -1.792ns into
+    # another, from a receiver and a pipeline that each closed alone.
+    #
+    # The slice's own behaviour is proven in examples/skid.py, so what is
+    # left to show here is that the output actually goes through it: that
+    # no port is driven combinationally from the FIFO any more. Behaviour
+    # above already covers the rest -- the rate rule (2028 samples inside
+    # 2200 slots) is what would fail if the slice ever cost throughput.
+    r = bayerlink_in(max_line_bytes=4096, bits=12)
+    v = r["verilog"]
+    check("the output leaves a flop, not the FIFO's read mux",
+          ".m_data({out_last, out_eol, out_sof, out_data})" in v
+          and "assign {out_last, out_eol, out_sof, out_data}" not in v
+          and "assign out_valid" not in v,
+          "output ports driven by the register slice")
+    check("and the interface says so, for a composer that cannot look",
+          r["interface"].get("output_registered") is True)
 
     ok = all(checks)
     print("\n" + ("BAYERLINK_IN V2 PASS" if ok else "FAIL"))
