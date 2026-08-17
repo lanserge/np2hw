@@ -10,6 +10,7 @@ from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
 from .video_in import bayerlink_in
+from .video_mem import framebuffer_read
 from .video_out import MODES, mode_timing, scanout
 
 __all__ = [
@@ -24,6 +25,9 @@ __all__ = [
     "Netlist", "Node", "Endpoint",
     # Receivers for external links: parallel video in, elastic stream out.
     "bayerlink_in",
+    # Memory: a frame of DDR fetched back at a raster's pace, by an
+    # engine that owns its addressing and therefore its phase.
+    "framebuffer_read",
     # Transmitters: an elastic stream becomes a timed raster. The mode
     # table is the one owner of raster geometry -- read it, do not copy.
     "scanout", "mode_timing", "MODES",
