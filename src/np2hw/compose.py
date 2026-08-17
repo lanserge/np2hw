@@ -158,7 +158,7 @@ def _net(endpoint: str) -> str:
 
 
 def compose(module_name: str, instances, connections, ports,
-            header=(), notes=()) -> dict:
+            header=(), notes=(), commit=None, commit_ports=()) -> dict:
     """Emit a module that instantiates `instances` and wires `connections`.
 
     Args:
@@ -170,6 +170,19 @@ def compose(module_name: str, instances, connections, ports,
             :class:`StreamType`; everything else is a plain scalar or vector.
         header: comment lines emitted before the module (licence, provenance).
         notes: comment lines emitted after the header (an address map, say).
+        commit: `True`, or a Verilog expression. Either way, every
+            binding listed in `commit_ports` gets a per-instance copy,
+            kept beside the block that reads it instead of read across
+            the chip from a central bank. `True` loads them all on one
+            pulse the moment a frame LEAVES the pipeline, when the
+            pipe is provably empty; an expression says when to load
+            instead, for a design whose output is not framed.
+        commit_ports: which composed-module ports are configuration, and
+            so belong in those local copies. Stated by the caller rather
+            than guessed from a name, because a scalar input can equally
+            be CONTEXT -- geometry that arrived in a stream's header --
+            and latching that on a frame commit would hold a frame's own
+            facts one frame too long.
 
     Returns:
         ``{"verilog": str, "module": str, "nets": [...]}``.
@@ -283,6 +296,93 @@ def compose(module_name: str, instances, connections, ports,
         a(f"    assign {key}_ready = {net}_ready;")
     a("")
 
+    # ---- each instance's own copy of the parameters it reads ----------
+    #
+    # A central register bank is the right place to WRITE parameters --
+    # it is the address map, and software's view of the design. It is the
+    # wrong place to READ them from. The value has to reach the logic that
+    # uses it, and that logic sits wherever its block was placed, so a
+    # central bank means a long wire with the block's first arithmetic on
+    # the far end of it, all inside one clock period.
+    #
+    # This bench measured that: a gamma knot register in the register
+    # file feeding a 64:1 select and a subtract in the gamma block --
+    # 1.889ns of logic against 4.133ns of route, 69% of the path spent
+    # travelling. Pipelining the arithmetic cannot help, because the
+    # distance is not the arithmetic.
+    #
+    # WHEN they load is decided by vertical blanking, and that makes it
+    # simple. Blanking is 45 lines at 1080p60, about 99,000 clocks,
+    # against a pipeline tens deep: by the time it is half over the pipe
+    # has drained thousands of times. Load there and the questions that
+    # look hard never arise -- there are no pixels in flight to be caught
+    # with old coefficients in the blocks behind them and new ones ahead,
+    # and one instant serves every block, so there is nothing to hold
+    # atomic and no second bank needed to freeze it. A write lands either
+    # before the pulse or after it.
+    #
+    # The pulse waits for the input to be IDLE rather than counting off a
+    # known latency. A count would have to be kept in step with a
+    # pipeline that changes every time a block is added; an idle input is
+    # the same fact, observed instead of predicted.
+    live_of = {}
+    if commit:
+        wanted = set(commit_ports)
+        for inst in instances:
+            widths = {n: (b, s) for n, b, s in inst.interface["params"]}
+            for name, bound in sorted(inst.bind.items()):
+                expr = bound[0] if isinstance(bound, tuple) else bound
+                if expr not in wanted or name not in widths:
+                    continue
+                bits, signed = widths[name]
+                live = f"{inst.name}_live_{name}"
+                live_of[(inst.name, name)] = (live, expr)
+                rng = f"[{bits - 1}:0] " if bits > 1 else ""
+                a(f"    reg {'signed ' if signed else ''}{rng}{live};")
+
+    if live_of:
+        if commit is True:
+            # WHEN they load: the moment the frame's last pixel LEAVES
+            # the pipeline, which is the output stream's own `last`.
+            #
+            # At that instant the pipe is provably empty, so there are no
+            # pixels in flight to be caught with old coefficients in the
+            # blocks behind them and new ones in the blocks ahead. One
+            # instant serves every block, so nothing has to be held
+            # atomic and no second bank is needed to freeze it: a write
+            # lands either before the pulse or after it.
+            #
+            # Observed, not predicted. A counter would have to be kept in
+            # step with a pipeline that changes every time a block is
+            # added, and it would be a second statement of a latency the
+            # design already knows. The stream says it directly.
+            #
+            # It also lands in vertical blanking without being told to.
+            # Blanking is around 99,000 clocks at 1080p60 against a
+            # pipeline tens deep, so the new values are in place long
+            # before the next frame's first pixel -- and this needs no
+            # minimum gap to be correct, only a source that does not
+            # start a frame before the previous one has finished.
+            out = next((p.name for p in ports if p.stream is not None
+                        and p.direction == "out"
+                        and "last" in tuple(p.stream.flags)), None)
+            if out is None:
+                raise ValueError(
+                    "live parameter copies take their timing from the "
+                    "frame leaving the pipeline, and this design "
+                    "declares no output stream carrying `last`. Pass "
+                    "commit='<expression>' to say when a copy loads.")
+            load = f"{out}_valid && {out}_ready && {out}_last"
+        else:
+            load = f"({commit})"
+        a("    // Every copy on one pulse, with the pipeline empty.")
+        a(f"    always @(posedge clk) if (rst || ({load})) begin")
+        for (_inst, _name), (live, expr) in live_of.items():
+            a(f"        {live} <= {expr};")
+        a("    end")
+        a("")
+        live_of = {k: v[0] for k, v in live_of.items()}
+
     def blocking(source_key):
         """Consumers that can stall this net. Sinks never can."""
         out = []
@@ -315,6 +415,9 @@ def compose(module_name: str, instances, connections, ports,
                     "bound; every parameter needs a driver")
             bound = inst.bind[name]
             expression, note = bound if isinstance(bound, tuple) else (bound, "")
+            if (inst.name, name) in live_of:
+                expression = live_of[(inst.name, name)]
+                note = note or "this instance's own live copy"
             port = f"{interface.get('param_prefix', 'param_')}{name}"
             line = f"        .{port:<20} ({expression}),"
             a(line.ljust(52) + (f"// {note}" if note else ""))
