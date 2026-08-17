@@ -128,9 +128,21 @@ def main():
     result("device: the same table is a deeper tree on a narrower LUT",
            narrow.mux_levels(256) > SERIES7.mux_levels(256),
            f"{SERIES7.mux_levels(256)} vs {narrow.mux_levels(256)} levels")
-    deep = expr_depth(gamma_stage(), narrow)
-    result("device: that depth reaches the estimate, not just the helper",
-           deep.levels > gm.levels)
+    # And the shape reaches the ESTIMATE, not just the helper. A table
+    # deep enough to stop being one lookup table stops being a mux at
+    # all: it becomes a registered read, which owns its stage. Where
+    # that line falls is the device's to say, so the SAME four-entry
+    # table is a mux on a 6-input LUT and a read on a 4-input one --
+    # different hardware from one expression, which is the whole claim.
+    small = PExpr("gather", (_Table(4),
+                             PExpr("shr", (acc(), 8), 0, 3)), 0, 1023)
+    wide_d, narrow_d = expr_depth(small, SERIES7), expr_depth(small, narrow)
+    result("device: that shape reaches the estimate, not just the helper",
+           wide_d.mems == 0 and wide_d.levels > 0
+           and narrow_d.mems == 1 and narrow_d.levels == 0,
+           f"4-entry table: {SERIES7.name} builds a mux "
+           f"({wide_d.levels} level), 4-input LUT builds a read "
+           f"({narrow_d.mems} memory)")
 
     # A calibration number has no default: a family that forgets one
     # must refuse, not silently inherit another family's silicon.

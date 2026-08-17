@@ -195,6 +195,29 @@ class Device:
         table's size and this device's LUT width decide together."""
         return Depth(levels=self.mux_levels(size))
 
+    def gather_is_read(self, size: int) -> bool:
+        """Is a table this big a memory READ rather than a mux?
+
+        A `rom` is registered by construction, and the reason is written
+        beside it: that is what makes it a block RAM instead of a mux
+        tree as deep as the table. A `gather` is the same read with
+        writable contents, so the same reasoning applies to it -- and
+        only the contents differ, never the shape.
+
+        The line is one LUT. A table a single lookup table can select
+        from is a mux, and registering it would buy a level of logic at
+        the price of a pipeline stage. Past that the tree grows, its
+        entries spread out across the die because they have to live
+        somewhere, and the read wants a cycle of its own.
+
+        This bench measured the difference. Gamma's 33 knots, selected by
+        the pixel, arrived as a 3-level tree reaching 33 registers spread
+        over four slice columns: 2.199ns of logic and 3.719ns of route
+        for one stage. With the knots baked they folded into a table the
+        tools put in distributed RAM and the path did not appear at all.
+        """
+        return self.mux_levels(size) > 1
+
     def adder_tree(self, terms: int, bits: int) -> Depth:
         """A balanced tree summing `terms` values: log2 levels, each one
         a carry chain."""
@@ -300,7 +323,11 @@ def node_cost(node, dev: Device) -> Depth:
         return dev.wire()
     if op == "gather":
         parent, _index = node.args
-        return dev.gather(int(parent.shape[0]))
+        size = int(parent.shape[0])
+        # Past one LUT a table is a memory, and a memory read owns its
+        # stage. One question, asked of the device, so the scheduler and
+        # the emitter cannot answer it differently.
+        return dev.mem() if dev.gather_is_read(size) else dev.gather(size)
     if op == "rom":
         return dev.mem()
     if op in ("add", "sub"):
@@ -370,9 +397,14 @@ def assign_stages(roots, clk_ns: float, dev, label: str = "stage"):
     the boundary registers, which is exactly the greedy cut the depth
     arithmetic recommends, and it falls naturally around the DSPs.
 
-    Returns ({id(node): stage}, n_stages). Raises when one operation
-    ALONE exceeds the budget: that is the floor -- a pipeline register
-    cannot land inside one operation.
+    Returns ({id(node): stage}, n_stages, device). The device comes
+    back with the plan because the emitter has to ask it the same
+    questions this did -- whether a gather is a memory read, above
+    all -- and an address captured in a different stage from the one
+    its read lands in is wrong without being visibly wrong.
+
+    Raises when one operation ALONE exceeds the budget: that is the
+    floor -- a pipeline register cannot land inside one operation.
     """
     fam = device(dev)
     stage_of = {}
@@ -394,6 +426,14 @@ def assign_stages(roots, clk_ns: float, dev, label: str = "stage"):
                 "one operation. Slow the clock or restructure the model.")
         staged = [a for a in args if a.op not in FLOATING]
         s = max((stage_of[id(a)] for a in staged), default=0)
+        if node.op == "gather" and fam.gather_is_read(int(node.args[0].shape[0])):
+            # Same shape as a rom, and for the same reason -- see
+            # `gather_is_read`. The emitter asks the device the identical
+            # question, so the stage the address is captured in and the
+            # stage the data lands in cannot disagree.
+            stage_of[key] = s + 1
+            depth_in[key] = fam.mem()
+            return
         if node.op == "rom":
             # A memory read is registered by construction: its address
             # is captured at the end of the previous stage and its data
@@ -417,7 +457,7 @@ def assign_stages(roots, clk_ns: float, dev, label: str = "stage"):
     for root in roots:
         visit(root)
     n_stages = max((stage_of[id(root)] for root in roots), default=0) + 1
-    return stage_of, n_stages
+    return stage_of, n_stages, fam
 
 
 def check(root, clk_ns: float, dev, label: str = "stage") -> Depth:

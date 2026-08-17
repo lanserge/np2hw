@@ -244,8 +244,15 @@ def main():
 
     _, out = to_ir(tone, Image2D("img", 16, 12, bits=BITS), *knots_param)
     meta = generate(out, module_name="tone_148", clk_ns=CLK_148M5)
+    # Four, not three: the knot reads are REGISTERED now. A table past
+    # one lookup table is a memory read rather than a mux tree as deep
+    # as the table, so each read owns its stage -- the same rule a
+    # constant table has always followed. The count stays exact rather
+    # than becoming "more than one", because an exact number is what
+    # would catch a staging change nobody intended; the two claims below
+    # are what say this one is correct and not merely different.
     result("split: the 10 ns failure generates at 6.73 ns",
-           meta["pipeline_stages"] == 3,
+           meta["pipeline_stages"] == 4,
            f"{meta['pipeline_stages']} stages")
 
     ok = check("tone_148", tone, A, params=knots_param, param_values=table,

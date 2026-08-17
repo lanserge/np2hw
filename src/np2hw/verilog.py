@@ -548,7 +548,10 @@ def _emit_expr_dag(a, roots, image, plan=None):
     Returns (per-root references as read at the FINAL stage, per-root
     widths, node count).
     """
-    stage_of, n_stages = plan if plan else ({}, 1)
+    # The device rides WITH the plan, not beside it: the emitter has
+    # to ask `gather_is_read` the same question the scheduler asked,
+    # and an address captured in the wrong stage is silent.
+    stage_of, n_stages, dev = plan if plan else ({}, 1, None)
     final = n_stages - 1
     emitted = {}                 # id(node) -> (text, stage-or-None, width)
     counter = [0]
@@ -621,8 +624,22 @@ def _emit_expr_dag(a, roots, image, plan=None):
             floating = True
         elif node.op == "gather":
             parent, index = node.args
+            size = int(parent.shape[0])
+            kb = max(1, (size - 1).bit_length())
+            if dev is not None and dev.gather_is_read(size):
+                # Past one LUT this is a memory read, not a mux, and it
+                # is emitted exactly like `rom` below: address captured
+                # at the end of the previous stage, data landing here as
+                # a REGISTER. Same question, asked of the same device the
+                # scheduler asked, so the two stages agree.
+                addr = ref(index, s - 1)
+                name = f"e{counter[0]}"
+                counter[0] += 1
+                reads.append((name, w, f"{parent.name}_lut",
+                              f"{addr}[{kb-1}:0]"))
+                emitted[key] = (name, s, w)
+                return
             idx = ref(index, s)
-            kb = max(1, (parent.shape[0] - 1).bit_length())
             read = f"{parent.name}_lut[{idx}[{kb-1}:0]]"
             expr = (f"$signed({read})" if parent.signed
                     else f"$signed({{1'b0, {read}}})")
@@ -1292,10 +1309,10 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         # so the twin stays bit-exact. The only refusal left is the
         # floor: one operation deeper than the clock, named.
         from .timing import assign_stages
-        stage_of, n_stages = assign_stages(
+        stage_of, n_stages, dev_used = assign_stages(
             roots, budget, dev, label=label or module_name)
         if n_stages > 1:
-            plan = (stage_of, n_stages)
+            plan = (stage_of, n_stages, dev_used)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
         return _generate_mux(out_line, module_name)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
@@ -1798,11 +1815,11 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
                         "EXPRESSIONS carry pipeline stages today.")
                 # one level is reserved for the phase select, which rides
                 # the last arithmetic stage
-                stage_of, n = assign_stages(
+                stage_of, n, sfam = assign_stages(
                     [pl.expr for pl in exprs], clk_ns - fam.level_ns,
                     fam, label=stage_label)
                 if n > 1:
-                    aplan = (stage_of, n)
+                    aplan = (stage_of, n, sfam)
 
     L = []
     a = L.append
