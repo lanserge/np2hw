@@ -1217,8 +1217,13 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     staging = []
     if clk_ns is not None:
         from .timing import device
-        base = device(dev).adder_chain(len(template.taps), acc_bits,
-                                       muxed=muxed)
+        fam = device(dev)
+        base = fam.adder_chain(len(template.taps), acc_bits)
+        if muxed:
+            # The position select in front of the chain: emitted above,
+            # structurally, so the traced DAG never sees it and nothing
+            # else in the model would ever charge for it.
+            base = base + fam.phase_select(len(muxed[0][3]))
         no_cut = tuple(i for i, op in enumerate(effective)
                        if op[0] in ("addp", "mulp"))
     result, out_bits, out_signed = _emit_post(
@@ -1790,6 +1795,13 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         worst = chain_worst
         for plane in exprs:
             worst = fam.worst(worst, expr_depth(plane.expr, fam))
+        # One level, not `phase_select`'s three, and the difference is
+        # real rather than an oversight: behind the snapshot this path
+        # has ALREADY registered the plane select (`q_selr`/`q_selc`),
+        # so the position mux and the phase XOR are on the ingest side
+        # of a register and only the coefficient select is in front of
+        # the arithmetic. The pointwise phase path registers nothing, so
+        # it pays for all three.
         arith = worst + fam.select()                     # the phase select
         if fam.ns(window + arith) > clk_ns:
             stages = 2

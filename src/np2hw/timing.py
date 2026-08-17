@@ -224,12 +224,36 @@ class Device:
         lv = max(terms - 1, 0).bit_length()
         return Depth(levels=lv, carry_bits=lv * bits, carries=lv)
 
-    def adder_chain(self, terms: int, bits: int, muxed=False) -> Depth:
-        """A linear accumulation of `terms` values, optionally behind a
-        position select -- what a tap chain becomes before its post ops."""
+    def adder_chain(self, terms: int, bits: int) -> Depth:
+        """A linear accumulation of `terms` values -- what a tap chain
+        becomes before its post ops. A position select in front of it is
+        `phase_select`, added by the emitter that builds one: an adder
+        chain that also priced a mux could only ever price one shape."""
         n = max(terms - 1, 0)
-        return Depth(levels=(1 if muxed else 0) + n, carry_bits=bits * n,
-                     carries=n)
+        return Depth(levels=n, carry_bits=bits * n, carries=n)
+
+    def phase_select(self, ways: int) -> Depth:
+        """Turning a pixel's POSITION into the coefficient that applies.
+
+        Three levels where it is tempting to write one, because it is
+        three pieces of logic and each was measured on the path:
+
+          the position a pixel is AT, which is the counter except at a
+          frame start, where it is zero -- a mux;
+          the plane it belongs to, which is that position's low bit
+          against the phase register -- an XOR;
+          the coefficient for that plane -- an n:1 select, whose depth
+          is the same law every other read here obeys.
+
+        Charging one level for all three is not a small error: it is the
+        difference between a stage the clock holds and one it does not.
+        A design measured here estimated 5.5ns against a 6.7ns budget and
+        arrived at 7.1ns, and the whole gap was the two levels missing
+        from this method -- the select was counted, the position and the
+        plane were free. Nothing downstream can notice, because the glue
+        is emitted structurally and never reaches the traced DAG.
+        """
+        return Depth(levels=2 + self.mux_levels(ways))
 
     def window(self, has_line_buffers: bool) -> Depth:
         """The read cone of a stencil's window: a registered memory read
