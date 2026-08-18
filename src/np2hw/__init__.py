@@ -9,7 +9,7 @@ from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
-from .stream import boundary_report, combinational_outputs, skid
+from .stream import boundary_report, cdc_fifo, combinational_outputs, skid
 from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
 from .video_out import MODES, mode_timing, scanout
@@ -31,6 +31,11 @@ __all__ = [
     # stops being a place where that happens, and the other two are how
     # a composition says where it still does.
     "skid", "combinational_outputs", "boundary_report",
+    # The one crossing every design this generator feeds contains:
+    # a recovered clock meeting the board's. Owned, so it can follow
+    # the design to another family or an ASIC, and so its discipline
+    # is checked rather than trusted.
+    "cdc_fifo",
     # Receivers for external links: parallel video in, elastic stream out.
     "bayerlink_in",
     # Memory: a frame of DDR fetched back at a raster's pace, by an
