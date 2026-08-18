@@ -2983,7 +2983,7 @@ def _read_expr(reg: Reg, source: str) -> str:
 
 
 def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
-                 frame_sync=False, defaults=None) -> dict:
+                 frame_sync=False, defaults=None, arm=None) -> dict:
     """AXI4-Lite slave exposing one register per entry of `params`.
 
     `params` is a list of `(name, bits)` -- packed at word offset i*4 -- or of
@@ -2993,7 +2993,31 @@ def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
     frame_sync=True adds shadow registers + an `update` input: writes land in a
     shadow, and the live value (driving the core) copies from the shadow on an
     `update` pulse -- wire `update` to the core's out_last/SOF for glitch-free,
-    frame-aligned coefficient updates (no mid-frame tearing)."""
+    frame-aligned coefficient updates (no mid-frame tearing).
+
+    arm=<register name> makes that register an ARM, for a reader in
+    ANOTHER clock domain. Software writes the coefficients, then writes
+    1 to the arm; from that instant this file REFUSES coefficient writes
+    (SLVERR, answered at once) and raises `arm_req`. The reader takes
+    its copy whenever it likes and raises `arm_ack`, which clears the
+    arm and lets writes through again. Reading the arm returns whether
+    it is still set, so software polls rather than guesses.
+
+    Why refuse rather than stall: delaying `awready` until the reader is
+    ready would hold the bus for up to a frame, and a processor waiting
+    on a bus that long is a processor that has hung. SLVERR answers
+    immediately and says why.
+
+    What this buys, and it is the whole point: while armed, the values
+    provably cannot change, so the reader may sample them from any clock
+    at any moment. Only one bit crosses in each direction -- the
+    register values never cross -- so there is no wide crossing to get
+    wrong. And a slow crossing makes the update land a frame later,
+    never a torn value: timing changes WHEN, not WHETHER.
+
+    It also makes a multi-register update atomic. Writing five of nine
+    matrix coefficients either side of a frame boundary otherwise
+    applies half a matrix."""
     A = addr_bits
     regs = _normalise_regs(params, defaults, addr_bits=A)
     rw = [r for r in regs if r.writable]
@@ -3005,6 +3029,12 @@ def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
       + (" (frame-synced shadow)" if frame_sync else ""))
     a(f"module {module_name} (")
     a("    input  wire aclk, input wire aresetn,")
+    if arm:
+        a("    // The reader lives in another clock domain. While `arm_req`")
+        a("    // is high no write commits, so the values it samples cannot")
+        a("    // change underneath it; `arm_ack` says it has taken them.")
+        a("    // One bit each way. The values never cross.")
+        a("    output wire arm_req, input wire arm_ack,")
     if frame_sync:
         a("    input  wire update,   // pulse (e.g. frame boundary): shadow -> live")
     a(f"    input  wire [{A-1}:0] s_axil_awaddr, input wire s_axil_awvalid,"
@@ -3035,15 +3065,33 @@ def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
             a(f"    reg {'signed ' if reg.signed else ''}[{reg.bits-1}:0] "
               f"{dreg}{reg.name};")
         a(f"    assign param_{reg.name} = {dreg}{reg.name};")
+    if arm:
+        # After the register declarations: the arm IS its register, so
+        # it has to exist before this reads it.
+        a("    // The arm IS its register: software sets it, the reader's")
+        a("    // acknowledgement clears it, and it reads back so software")
+        a("    // can poll. Two flops on the ack because it was launched by")
+        a("    // a clock that has no relation to this one.")
+        a(f"    assign arm_req = {wreg}{arm};")
+        a("    (* ASYNC_REG = \"TRUE\" *) reg ack_s0, ack_s1;")
     a(f"    reg [{A-1}:0] awaddr_q; reg [{A-1}:0] araddr_q; reg aw_en;")
     # write channel
     a("    always @(posedge aclk) begin")
     a("        if (!aresetn) begin")
     a("            s_axil_awready<=0; s_axil_wready<=0; s_axil_bvalid<=0;")
     a("            s_axil_bresp<=0; aw_en<=1;")
+    if arm:
+        a("            ack_s0<=0; ack_s1<=0;")
     for reg in rw:
         a(f"            {wreg}{reg.name}<={int(reg.reset)};")
     a("        end else begin")
+    if arm:
+        a("            ack_s0 <= arm_ack; ack_s1 <= ack_s0;")
+        a("            // The reader has its copy: let writes through again.")
+        a("            // Placed BEFORE the decode so the decode, being")
+        a("            // later, wins -- an arm written in the very cycle an")
+        a("            // ack lands still takes, rather than being dropped.")
+        a(f"            if (ack_s1) {wreg}{arm} <= 1'b0;")
     a("            if (!s_axil_awready && s_axil_awvalid && s_axil_wvalid && aw_en) begin")
     a("                s_axil_awready<=1; awaddr_q<=s_axil_awaddr; aw_en<=0;")
     a("            end else if (s_axil_bready && s_axil_bvalid) begin")
@@ -3055,8 +3103,13 @@ def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
     a("                s_axil_bvalid<=1; s_axil_bresp<=2'b10;   // SLVERR unless decoded")
     a(f"                case (awaddr_q[{A-1}:2])")
     for reg in rw:
-        a(f"                    {reg.word}: begin {wreg}{reg.name} <= "
-          f"s_axil_wdata[{reg.bits-1}:0]; s_axil_bresp<=2'b00; end")
+        # The arm itself is always writable -- refusing it would leave
+        # software no way to say it had finished.
+        guard = (f"if (!{wreg}{arm}) " if (arm and reg.name != arm) else "")
+        tail = ("" if not arm else
+                "   // refused while armed: see arm_req")
+        a(f"                    {reg.word}: {guard}begin {wreg}{reg.name} <= "
+          f"s_axil_wdata[{reg.bits-1}:0]; s_axil_bresp<=2'b00; end{tail}")
     a("                    default: ;   // unmapped, or a write to a read-only word")
     a("                endcase")
     a("            end else if (s_axil_bready && s_axil_bvalid) s_axil_bvalid<=0;")
@@ -3082,8 +3135,10 @@ def axil_regfile(params, module_name="np2hw_axil", addr_bits=8,
     a("                s_axil_rvalid<=1; s_axil_rresp<=2'b10;   // SLVERR unless decoded")
     a(f"                case (araddr_q[{A-1}:2])")
     for reg in regs:
-        value = (f"32'h{reg.value & 0xFFFFFFFF:08x}" if not reg.writable
-                 else _read_expr(reg, f"{wreg}{reg.name}"))
+        if not reg.writable:
+            value = f"32'h{reg.value & 0xFFFFFFFF:08x}"
+        else:
+            value = _read_expr(reg, f"{wreg}{reg.name}")
         a(f"                    {reg.word}: begin s_axil_rdata <= {value}; "
           "s_axil_rresp<=2'b00; end")
     a("                    default: s_axil_rdata <= 0;")
@@ -3300,7 +3355,7 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
 
 def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                  frame_sync=True, commit=None, header=(), notes=(),
-                 passthrough=(), bus_clock=False) -> dict:
+                 passthrough=(), bus_clock=False, arm=None) -> dict:
     """Put an AXI4-Lite register file in front of ANY self-describing module.
 
     `control_top` does this for one generated core and folds in the geometry
@@ -3346,7 +3401,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     top = module_name or inner + "_ctrl"
     A = addr_bits
     reg = axil_regfile(registers, module_name=f"{top}_rf", addr_bits=A,
-                       frame_sync=frame_sync)
+                       frame_sync=frame_sync,
+                       arm=arm[0] if arm else None)
     rw = [r for r in reg["regs"] if r.writable]
 
     streams = interface.get("streams")
@@ -3356,6 +3412,10 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
             "interface['streams'] to pass them through")
 
     declared = [name for name, _, _ in interface["params"]]
+    # The arm handshake is PLUMBING between the register file and the
+    # datapath, not configuration, so no bind supplies it.
+    arm_ports = set(arm[1:]) if arm else set()
+    declared = [name for name in declared if name not in arm_ports]
     missing = [name for name in declared if name not in bind]
     if missing:
         raise KeyError(
@@ -3450,6 +3510,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         a("        .aclk(s_axil_aclk), .aresetn(s_axil_aresetn),")
     else:
         a("        .aclk(clk), .aresetn(!rst),")
+    if arm:
+        a(f"        .arm_req({arm[1]}), .arm_ack({arm[2]}),")
     if frame_sync:
         a("        .update(csr_commit),")
     a("        .s_axil_awaddr(s_axil_awaddr), .s_axil_awvalid(s_axil_awvalid),"
@@ -3471,7 +3533,9 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     a(f"        .{interface['reset']}(rst),")
     prefix = interface.get("param_prefix", "param_")
     for name, _, _ in interface["params"]:
-        a(f"        .{prefix}{name}({bind[name]}),")
+        # The handshake wires reach the register file, not a bind.
+        a(f"        .{prefix}{name}"
+          f"({name if name in arm_ports else bind[name]}),")
     lines = []
     for stream in streams:
         p = stream["prefix"]

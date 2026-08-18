@@ -158,7 +158,8 @@ def _net(endpoint: str) -> str:
 
 
 def compose(module_name: str, instances, connections, ports,
-            header=(), notes=(), commit=None, commit_ports=()) -> dict:
+            header=(), notes=(), commit=None, commit_ports=(),
+            arm=None) -> dict:
     """Emit a module that instantiates `instances` and wires `connections`.
 
     Args:
@@ -177,6 +178,13 @@ def compose(module_name: str, instances, connections, ports,
             pulse the moment a frame LEAVES the pipeline, when the
             pipe is provably empty; an expression says when to load
             instead, for a design whose output is not framed.
+        arm: ``(request_port, acknowledge_port)`` when the registers live
+            in another clock domain. The caller declares both ports. The
+            copies are then taken only while the register file says its
+            values are frozen, and the file is told when they have been.
+            Nothing here waits for the bus: if the request never comes,
+            the copies simply keep the values they have, so a slow or
+            silent crossing delays an update and cannot corrupt one.
         commit_ports: which composed-module ports are configuration, and
             so belong in those local copies. Stated by the caller rather
             than guessed from a name, because a scalar input can equally
@@ -375,6 +383,39 @@ def compose(module_name: str, instances, connections, ports,
             load = f"{out}_valid && {out}_ready && {out}_last"
         else:
             load = f"({commit})"
+        if arm:
+            req, ack = arm
+            a("")
+            a("    // The values live in another clock domain, because a")
+            a("    // register file on a clock that can stop is a bus hang.")
+            a("    // Crossing them one by one would be worse than the")
+            a("    // problem: a wide value sampled mid-write is half old")
+            a("    // bits and half new, a number that never existed.")
+            a("    //")
+            a("    // So nothing wide crosses. The file FREEZES its values")
+            a("    // when software arms it -- refusing writes until told")
+            a("    // otherwise -- and only then are they read here. One")
+            a("    // bit each way.")
+            a("    //")
+            a("    // Note what this does NOT do: wait. If the request is")
+            a("    // late or never comes, the copies keep the values they")
+            a("    // have and every pixel stays correct; the update simply")
+            a("    // lands at a later frame. That is the whole point --")
+            a("    // timing decides WHEN an update takes effect, never")
+            a("    // whether the result is right.")
+            a(f"    (* ASYNC_REG = \"TRUE\" *) reg {req}_s0, {req}_s1;")
+            a(f"    reg {ack}_r;")
+            a(f"    assign {ack} = {ack}_r;")
+            a("    always @(posedge clk) begin")
+            a("        if (rst) begin")
+            a(f"            {req}_s0 <= 1'b0; {req}_s1 <= 1'b0; {ack}_r <= 1'b0;")
+            a("        end else begin")
+            a(f"            {req}_s0 <= {req}; {req}_s1 <= {req}_s0;")
+            a(f"            if ({load} && {req}_s1 && !{ack}_r) {ack}_r <= 1'b1;")
+            a(f"            else if (!{req}_s1) {ack}_r <= 1'b0;")
+            a("        end")
+            a("    end")
+            load = f"{load} && {req}_s1 && !{ack}_r"
         a("    // Every copy on one pulse, with the pipeline empty.")
         a(f"    always @(posedge clk) if (rst || ({load})) begin")
         for (_inst, _name), (live, expr) in live_of.items():
