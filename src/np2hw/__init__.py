@@ -9,7 +9,7 @@ from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
-from .stream import boundary_report, cdc_fifo, combinational_outputs, skid
+from .stream import boundary_report, cdc_fifo, combinational_outputs, skid, tee
 from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
 from .video_out import MODES, mode_timing, scanout
@@ -36,6 +36,10 @@ __all__ = [
     # the design to another family or an ASIC, and so its discipline
     # is checked rather than trusted.
     "cdc_fifo",
+    # One stream, two switchable consumers, off means DISCARD: what
+    # makes a preview branch and a store branch legal at once, and
+    # what makes standby "outputs off" instead of "pipeline stalled".
+    "tee",
     # Receivers for external links: parallel video in, elastic stream out.
     "bayerlink_in",
     # Memory: a frame of DDR fetched back at a raster's pace, by an
