@@ -324,18 +324,41 @@ def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
                     f"ns budget -- a register cannot land inside one "
                     "operation. Slow the clock or restructure the model.")
             if budget_fam.ns(spent + cost) > clk_ns:
-                if i in no_cut_before:
-                    raise ValueError(
-                        f"{label}: the budget asks for a register in front "
-                        f"of {op[0]!r}, but its coefficient is selected by "
-                        "the pixel's position at ingest; this version cuts "
-                        "only after the position-muxed operations. Slow "
-                        "the clock or restructure the model.")
                 emit(f"    reg {'signed ' if cur_signed else ''}"
                      f"[{cur_bits-1}:0] {prev}_q;")
                 emit(f"    always @(posedge clk) if (!stall) "
                      f"{prev}_q <= {prev};")
                 prev = f"{prev}_q"
+                if i in no_cut_before:
+                    # A position-muxed coefficient used to REFUSE a cut
+                    # here, because its select is timed by the pixel's
+                    # position at ingest and a registered running value
+                    # would meet a coefficient selected one beat late.
+                    # The refusal fused the select to the arithmetic --
+                    # one stage no budget could ever split, which left
+                    # white balance's select-plus-DSP fitting its clock
+                    # by 70ps of ESTIMATE and living or dying on
+                    # placement luck (-0.540 one build, +0.026 the one
+                    # before, same Verilog).
+                    #
+                    # The cut is legal after all: register the muxed
+                    # coefficient IN THE SAME !stall pipe as the running
+                    # value, and the pair crosses the boundary together,
+                    # still aligned to the beat whose position selected
+                    # it. Retiming, never resampling -- the twin stays
+                    # bit-exact, and the suite's phase-block tests are
+                    # what hold that claim.
+                    cname, cbits, csg = op[1], op[2], op[3]
+                    cwire = signal(cname)
+                    emit(f"    reg {'signed ' if csg else ''}"
+                         f"[{cbits-1}:0] {prefix}{cname}_cq;")
+                    emit(f"    always @(posedge clk) if (!stall) "
+                         f"{prefix}{cname}_cq <= {cwire};")
+                    _orig_signal = signal
+                    _cq = f"{prefix}{cname}_cq"
+
+                    def signal(n, _o=_orig_signal, _n=cname, _c=_cq):
+                        return _c if n == _n else _o(n)
                 if staging is not None:
                     staging.append(i)
                 spent = cost
