@@ -3532,10 +3532,21 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     a(f"        .{interface['clock']}(clk),")
     a(f"        .{interface['reset']}(rst),")
     prefix = interface.get("param_prefix", "param_")
+    connected = set()
     for name, _, _ in interface["params"]:
         # The handshake wires reach the register file, not a bind.
         a(f"        .{prefix}{name}"
           f"({name if name in arm_ports else bind[name]}),")
+        connected.add(name)
+    # An OUTPUT handshake port is not in `params` -- that list is input
+    # scalars only -- so it has to be connected explicitly. Left to the
+    # loop above it silently became an undriven wire: the datapath still
+    # took its copy, using its own internal state, and only the path BACK
+    # to the register file was missing, so the arm never cleared and
+    # every later write was refused. Nothing in simulation noticed,
+    # because nothing asserted that the arm clears.
+    for name in sorted(arm_ports - connected):
+        a(f"        .{prefix}{name}({name}),")
     lines = []
     for stream in streams:
         p = stream["prefix"]
