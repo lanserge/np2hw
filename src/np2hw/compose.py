@@ -349,78 +349,122 @@ def compose(module_name: str, instances, connections, ports,
                 a(f"    reg {'signed ' if signed else ''}{rng}{live};")
 
     if live_of:
-        if commit is True:
-            # WHEN they load: the moment the frame's last pixel LEAVES
-            # the pipeline, which is the output stream's own `last`.
-            #
-            # At that instant the pipe is provably empty, so there are no
-            # pixels in flight to be caught with old coefficients in the
-            # blocks behind them and new ones in the blocks ahead. One
-            # instant serves every block, so nothing has to be held
-            # atomic and no second bank is needed to freeze it: a write
-            # lands either before the pulse or after it.
-            #
-            # Observed, not predicted. A counter would have to be kept in
-            # step with a pipeline that changes every time a block is
-            # added, and it would be a second statement of a latency the
-            # design already knows. The stream says it directly.
-            #
-            # It also lands in vertical blanking without being told to.
-            # Blanking is around 99,000 clocks at 1080p60 against a
-            # pipeline tens deep, so the new values are in place long
-            # before the next frame's first pixel -- and this needs no
-            # minimum gap to be correct, only a source that does not
-            # start a frame before the previous one has finished.
-            out = next((p.name for p in ports if p.stream is not None
-                        and p.direction == "out"
-                        and "last" in tuple(p.stream.flags)), None)
-            if out is None:
-                raise ValueError(
-                    "live parameter copies take their timing from the "
-                    "frame leaving the pipeline, and this design "
-                    "declares no output stream carrying `last`. Pass "
-                    "commit='<expression>' to say when a copy loads.")
-            load = f"{out}_valid && {out}_ready && {out}_last"
-        else:
-            load = f"({commit})"
+        # WHEN they load: as a WAVE, travelling down the chain with the
+        # frame boundary itself. Each instance takes its copy at its own
+        # incoming `last` beat -- the moment the outgoing frame's final
+        # pixel enters it -- so the next frame's first pixel, one beat
+        # later at the earliest, computes with the new values. Upstream
+        # blocks load first, downstream later, exactly as the new frame
+        # advances: every block has its parameters "in time, before the
+        # pixels arrive at the block".
+        #
+        # Ordering does the work that pipe-EMPTINESS used to do. The old
+        # form was one global pulse gated on the pipe having drained --
+        # also one frame of loop latency, to be fair to it, but resting
+        # on a drained-detector being right and on the source leaving a
+        # gap as long as the WHOLE pipe. The wave rests on ordering,
+        # which the stream itself guarantees, and shrinks the gap each
+        # block needs to that block's own flush -- not the pipeline's.
+        #
+        # THE REQUIREMENT, stated rather than enjoyed silently: a block
+        # that lags its input (a stencil flushing buffered lines) is
+        # still finishing frame N when its copy loads, so the gap
+        # between frames at its input must exceed its own flush latency
+        # -- two line-times for a 5-line stencil, against an inter-frame
+        # gap of tens of lines on any real raster. A source that packs
+        # frames tighter than its deepest block flushes would tear that
+        # block's last rows, and no load instant fixes a machine still
+        # computing two frames at once.
+        #
+        # A commit arriving MID-WAVE must not split the chain -- blocks
+        # one and two on the old set, the rest on the new. The armed
+        # flag is latched ONCE, at the wave's head, and the rest of the
+        # chain obeys the latch.
+        per_inst = {}
+        for (inst_name, name), (live, expr) in live_of.items():
+            per_inst.setdefault(inst_name, []).append((live, expr))
+
+        def in_boundary(inst):
+            edges = [e for (_src), (dst, _p), e in parsed if dst is inst]
+            if not edges:
+                return None
+            key = edges[0].source
+            if "last" not in tuple(sources[key].flags):
+                return None
+            n = _net(key)
+            return f"{n}_valid && {n}_ready && {n}_last"
+
+        boundaries = {}
+        for inst in instances:
+            if inst.name in per_inst:
+                b = in_boundary(inst)
+                if b is None and commit is True:
+                    raise ValueError(
+                        f"instance {inst.name!r} has live parameters but no "
+                        "framed input to time their load by. Pass "
+                        "commit='<expression>' to say when a copy loads.")
+                boundaries[inst.name] = b
+        ordered = [i.name for i in instances if i.name in per_inst]
+        head = boundaries[ordered[0]] if commit is True else None
+
+        gate = ""
         if arm:
             req, ack = arm
             a("")
-            a("    // The values live in another clock domain, because a")
-            a("    // register file on a clock that can stop is a bus hang.")
-            a("    // Crossing them one by one would be worse than the")
-            a("    // problem: a wide value sampled mid-write is half old")
-            a("    // bits and half new, a number that never existed.")
+            a("    // The register file freezes its values when software arms")
+            a("    // it (writes refused until acknowledged), so the wave reads")
+            a("    // a bank that provably cannot move under it. One bit each")
+            a("    // way; the values themselves never cross anything.")
             a("    //")
-            a("    // So nothing wide crosses. The file FREEZES its values")
-            a("    // when software arms it -- refusing writes until told")
-            a("    // otherwise -- and only then are they read here. One")
-            a("    // bit each way.")
-            a("    //")
-            a("    // Note what this does NOT do: wait. If the request is")
-            a("    // late or never comes, the copies keep the values they")
-            a("    // have and every pixel stays correct; the update simply")
-            a("    // lands at a later frame. That is the whole point --")
-            a("    // timing decides WHEN an update takes effect, never")
-            a("    // whether the result is right.")
+            a("    // And nothing here WAITS. An unarmed boundary loads no")
+            a("    // copies and every pixel stays correct on the old set; a")
+            a("    // late commit lands at the next frame, never in a wrong")
+            a("    // pixel. Timing decides WHEN an update takes effect --")
+            a("    // never whether the result is right.")
             a(f"    (* ASYNC_REG = \"TRUE\" *) reg {req}_s0, {req}_s1;")
             a(f"    reg {ack}_r;")
+            a("    // Latched at the wave's head, so a commit that arrives")
+            a("    // mid-wave waits for the next frame instead of splitting")
+            a("    // the chain between two parameter sets.")
+            a("    reg wave_armed;")
             a(f"    assign {ack} = {ack}_r;")
             a("    always @(posedge clk) begin")
             a("        if (rst) begin")
-            a(f"            {req}_s0 <= 1'b0; {req}_s1 <= 1'b0; {ack}_r <= 1'b0;")
+            a(f"            {req}_s0 <= 1'b0; {req}_s1 <= 1'b0;")
+            a(f"            {ack}_r <= 1'b0; wave_armed <= 1'b0;")
             a("        end else begin")
             a(f"            {req}_s0 <= {req}; {req}_s1 <= {req}_s0;")
-            a(f"            if ({load} && {req}_s1 && !{ack}_r) {ack}_r <= 1'b1;")
+            if head:
+                a(f"            if ({head}) wave_armed <= {req}_s1;")
+            out = next((pt.name for pt in ports if pt.stream is not None
+                        and pt.direction == "out"
+                        and "last" in tuple(pt.stream.flags)), None)
+            done = (f"{out}_valid && {out}_ready && {out}_last"
+                    if out else (head or "1'b0"))
+            a("            // Acknowledged when the wave has passed the whole")
+            a("            // chain: the frame that carried it leaves the pipe.")
+            a(f"            if ({done} && wave_armed && !{ack}_r) {ack}_r <= 1'b1;")
             a(f"            else if (!{req}_s1) {ack}_r <= 1'b0;")
             a("        end")
             a("    end")
-            load = f"{load} && {req}_s1 && !{ack}_r"
-        a("    // Every copy on one pulse, with the pipeline empty.")
-        a(f"    always @(posedge clk) if (rst || ({load})) begin")
-        for (_inst, _name), (live, expr) in live_of.items():
-            a(f"        {live} <= {expr};")
-        a("    end")
+
+        first = ordered[0] if ordered else None
+        for inst_name in ordered:
+            copies = per_inst[inst_name]
+            if commit is True:
+                b = boundaries[inst_name]
+                armed_term = ""
+                if arm:
+                    armed_term = (f" && {arm[0]}_s1" if inst_name == first
+                                  else " && wave_armed")
+                cond = f"({b}{armed_term})"
+            else:
+                cond = f"({commit})"
+            a(f"    // {inst_name}: loads as the frame boundary reaches it")
+            a(f"    always @(posedge clk) if (rst || {cond}) begin")
+            for live, expr in copies:
+                a(f"        {live} <= {expr};")
+            a("    end")
         a("")
         live_of = {k: v[0] for k, v in live_of.items()}
 
