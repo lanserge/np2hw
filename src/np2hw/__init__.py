@@ -10,6 +10,7 @@ from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
 from .stream import boundary_report, cdc_fifo, combinational_outputs, skid, tee
+from .i2c import ddc_slave
 from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
 from .video_out import MODES, mode_timing, scanout
@@ -40,6 +41,11 @@ __all__ = [
     # makes a preview branch and a store branch legal at once, and
     # what makes standby "outputs off" instead of "pipeline stalled".
     "tee",
+    # The display cable as the control plane: EDID says who the sink
+    # is, a second address on the same DDC wires reads and writes the
+    # register file -- refusal (SLVERR) becomes NACK, and no CPU or
+    # network is needed on the board.
+    "ddc_slave",
     # Receivers for external links: parallel video in, elastic stream out.
     "bayerlink_in",
     # Memory: a frame of DDR fetched back at a raster's pace, by an
