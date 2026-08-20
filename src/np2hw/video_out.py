@@ -2,8 +2,10 @@
 
 The mirror of :mod:`video_in`. That module decodes a link and follows
 whatever the sender states; this one DEFINES a link -- it drives a
-display, so its timing is not negotiable and not per-frame. That
-asymmetry decides everything below.
+display, so its timing is never negotiated with the sink. The one
+concession points the other way: `genlock` lets vertical blanking
+breathe so the raster can follow its SOURCE -- the display still sees
+a raster that never stutters. That asymmetry decides everything below.
 
   THE MODE IS A BUILD FACT, because it is a CLOCK.  A raster's geometry
       and its pixel clock are one thing: 1080p60 is 148.5 MHz and
@@ -41,12 +43,10 @@ asymmetry decides everything below.
       one clock hands the sink a picture shifted by one, and no status
       bit can see it from inside.
 
-What this block does NOT do is fetch. It consumes an elastic stream and
-someone else reads memory -- today a vendor DMA, whose data lags its own
-start-of-frame marker by a fixed number of beats that the caller has to
-measure and compensate. Emitting our own reader is the next step and
-retires that compensation; the interface here does not change when it
-lands.
+What this block does NOT do is fetch. It consumes an elastic stream;
+who produces it -- a memory reader like :func:`np2hw.video_mem.
+framebuffer_read`, or the live pipeline itself -- is the caller's
+composition, and this interface is the same for both.
 """
 from __future__ import annotations
 
@@ -61,6 +61,11 @@ MODES = {
     "1280x720p60": (1650, 750, 1280,  720, 1390, 1430,  725,  730,  74.250, 1, 1),
     "1280x720p50": (1980, 750, 1280,  720, 1720, 1760,  725,  730,  74.250, 1, 1),
     "1920x1080p30": (2200, 1125, 1920, 1080, 2008, 2052, 1084, 1089, 74.250, 1, 1),
+    # Simulation-scale raster: the control laws (genlock, windowing,
+    # arming) are geometry-independent, and a 200x80 frame simulates
+    # three orders of magnitude faster than 2200x1125. Not a display
+    # mode; a testbench's.
+    "sim_tiny": (200, 80, 160, 64, 170, 180, 70, 74, 10.0, 1, 1),
     "1920x1080p50": (2640, 1125, 1920, 1080, 2448, 2492, 1084, 1089, 148.500, 1, 1),
     "1920x1080p60": (2200, 1125, 1920, 1080, 2008, 2052, 1084, 1089, 148.500, 1, 1),
 }
@@ -103,7 +108,10 @@ def scanout(mode: str = "1080p60",
             module_name: str = "scanout",
             sink: str = "dvi",
             data_bits: int = 24,
-            fill: int = 0x101010) -> dict:
+            fill: int = 0x101010,
+            genlock: bool = False,
+            genlock_lead_lines: int = 2,
+            genlock_ps_per_pixel: int = 560) -> dict:
     """Emit a raster that paints a placed window from an elastic stream.
 
     Args:
@@ -117,6 +125,37 @@ def scanout(mode: str = "1080p60",
         fill: what shows where the window does not cover, and where a
             frame had to be dropped. Deliberately not black: a fill that
             is visibly not video makes a dropped frame legible.
+        genlock: slave this raster to the incoming stream by
+            steering the PIXEL CLOCK, not the line count. The
+            raster's geometry NEVER changes -- a television drops
+            sync on any vertical-total motion, however slow
+            (bench-paid: one line per frame held fabric lock
+            perfectly and lost the TV entirely; a fixed raster on
+            the same clock was solid). Instead the module emits
+            fine phase-shift steps for the MMCM that makes its
+            clock (ps_en/ps_incdec/ps_done -- PSCLK is this
+            module's own clk): ~24 ps per step, cumulative and
+            unbounded, which is a fractional frequency trim with
+            hundreds of ppm of authority. Phase is measured at
+            each frame start's arrival at the queue head, in
+            PIXELS, against a target G_LEAD lines before the
+            window; small errors drain through the phase shifter,
+            invisible to any sink. An error beyond two lines is
+            not steerable at 24 ps -- the counters JAM to the
+            target once (one visibly short frame, the same price
+            as a mode set, cooled down so a wild source cannot
+            jam repeatedly). Crystal ppm is the genlock's job;
+            an fps step is a mode switch and stays software's.
+        genlock_lead_lines: how early the SOF should arrive, in
+            lines. THIS IS STORAGE, not preference: with no frame
+            store, every line of lead is a line the upstream
+            elastic must hold. Two lines wants a ~4096-deep
+            crossing FIFO.
+        genlock_ps_per_pixel: fine phase-shift steps per pixel
+            tick -- a fact about the MMCM feeding this raster
+            (pixel_period / (VCO_period/56); 74.25 MHz from a
+            742.5 VCO is 560). The board states it because the
+            board owns the clock.
 
     Returns:
         ``{"verilog", "module", "mode", "interface", ...}``. Run-time
@@ -183,6 +222,17 @@ def scanout(mode: str = "1080p60",
     a("    input  wire [15:0] param_win_w,")
     a("    input  wire [15:0] param_win_h,")
     a("    input  wire        param_center,  // derive the offsets instead")
+    if genlock:
+        a("    // GENLOCK by clock steering: the raster's geometry NEVER")
+        a("    // moves (a TV drops sync on any vertical-total motion --")
+        a("    // bench-paid). The stream is followed through the MMCM's")
+        a("    // fine phase shifter, ~24 ps at a time; PSCLK is this")
+        a("    // module's own clk. Everything is derived from the stream")
+        a("    // itself -- no occupancy tap, no side channel.")
+        a("    input  wire        param_follow,   // 0: free-run the mode")
+        a("    output reg         ps_en,          // one PSEN pulse per step")
+        a("    output reg         ps_incdec,      // 1: delay (retard raster)")
+        a("    input  wire        ps_done,        // MMCM's PSDONE")
     a("    // where it ACTUALLY landed -- read-only, because a derived")
     a("    // value written back into its register becomes an explicit ask")
     a("    output wire [15:0] act_x0,")
@@ -222,13 +272,96 @@ def scanout(mode: str = "1080p60",
     a("    wire last_px  = in_win && (x == (w_x0 + param_win_w - 1))")
     a("                           && (y == (w_y0 + param_win_h - 1));")
     a("")
+    a("    // The frame length this raster is RUNNING -- and it NEVER")
+    a("    // changes: a television drops sync on any vertical-total")
+    a("    // motion, however slow (bench-paid: one line per frame held")
+    a("    // fabric lock perfectly and lost the TV entirely). Genlocked,")
+    a("    // the following happens in the CLOCK, 24 ps at a time.")
+    a(f"    reg [{yb}:0] v_tot_eff;")
+    if genlock:
+        frame_px = t["h_total"] * t["v_total"]
+        pb = _bits(frame_px)
+        owed_cap = 2 * t["h_total"] * genlock_ps_per_pixel
+        ob = _bits(owed_cap)
+        a("    reg [15:0] in_period;  // line ticks since last ARRIVAL")
+        a("    reg head_sof_d;        // one arrival edge per input frame")
+        a("    // the steering debt: phase-shift steps still to issue,")
+        a("    // OVERWRITTEN at each arrival (a proportional re-target;")
+        a("    // the slew-limited drain is the smoothing)")
+        a(f"    reg [{ob-1}:0] owed;")
+        a("    reg owed_ret;          // 1: retard the raster (delay)")
+        a("    reg ps_busy;           // one step in flight")
+        a("    reg [4:0] ps_tmo;      // PSDONE comes ~12 PSCLKs later;")
+        a("                           // a timeout so a miswired done")
+        a("                           // pin degrades to slow, not stuck")
+        a("    reg [5:0] jam_cool;    // frames since the last counter")
+        a("                           // jam: a wild source must not")
+        a("                           // jam every frame")
+
+        a("    reg glocked;             // STATUS, not a control state")
+        a("    reg [2:0] lock_run;")
+
+        a(f"    localparam [{yb}:0] G_LEAD = {genlock_lead_lines};")
+        a(f"    localparam [{ob-1}:0] PS_PER_PX = {genlock_ps_per_pixel};")
     a("    reg armed;                   // this frame's first beat is HERE")
     a("    reg ever_armed;")
     a("    wire head_sof = s_axis_tvalid && s_axis_tuser;")
-    a("    // Consume inside the window when armed; otherwise drain during")
-    a("    // vertical blanking until the next frame start is at the head.")
-    a("    assign s_axis_tready = armed ? in_win : (blank && !head_sof);")
+    if genlock:
+        a("    // ONE consumption rule: window positions consume, and")
+        a("    // nothing else does. Pacing falls out (an eager drain")
+        a("    // would let the SOF's timing measure queue occupancy")
+        a("    // instead of phase -- simulated, not imagined); an")
+        a("    // EARLY frame start waits naturally, because blanking")
+        a("    // simply has no window positions to consume it; a LATE")
+        a("    // one passes mid-window, where its position IS the")
+        a("    // error. No lock state gates the data path. Blanking")
+        a("    // additionally DRAINS non-SOF beats: without a discard")
+        a("    // path, any transient where the raster runs long grows")
+        a("    // the backlog forever (window consumption is exactly")
+        a("    // one frame per raster frame -- it can never catch")
+        a("    // up; simulated as an unbounded pile-up). Converged,")
+        a("    // the drain is a no-op, so the wait measurement is")
+        a("    // clean precisely in the regime that uses it.")
+        a("    assign s_axis_tready = in_win || (blank && !head_sof);")
+    else:
+        a("    // Consume inside the window when armed; otherwise drain")
+        a("    // during vertical blanking until the next frame start is")
+        a("    // at the head.")
+        a("    assign s_axis_tready = armed ? in_win"
+          " : (blank && !head_sof);")
     a("")
+    if genlock:
+        a("    // measurement helpers (combinational into registers)")
+        a(f"    wire [{yb-1}:0] pass_dy = y - w_y0[{yb-1}:0];")
+        a("    // the SOF reaching the queue head is the arrival: it")
+        a("    // fires exactly once per input frame regardless of drain")
+        a("    // or window state. Target: arrive G_LEAD lines before")
+        a("    // the window origin and wait out the lead in blanking.")
+        a("    wire sof_arr = head_sof && !head_sof_d;")
+        a(f"    wire [{yb}:0] arr_tgt = (w_y0[{yb}:0] >= G_LEAD)")
+        a(f"        ? (w_y0[{yb}:0] - G_LEAD)")
+        a(f"        : (v_tot_eff + w_y0[{yb}:0] - G_LEAD);")
+        a("    // signed-shortest-way phase error, in whole lines")
+        a(f"    wire [{yb}:0] arr_dy = ({{1'b0, y}} >= arr_tgt)")
+        a(f"        ? ({{1'b0, y}} - arr_tgt)")
+        a(f"        : ({{1'b0, y}} + v_tot_eff - arr_tgt);")
+        a("    wire arr_late = (arr_dy != 0)")
+        a("                 && (arr_dy < (v_tot_eff >> 1));")
+        a(f"    wire [{yb}:0] arr_err = arr_late ? arr_dy")
+        a(f"        : (arr_dy == 0) ? {{{yb + 1}{{1'b0}}}}")
+        a("        : (v_tot_eff - arr_dy);")
+        a("    // the same error, in PIXELS: what the phase shifter can")
+        a("    // actually steer -- computed in a REGISTERED pipeline,")
+        a("    // one multiply per cycle: the single-cycle cone (y*H_TOT,")
+        a("    // wrap subtract, x560, clamp) missed timing by 2.3 ns.")
+        a("    // The measurement is once per frame; three cycles of")
+        a("    // latency are free. The memory reader's burst decision")
+        a("    // paid for this same lesson first.")
+        a(f"    reg [{xb-1}:0] arr_x;   // the arrival, captured")
+        a(f"    reg [{yb-1}:0] arr_y;")
+        a("    reg [2:0] calc;        // one-hot measurement pipeline")
+        a(f"    reg [{pb}:0] pos_r, tgt_r, err_r;")
+        a("    reg late_r;")
     a("    reg [24:0] alive;")
     a("    reg [3:0]  vsyncs;")
     a("    reg vs_d, underflow, misalign, refused;")
@@ -237,13 +370,128 @@ def scanout(mode: str = "1080p60",
     a("        alive <= alive + 1;")
     a("        if (rst || !locked) begin")
     a("            x <= 0; y <= 0; armed <= 0; ever_armed <= 0;")
+    a("            v_tot_eff <= V_TOT;")
+    if genlock:
+        a("            in_period <= 0; head_sof_d <= 0;")
+        a("            owed <= 0; owed_ret <= 0; calc <= 0;")
+        a("            ps_en <= 0; ps_incdec <= 0;")
+        a("            ps_busy <= 0; ps_tmo <= 0; jam_cool <= 0;")
+        a("            glocked <= 0; lock_run <= 0;")
     a("            vid_active_video <= 0; vid_hsync <= 0; vid_vsync <= 0;")
     a("            vid_data <= FILL; vsyncs <= 0; vs_d <= 0;")
     a("            underflow <= 0; misalign <= 0; refused <= 0;")
     a("            sof_run <= 0; sof_cnt <= 0;")
     a("        end else begin")
     a(f"            x <= (x == H_TOT-1) ? {xb}'d0 : x + {xb}'d1;")
-    a(f"            if (x == H_TOT-1) y <= (y == V_TOT-1) ? {yb}'d0 : y + {yb}'d1;")
+    a(f"            if (x == H_TOT-1) begin")
+    a(f"                y <= (y >= v_tot_eff-1) ? {yb}'d0 : y + {yb}'d1;")
+    a(f"                if (y >= v_tot_eff-1) begin")
+    a("                    // frame boundary: the ONE place the length")
+    a("                    // may change")
+    a("                    v_tot_eff <= V_TOT;")
+    a("                end")
+    a("            end")
+    if genlock:
+        a("")
+        a("            // ---- the genlock: the clock is steered, the")
+        a("            // counters are still. Each arrival re-targets the")
+        a("            // steering debt (proportional overwrite); the")
+        a("            // stepper drains it one MMCM fine-phase step at a")
+        a("            // time. An error past two lines is not steerable")
+        a("            // at 24 ps -- the counters JAM to target once,")
+        a("            // under a cooldown.")
+        a("            if (x == H_TOT-1) begin")
+        a("                in_period <= (in_period == 16'hFFFF)")
+        a("                             ? in_period : in_period + 1;")
+        a(f"                if (y >= v_tot_eff-1 && jam_cool != 0)")
+        a("                    jam_cool <= jam_cool - 1;")
+        a("            end")
+        a("            if (s_axis_tvalid && s_axis_tready")
+        a("                && s_axis_tuser) begin")
+        a("                // lock is a REPORT: frame starts passing at")
+        a("                // the window origin, four in a row.")
+        a(f"                if (pass_dy == {yb}'d0) begin")
+        a("                    if (lock_run != 3'd7)")
+        a("                        lock_run <= lock_run + 3'd1;")
+        a("                    glocked <= (lock_run >= 3'd3);")
+        a("                end else begin")
+        a("                    lock_run <= 0; glocked <= 0;")
+        a("                end")
+        a("            end")
+        a("            // the stepper: one PSEN pulse, then wait for")
+        a("            // PSDONE (a timeout degrades a miswired done pin")
+        a("            // to slow, never to stuck)")
+        a("            ps_en <= 1'b0;")
+        a("            if (ps_busy) begin")
+        a("                if (ps_done || ps_tmo == 0) ps_busy <= 0;")
+        a("                else ps_tmo <= ps_tmo - 5'd1;")
+        a("            end else if (param_follow && owed != 0) begin")
+        a("                ps_en <= 1'b1;")
+        a("                ps_incdec <= owed_ret;")
+        a("                ps_busy <= 1'b1; ps_tmo <= 5'd31;")
+        a(f"                owed <= owed - {ob}'d1;")
+        a("            end")
+        a("            head_sof_d <= head_sof;")
+        a("            if (sof_arr) begin")
+        a("                in_period <= 0;")
+        a("                if (param_follow) begin")
+        a(f"                    if (arr_err > {yb+1}'d2) begin")
+        a("                        // beyond steering: jam ONCE, cooled")
+        a("                        if (jam_cool == 0) begin")
+        a(f"                            x <= {xb}'d0;")
+        a(f"                            y <= arr_tgt[{yb-1}:0];")
+        a("                            jam_cool <= 6'd63;")
+        a("                        end")
+        a("                        owed <= 0; calc <= 3'b000;")
+        a("                    end else begin")
+        a("                        // within steering: capture the")
+        a("                        // arrival, measure over the next")
+        a("                        // three cycles")
+        a("                        arr_x <= x; arr_y <= y;")
+        a("                        calc <= 3'b001;")
+        a("                    end")
+        a("                end")
+        a("            end")
+        a("            if (calc[0]) begin")
+        a(f"                pos_r <= arr_y * {t['h_total']}")
+        a(f"                         + {{{pb+1-xb}'d0, arr_x}};")
+        a(f"                tgt_r <= arr_tgt * {t['h_total']};")
+        a("                calc <= 3'b010;")
+        a("            end")
+        a("            if (calc[1]) begin")
+        a("                if (pos_r >= tgt_r) begin")
+        a(f"                    late_r <= (pos_r - tgt_r) < {frame_px // 2};")
+        a(f"                    err_r <= ((pos_r - tgt_r) < {frame_px // 2})")
+        a("                        ? (pos_r - tgt_r)")
+        a(f"                        : ({frame_px} - (pos_r - tgt_r));")
+        a("                end else begin")
+        a(f"                    late_r <= (pos_r + {frame_px} - tgt_r)")
+        a(f"                              < {frame_px // 2};")
+        a(f"                    err_r <= ((pos_r + {frame_px} - tgt_r)")
+        a(f"                              < {frame_px // 2})")
+        a(f"                        ? (pos_r + {frame_px} - tgt_r)")
+        a(f"                        : (tgt_r - pos_r);")
+        a("                end")
+        a("                calc <= 3'b100;")
+        a("            end")
+        a("            if (calc[2]) begin")
+        a(f"                if (err_r > {pb+1}'d1) begin")
+        a(f"                    owed <= (err_r > {2 * t['h_total']})")
+        a(f"                        ? {ob}'d{owed_cap}")
+        a("                        : err_r * PS_PER_PX;")
+        a("                    owed_ret <= late_r;")
+        a("                end else begin")
+        a("                    owed <= 0;")
+        a("                end")
+        a("                calc <= 3'b000;")
+        a("            end")
+        a("            // source gone: stop steering and say so. The")
+        a("            // raster itself needs no restoring -- it never")
+        a("            // moved.")
+        a(f"            if (in_period > 16'd{t['v_total'] * 4}) begin")
+        a("                glocked <= 0; lock_run <= 0; owed <= 0;")
+        a("                calc <= 0;")
+        a("            end")
     a("")
     a("            // ONE register stage for pixel, enable and both syncs:")
     a("            // skew them and the sink shows a picture shifted by the")
@@ -268,6 +516,11 @@ def scanout(mode: str = "1080p60",
     a("            // due; disarm when the window's last pixel is spent, so")
     a("            // the next frame must arm again. Alignment is per FRAME.")
     a("            if (blank && head_sof) begin armed <= 1; ever_armed <= 1; end")
+    if genlock:
+        a("            // a late frame start consumed mid-window arms")
+        a("            // too: show the joined frame from where it joins")
+        a("            if (s_axis_tvalid && s_axis_tready && s_axis_tuser)")
+        a("                begin armed <= 1; ever_armed <= 1; end")
     a("            if (armed && last_px) armed <= 1'b0;")
     a("            if (armed && in_win && !s_axis_tvalid) underflow <= 1;")
     a("            if (armed && first_px && s_axis_tvalid && !s_axis_tuser)")
@@ -280,8 +533,13 @@ def scanout(mode: str = "1080p60",
     a("            end")
     a("        end")
     a("    end")
-    a("    assign status = {vsyncs, alive[24:22], refused, misalign,")
-    a("                     underflow, ever_armed, locked, sof_cnt};")
+    if genlock:
+        a("    assign status = {glocked, vsyncs[2:0], alive[24:22],")
+        a("                     refused, misalign,")
+        a("                     underflow, ever_armed, locked, sof_cnt};")
+    else:
+        a("    assign status = {vsyncs, alive[24:22], refused, misalign,")
+        a("                     underflow, ever_armed, locked, sof_cnt};")
     a("endmodule")
 
     return {
@@ -299,7 +557,14 @@ def scanout(mode: str = "1080p60",
         # is also combinational, that path runs all the way back to the
         # source without meeting a register.
         "combinational_outputs": ("s_axis_tready",),
-        "status_bits": {"sof_per_frame": (0, 3), "locked": 3, "armed": 4,
-                        "underflow": 5, "misalign": 6, "refused": 7,
-                        "alive": (8, 3), "vsyncs": (11, 4)},
+        # The genlock variant narrows the vsync counter by one bit to
+        # make room for glocked; everything below is common. Bit 15 is
+        # the zero-extension pad in both.
+        "status_bits": ({"sof_per_frame": (0, 3), "locked": 3, "armed": 4,
+                         "underflow": 5, "misalign": 6, "refused": 7,
+                         "alive": (8, 3), "vsyncs": (11, 3), "glocked": 14}
+                        if genlock else
+                        {"sof_per_frame": (0, 3), "locked": 3, "armed": 4,
+                         "underflow": 5, "misalign": 6, "refused": 7,
+                         "alive": (8, 3), "vsyncs": (11, 4)}),
     }
