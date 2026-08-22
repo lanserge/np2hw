@@ -1312,6 +1312,38 @@ def _reads_memory(root) -> bool:
     return False
 
 
+def _check_output_extent(shape, image, M, N, what):
+    """Refuse a model whose output extent the emitted gate cannot express.
+
+    The valid region is [M, HEIGHT) x [N, WIDTH), written in the WIDTH and
+    HEIGHT PARAMETERS so one synthesised core serves any resolution. That
+    is the right region exactly when the model's output is the input minus
+    the kernel's margin, which is what a stencil produces.
+
+    A model that crops FURTHER -- img[0:4, 0:4] on an 8x8 -- has a smaller
+    extent than that, and the gate above would emit the whole frame
+    regardless: the tracer's shape and the emitter's region are two owners
+    of one fact, and they disagreed in silence. A crop to a fixed extent is
+    also not resolution-agnostic, so it cannot be written in those
+    parameters at all; it needs an output raster of its own, which this
+    emitter does not have. Refusing is the honest answer until it does --
+    a core that quietly emits four times the pixels its model describes is
+    worse than a core that will not build.
+    """
+    if shape is None:
+        return
+    rows, cols = shape
+    want = (image.height - M, image.width - N)
+    if (rows, cols) != want:
+        raise ValueError(
+            f"{what}: the model's output is {rows}x{cols}, but this core "
+            f"emits {want[0]}x{want[1]} -- every position in "
+            f"[{M},HEIGHT) x [{N},WIDTH). np2hw has one raster per core, "
+            "counted from the input, so an output smaller than the input "
+            "minus the kernel margin cannot be expressed. Slice to the "
+            "margin the taps actually need, or keep the whole frame.")
+
+
 def generate(out_line, module_name="np2hw_top", framing="height",
              max_width=None, clk_ns=None, label=None, dev=None) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
@@ -1410,10 +1442,8 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     a("    output reg  out_last,")                        # end of frame (final pixel)
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")  # OUT_SGN/OUT_BITS fixed below
     a(");")
-    if out_line.shape is not None:
-        out_rows, out_cols = out_line.shape
-    else:
-        out_rows, out_cols = image.height - M, image.width - N
+    _check_output_extent(out_line.shape, image, M, N, "windowed op")
+    out_rows, out_cols = image.height - M, image.width - N
     a(f"    reg [{POS-1}:0] col;")
     a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")       # holding an unaccepted output
@@ -1562,7 +1592,8 @@ def _generate_mux(mux, module_name) -> dict:
     signed = (A.spatial_signed or B.spatial_signed or sgA or sgB
               or any(ps for _, _, ps, _, _ in params[1:]))
     sgn = "signed " if signed else ""
-    out_rows, out_cols = mux.shape
+    _check_output_extent(mux.shape, image, M, N, "mux (np.where)")
+    out_rows, out_cols = image.height - M, image.width - N
     total_out = out_rows * out_cols
 
     L = []
