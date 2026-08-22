@@ -133,7 +133,7 @@ class Traced:
     def __init__(self, image, taps, shape, bits, signed,
                  spatial_bits=None, post=(), pad=(0, 0, 0, 0), mode="none",
                  spatial_signed=None, phase=None, stride=(1, 1), expr=None,
-                 lane=None):
+                 lane=None, declared_extent=False):
         self.image = image
         # Pointwise expression DAG, engaged the first time the model does
         # something a straight chain cannot say: forks the value, combines
@@ -142,6 +142,11 @@ class Traced:
         self.expr = expr
         self.taps = dict(taps)               # {(row,col): weight}, weight may be < 0
         self.shape = tuple(shape)
+        # True when the MODEL stated this extent (via make_coords) rather
+        # than it being inferred as "the input minus the kernel margin".
+        # The emitter needs the distinction: a declared extent is a window
+        # it must gate to, an inferred one is the region it already emits.
+        self.declared_extent = declared_extent
         self.bits = bits
         self.signed = signed
         self.spatial_bits = bits if spatial_bits is None else spatial_bits
@@ -179,7 +184,7 @@ class Traced:
                     spatial_signed=self.spatial_signed, post=self.post,
                     pad=self.pad, mode=self.mode,
                     phase=self.phase, stride=self.stride, expr=self.expr,
-                    lane=self.lane)
+                    lane=self.lane, declared_extent=self.declared_extent)
         base.update(kw)
         return Traced(**base)
 
@@ -234,6 +239,8 @@ class Traced:
     def __getitem__(self, key):
         if not isinstance(key, tuple):
             key = (key, slice(None))
+        if any(isinstance(k, Traced) for k in key):
+            return self._crop(key)
         steps = [k.step for k in key if isinstance(k, slice)]
         if any(step not in (None, 1) for step in steps):
             # A phase slice comes AFTER the plane's arithmetic ("compute the
@@ -245,6 +252,33 @@ class Traced:
         (dr, rows), (dc, cols) = _axis(key[0], self.shape[0]), _axis(key[1], self.shape[1])
         return self._spatial({(r + dr, c + dc): w for (r, c), w in self.taps.items()},
                              (rows, cols), self.bits, self.signed)
+
+    def _crop(self, key):
+        """`img[y2 + dy, x2 + dx]` -- read the input at a fixed offset from
+        an output position the model declared.
+
+        The result is an ordinary tap map, which is what it always was: a
+        crop's arithmetic is a single tap at (dy, dx). What is new is that
+        the extent came from the model instead of being inferred, so the
+        emitter can gate to it rather than falling back on the input's own
+        raster and emitting a whole frame.
+        """
+        if self.post:
+            raise ValueError("cannot crop after a pointwise op (v1)")
+        if not all(isinstance(k, Traced) for k in key[:2]):
+            raise ValueError("a crop indexes BOTH axes with output "
+                             "coordinates: img[y2 + dy, x2 + dx]")
+        rows, dr = _decode_output_index(key[0], 0)
+        cols, dc = _decode_output_index(key[1], 1)
+        if dr + rows > int(self.shape[0]) or dc + cols > int(self.shape[1]):
+            raise ValueError(
+                f"crop reads to ({dr + rows}, {dc + cols}) of a "
+                f"{self.shape[0]}x{self.shape[1]} input -- hardware has no "
+                "IndexError, so the map must stay inside the frame")
+        out = self._spatial({(r + dr, c + dc): w for (r, c), w in self.taps.items()},
+                            (rows, cols), self.bits, self.signed)
+        out.declared_extent = True
+        return out
 
     def _phase_slice(self, key):
         """`value[py::2, px::2]` -- one interleaved plane of a full-rate value.
@@ -758,6 +792,90 @@ def coords(img):
             img._expr_derive(PExpr("col", (), 0, width - 1)))
 
 
+def _decode_output_index(value, axis):
+    """An output coordinate plus a constant -> (extent, offset).
+
+    The map from output position to input position is what a crop IS, and
+    it has to be recovered exactly: `y2 + 2` means output row r reads input
+    row r + 2, so the tap sits at row 2 and the output raster is however
+    tall `y2` was declared. The leaf's own range carries that extent --
+    `hi + 1` -- for the same reason `coords` needs no separate width.
+
+    Anything richer is refused by name. A multiply is a RATIO, and a ratio
+    needs an output counter that advances at its own pace; refusing it here
+    with the reason beats emitting a core that resamples nothing.
+    """
+    want = "orow" if axis == 0 else "ocol"
+    offset, node = 0, value.expr
+    while node is not None and node.op == "add":
+        left, right = node.args
+        if right.op == "const":
+            offset += int(right.args[0])
+            node = left
+        elif left.op == "const":
+            offset += int(left.args[0])
+            node = right
+        else:
+            node = None
+            break
+    if node is None or node.op != want:
+        raise ValueError(
+            f"index on axis {axis}: expected an output coordinate from "
+            f"make_coords, optionally plus a constant, and got "
+            f"{value.expr.op if value.expr else 'a plain value'}. A crop is "
+            "the map `out + k`; a ratio (`out * k`, `out // k`) needs an "
+            "output raster that advances at its own rate, which this "
+            "compiler does not emit yet.")
+    if offset < 0:
+        raise ValueError(f"index on axis {axis}: offset {offset} reads "
+                         "before the frame starts")
+    return node.hi + 1, offset
+
+
+def make_coords(img, rows, cols):
+    """Declare an OUTPUT raster and return its position, as `coords` does
+    for the input's.
+
+    `coords(img)` says where a pixel is in the frame arriving. This says
+    where a pixel is in the frame LEAVING, which is a different raster the
+    moment a model stops emitting one pixel per pixel. Indexing the input
+    with these coordinates states the map from output position to input
+    position -- and that map, not the resulting shape, is what a core has
+    to be built from.
+
+        y2, x2 = make_coords(img, H - 4, W - 4)
+        return img[y2 + 2, x2 + 2]          # a crop, offset by (2, 2)
+
+    A shape alone cannot say this: `img[0:4, 0:4]` yields a 4x4 and throws
+    the relationship away, which is why the emitter used to fall back on
+    the input's own extent and quietly emit a whole frame.
+
+    On real arrays these are ordinary ramps of the declared size, so a
+    model using them stays runnable and stays its own oracle -- the same
+    bargain `coords` makes.
+    """
+    if isinstance(img, Channels):
+        img = img.word
+    rows, cols = int(rows), int(cols)
+    if rows < 1 or cols < 1:
+        raise ValueError(f"make_coords: an output raster of {rows}x{cols} "
+                         "has no pixels in it")
+    if not isinstance(img, Traced):
+        return (np.arange(rows, dtype=np.int64).reshape(rows, 1),
+                np.arange(cols, dtype=np.int64).reshape(1, cols))
+    if rows > int(img.shape[0]) or cols > int(img.shape[1]):
+        raise ValueError(
+            f"make_coords: an output raster of {rows}x{cols} is larger than "
+            f"the {img.shape[0]}x{img.shape[1]} input. Emitting more pixels "
+            "than arrive needs an output counter that advances on its own, "
+            "which this compiler does not have yet; a crop, which emits "
+            "fewer, does not.")
+    row = img._expr_derive(PExpr("orow", (), 0, rows - 1))
+    col = img._expr_derive(PExpr("ocol", (), 0, cols - 1))
+    row._out_extent = col._out_extent = (rows, cols)
+    return (row, col)
+
+
 def saturate(value, bits: int):
     """Saturate to what fits in ``bits`` unsigned: the range [0, 2**bits - 1].
 
@@ -822,7 +940,13 @@ def lower(traced: Traced):
     image, taps, post, shape = traced.image, traced.taps, traced.post, traced.shape
     if not taps:
         raise ValueError("empty expression")
-    if min(r for r, _ in taps) != 0 or min(c for _, c in taps) != 0:
+    # A STENCIL's offsets are relative and its smallest is normalised to
+    # zero -- an offset there would only shift the whole window, which the
+    # emitter's margin already expresses. A declared CROP is the opposite:
+    # its offset is the window's position in the frame and means something,
+    # so it is kept and the emitter gates to it.
+    if not traced.declared_extent and (min(r for r, _ in taps) != 0
+                                or min(c for _, c in taps) != 0):
         raise ValueError("v1 expects a stencil whose smallest offset is 0 "
                          "(write slices starting at 0, e.g. img[:-2], img[1:-1], img[2:])")
 
@@ -864,6 +988,9 @@ def lower(traced: Traced):
 
     for ln in s._lines:
         ln.shape = shape
+        # Carried, not re-derived: only the model knows whether this extent
+        # is a window it asked for or the margin a stencil leaves behind.
+        ln.declared_extent = traced.declared_extent
 
     # edge handling: padded spans map to replicate/zero borders (same-size out).
     pt, pb, pl, pr = traced.pad

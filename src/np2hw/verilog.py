@@ -1442,8 +1442,16 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     a("    output reg  out_last,")                        # end of frame (final pixel)
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")  # OUT_SGN/OUT_BITS fixed below
     a(");")
-    _check_output_extent(out_line.shape, image, M, N, "windowed op")
-    out_rows, out_cols = image.height - M, image.width - N
+    cropped = getattr(out_line, "declared_extent", False)
+    if cropped:
+        # The model stated this window: M/N are where it starts (a crop's
+        # offset rides in the tap coordinates) and the shape is how far it
+        # runs. Gate to it, and frame from the OUTPUT position, so sof and
+        # last mark the window's corners rather than the frame's.
+        out_rows, out_cols = out_line.shape
+    else:
+        _check_output_extent(out_line.shape, image, M, N, "windowed op")
+        out_rows, out_cols = image.height - M, image.width - N
     a(f"    reg [{POS-1}:0] col;")
     a(f"    reg [{POS-1}:0] row;")
     a("    wire stall = out_valid && !out_ready;")       # holding an unaccepted output
@@ -1482,10 +1490,18 @@ def generate(out_line, module_name="np2hw_top", framing="height",
 
     # size-dependent bounds use the WIDTH/HEIGHT parameters (resolution-agnostic);
     # only M/N (the kernel) are baked. valid region = [M,HEIGHT) x [N,WIDTH).
-    gate = f"(erow >= {M}) && (ecol >= {N}) && (erow < HEIGHT) && (ecol < WIDTH)"
-    sof = f"({gate}) && (erow == {M}) && (ecol == {N})"
-    eol = f"({gate}) && (ecol == WIDTH-1)"
-    last = f"({gate}) && (erow == HEIGHT-1) && (ecol == WIDTH-1)"
+    if cropped:
+        hi_r, hi_c = M + out_rows, N + out_cols
+        gate = (f"(erow >= {M}) && (ecol >= {N}) && "
+                f"(erow < {hi_r}) && (ecol < {hi_c})")
+        sof = f"({gate}) && (erow == {M}) && (ecol == {N})"
+        eol = f"({gate}) && (ecol == {hi_c - 1})"
+        last = f"({gate}) && (erow == {hi_r - 1}) && (ecol == {hi_c - 1})"
+    else:
+        gate = f"(erow >= {M}) && (ecol >= {N}) && (erow < HEIGHT) && (ecol < WIDTH)"
+        sof = f"({gate}) && (erow == {M}) && (ecol == {N})"
+        eol = f"({gate}) && (ecol == WIDTH-1)"
+        last = f"({gate}) && (erow == HEIGHT-1) && (ecol == WIDTH-1)"
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
     a("            col <= 0; row <= 0; out_valid <= 1'b0;")
