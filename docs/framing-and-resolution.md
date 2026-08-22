@@ -14,6 +14,10 @@ The core carries frame markers on its streaming interface:
 - **Outputs**: `out_sof`, `out_eol` (End Of Line), `out_last` (End Of Frame). These are
   **derived from the (effective) input position** and registered alongside `out_data`,
   so they re-anchor with SOF — there's no separate output counter to drift.
+  A declared crop (`make_coords`) keeps this: its framing is the input position
+  gated to a window. A block that changes RATE could not, which is the invariant
+  [`design/08`](../design/08-output-rasters.md) says has to give before an
+  upscaler exists.
 
 This means power-up mid-stream, or a master that frames with TUSER, both work: the core
 locks to the real frame. (See `examples/axi_video.py` — a multi-frame TUSER/HBLANK/VBLANK
