@@ -118,6 +118,14 @@ that silently reads the wrong pixel.
    for the pre-scale width would elaborate happily and be wrong. This is the
    class of error `StreamType` exists to prevent.
 
+   *Half done (2026-08-22).* The traced extents are now stated in a core's
+   interface beside `data_bits`, and revela threads them from the driver
+   the way it already threaded depth and channels. Nothing had to be
+   invented: `generate()` always returned `out_rows`/`out_cols`, they simply
+   did not sit where a composer reads a stream's facts. What remains is
+   `StreamType` itself, so `compose()` REFUSES a mismatch rather than
+   relying on the consumer to have asked.
+
 2. **One geometry per pipeline** is a stated rule downstream in revela
    (`blocks/pipe.py`, `docs/design-rules.md`): one width register read by
    everyone, because a width register per block makes a resolution change N

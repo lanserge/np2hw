@@ -1344,8 +1344,49 @@ def _check_output_extent(shape, image, M, N, what):
             "margin the taps actually need, or keep the whole frame.")
 
 
+def _stamp_stream_geometry(meta, out_line):
+    """Put the traced extents where a consumer reads a stream's facts.
+
+    The geometry was never missing -- a traced value knows its own extent,
+    and `out_rows`/`out_cols` have always been returned. What was missing
+    is that they did not sit beside `data_bits` in the interface, which is
+    where a composer looks. So a consumer had to assume the geometry it was
+    handed, and an assumption is right only while nothing changes geometry.
+
+    Stated here, once, from the metadata the emitters already produce --
+    rather than in each of them, which would be six copies of one fact.
+    """
+    interface = meta.get("interface") if isinstance(meta, dict) else None
+    if not interface:
+        return meta
+    image = getattr(out_line, "image", None)
+    if image is not None and interface.get("input") is not None:
+        interface["input"]["rows"] = int(image.height)
+        interface["input"]["cols"] = int(image.width)
+    out = interface.get("output")
+    if out is not None and meta.get("out_rows") is not None:
+        out["rows"] = int(meta["out_rows"])
+        out["cols"] = int(meta["out_cols"])
+    return meta
+
+
 def generate(out_line, module_name="np2hw_top", framing="height",
              max_width=None, clk_ns=None, label=None, dev=None) -> dict:
+    """Emit a core, with the traced geometry stated in its interface.
+
+    Thin: every decision belongs to the emitter this dispatches to. The one
+    thing added here is that the stream's extents are published where its
+    width already is, so a composer can thread geometry the way it already
+    threads depth and channels instead of assuming it.
+    """
+    return _stamp_stream_geometry(
+        _generate_core(out_line, module_name, framing, max_width, clk_ns,
+                       label, dev),
+        out_line)
+
+
+def _generate_core(out_line, module_name="np2hw_top", framing="height",
+                   max_width=None, clk_ns=None, label=None, dev=None) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
     framing='eof': height-agnostic -- an `in_eof` input (the sensor's frame-end /
     VSYNC, pulsed on the last input pixel) triggers the bottom flush, and output
