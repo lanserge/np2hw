@@ -123,6 +123,22 @@ Design rationale (the "why" behind each mechanism) lives in
 - **FuseSoC**: ships as a generator (`np2hw.core`, command `np2hw-fusesoc`) --
   a consuming core names a model file and geometry, and the Verilog core is
   traced during that project's own build, byte-identical on every run.
+- **Stream plumbing** for the boundaries a traced core sits between: `skid`
+  (a registered boundary, so one core's combinational depth stops being the
+  next one's), `tee` (one stream, two consumers, never stalling -- a consumer
+  that falls behind tears its own branch and says so), `cdc_fifo` (the one
+  crossing every design here contains: a recovered clock meeting the board's,
+  owned so its discipline is checked rather than trusted), and
+  `boundary_report` / `combinational_outputs`, which say where a composition
+  still hands its depth onward.
+- **A video path either side of the datapath**: `video_in` decodes a link and
+  aligns sample depth on the way in; `scanout` turns a pixel stream into a
+  timed raster, with placement as a live register taken in vertical blanking;
+  `framebuffer_read` reads a frame that cannot be out of phase, and says why
+  it is idle rather than sitting silent.
+- **The display cable as a control plane**: `ddc_slave`, an I2C slave on the
+  DDC pins, so parameters reach a design over the video cable already attached
+  to it.
 
 ## Status
 
