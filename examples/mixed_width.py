@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Known limitation: mixing a NARROWER sub-expression that would clip with a
 WIDER one cannot be flattened faithfully, so the front-end refuses it with a
 clear error (rather than silently producing a wrong result). The fix is the

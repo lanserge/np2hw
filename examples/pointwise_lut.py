@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Pointwise expression DAGs: fork, gather, recombine -- the LUT case.
 
 The trailing-op chain says "one value, a line of ops". A lookup table cannot

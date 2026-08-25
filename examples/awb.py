@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Auto white balance (gray-world) -- the v1 demo.
 
 Host (NumPy) computes per-channel gains from the gray-world assumption and

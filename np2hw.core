@@ -1,5 +1,11 @@
 CAPI=2:
-name: lanserge:np2hw:gen:0.1.0
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
+# The VLNV carries no package version. It restated one, and by the
+# time anyone looked it said 0.1.0 against a package that had
+# reached 0.5.0 -- a second copy of a number pyproject.toml owns.
+# Everything this project GENERATES already names itself :0.
+name: lanserge:np2hw:gen:0
 description: >
   np2hw as a FuseSoC generator: trace a NumPy model file into synthesisable
   Verilog at build time. The model file follows the CLI convention -- it

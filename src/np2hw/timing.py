@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Timing as a TRACED property: stage depth from the expression DAG.
 
 Every pointwise datapath np2hw emits is a PExpr DAG whose nodes carry

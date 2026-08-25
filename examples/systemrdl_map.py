@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """A hierarchical register map, rendered as SystemRDL and elaborated back.
 
 The flat `Reg` list is what a register-file emitter needs; it is not what a

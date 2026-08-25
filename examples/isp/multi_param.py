@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Many-register ISP via a Params namespace -- the scalable form for real
 pipelines. The model takes ONE params arg `p` and reads registers BY NAME
 (order-independent), instead of a long positional signature.

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """A register file at addresses the CALLER allocated, not at i*4.
 
 `axil_regfile(params, ...)` used to pack every register at word offset i*4. That

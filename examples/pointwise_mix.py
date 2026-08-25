@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Registers as expression leaves -- the channel-mix (matrix multiply) case.
 
 The LUT example reaches registers through a GATHER: a data-derived index

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Live viewer for np2hw: capture frames -> run an ISP model -> show input|output.
 
 Capture sources (chosen by the CLI, all yield 8-bit grayscale HxW ndarrays):

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Structural composition: instantiate generated cores, and nest the result.
 
 `generate()` turns one NumPy function into one module. `compose()` turns several

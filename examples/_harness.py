@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Shared test harness: compile a NumPy fn via the line IR, simulate, compare
 to the SAME fn run on real uint8 data."""
 import os

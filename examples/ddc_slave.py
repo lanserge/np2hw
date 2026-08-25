@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The DDC slave: a register file reachable over the display cable.
 
 The HDMI link already carries an I2C bus (DDC, the EDID wires). A

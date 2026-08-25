@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """bayerlink receiver: parallel video in, one sample per clock out.
 
 The bayerlink protocol (github.com/bayerlink/bayerlink) carries packed raw

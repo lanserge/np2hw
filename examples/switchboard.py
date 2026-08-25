@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Switchboard integration: the generic ready/valid core, and the SB adapter.
 
 Two checks per filter:

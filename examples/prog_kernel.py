@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Programmable 3x3 kernel: the coefficients are REGISTERS, not constants.
 
 Param("k", shape=(3,3)) is a collection of 9 scalar Params (k[i,j] -> k_i_j).

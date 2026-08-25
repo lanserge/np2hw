@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """np2hw NumPy front-end: trace NumPy-style code into the line IR (ir.py).
 
 One representation: slicing/arithmetic/astype are flattened into a weighted tap

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """`saturate(x, bits)`: bound a value to what fits in a width, not to a
 number that happens to correspond to one.
 

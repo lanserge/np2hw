@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Where a pixel is, and what a table says about it.
 
 Two capabilities that sound unrelated and arrive together, because an

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The tee: one stream, two DISPOSABLE consumers, and it never stalls.
 
 A fork that advances its branches in lockstep is correct only for

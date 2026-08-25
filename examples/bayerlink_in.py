@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The bayerlink v2 receiver, proven against the protocol's own reference.
 
 bayerlink (github.com/bayerlink/bayerlink) carries packed raw Bayer over a

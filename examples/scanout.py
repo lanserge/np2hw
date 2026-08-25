@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """scanout: a pixel stream becomes a timed raster, and stays put.
 
 The transmit mirror of the bayerlink receiver, and the claims are the

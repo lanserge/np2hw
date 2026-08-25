@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Step 1 test: build the line-based IR and read off the delay-line count.
 
 Run:  python examples/ir_blur.py

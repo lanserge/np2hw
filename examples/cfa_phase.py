@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Phase-sliced models: `out[py::2, px::2] = ...` with REGISTER-valued phase.
 
 The CFA case. A Bayer sensor interleaves four colour planes, and an operation

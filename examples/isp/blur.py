@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """3x3 box blur, replicate edges (same size)."""
 import numpy as np
 

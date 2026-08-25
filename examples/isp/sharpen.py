@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Unsharp mask: 2*center - 3x3 blur, saturated, replicate edges (same size).
 Kept as one spatial sum (divide at the end) so it stays a single cone."""
 import numpy as np

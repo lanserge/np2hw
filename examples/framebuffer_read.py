@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The framebuffer read engine, against a memory that answers awkwardly.
 
 A vendor DMA fetches a frame back for the raster and, in doing so, makes

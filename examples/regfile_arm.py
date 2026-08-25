@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Coefficients read from another clock, safely, without a second bank.
 
 A control interface on a clock that can STOP is a hang: AXI has no

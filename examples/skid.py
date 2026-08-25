@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The elastic register slice, and why the obvious version is wrong.
 
 A core's timing claim is made about its own registers, and it holds only

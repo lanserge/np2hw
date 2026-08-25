@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The FuseSoC generator protocol, end to end, without FuseSoC installed.
 
 A build system integration is a contract, and a contract untested is a

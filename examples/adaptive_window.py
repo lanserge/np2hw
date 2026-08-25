@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Window EXPRESSIONS: abs, comparisons, per-pixel select, lane taps.
 
 The adaptive-filter vocabulary, in the two shapes a two-stage CFA

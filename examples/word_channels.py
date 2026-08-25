@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Channels the NumPy way, in BOTH directions: pixel[..., c] in, np.stack out.
 
 The colour-matrix case. A multi-channel stream carries one data word per

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """np2hw IR — line-based streaming intermediate representation.
 
 This is the layer that makes the hardware structure explicit (per idea.txt):

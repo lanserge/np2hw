@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Edge handling: same-height output by replicating first/last line (np.pad).
 
 A vertical [1,2,1] filter normally shrinks height by 2. Padding the rows with

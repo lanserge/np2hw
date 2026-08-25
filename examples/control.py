@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Control plane: program the config registers (Param) over a memory-mapped bus,
 then stream a frame. Two bus variants:
   AXI4-Lite -- pairs with the AXI4-Stream Video data path (real silicon / standard)

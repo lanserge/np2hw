@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """[1,1] applied twice == [1,2,1].  Filter composition (slicing a result) in the
 NumPy front-end, validated against the same function and against the direct kernel.
 Run:  python examples/compose_11.py   (needs iverilog)

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Timing as a traced property, proven against the bench's own facts.
 
 The estimator walks the same PExpr DAGs the emitter turns into

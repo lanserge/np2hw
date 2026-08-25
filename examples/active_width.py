@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """active_width driven from the control register file (control_top).
 
 A dynamic-resolution core (framing="eof", max_width=N) exposes an `active_width`

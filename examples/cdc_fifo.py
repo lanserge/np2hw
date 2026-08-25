@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The dual-clock FIFO, against clocks that owe each other nothing.
 
 Every design this generator feeds has one crossing in it: the

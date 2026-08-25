@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Step 3+coeffs: generate Verilog for weighted filters, simulate, check vs NumPy.
 
 Covers: unit-coefficient averaging blur, Const-weighted Gaussian (/16), and a

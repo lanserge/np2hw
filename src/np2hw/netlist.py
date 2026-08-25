@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The netlist as a validated structure, before anything is emitted.
 
 compose() wires instances and resolves the handshake at EMISSION time. This

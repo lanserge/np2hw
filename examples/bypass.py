@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Boolean block-enable via np.where(enable, A, B): a per-pixel 2:1 mux driven
 by a 1-bit register. Both branches share one window, so they are latency-aligned
 (a tap is delay-matched within the window) -- the bypass needs no separate delay

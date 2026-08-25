@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Structural composition: instantiate generated cores and wire them as a netlist.
 
 The rest of np2hw turns one NumPy function into one module. This turns several

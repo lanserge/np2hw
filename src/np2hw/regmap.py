@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Hierarchical register maps: block types, instances, and their renderings.
 
 The flat form -- a list of :class:`Reg` at absolute offsets -- is what a register

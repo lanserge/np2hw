@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """np2hw — NumPy → streaming hardware (Verilog) compiler for image and 2-D pipelines.
 
 Public API for writing model files and driving the compiler:

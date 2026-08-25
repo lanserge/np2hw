@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """np2hw command-line runner: apply an ISP model to an image or video, file to
 file.
 

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Non-8-bit pixels: 12-bit raw sensor data (0..4095) -- the common ISP case.
 
 The compiler is parametric in pixel width (Image2D bits=N); this exercises it

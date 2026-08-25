@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """FuseSoC integration: the generator protocol, and the .core writer.
 
 FuseSoC's *generators* mechanism is built for exactly what np2hw is: a

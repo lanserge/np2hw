@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """A 2x2 box applied twice == 3x3 Gaussian, normalised by //16.
 Run:  python examples/compose_box.py   (needs iverilog)
 """

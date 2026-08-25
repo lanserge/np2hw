@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """What each core costs the core next to it.
 
 A timing claim is made about a module's own registers, so it is true in

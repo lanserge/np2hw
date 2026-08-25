@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Height-agnostic framing: generate(..., framing="eof").
 
 A reprogrammable sensor changes resolution at runtime. The EOF-framed core does

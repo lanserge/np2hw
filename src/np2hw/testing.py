@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Verification models for np2hw's own contracts.
 
 np2hw defines the streaming handshake -- `valid/ready/data` with `sof/eol/last`

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Faithful dtype tracking: uint8 wraps; astype(uint16) widens to avoid it.
 Both validated against the SAME function on real uint8 data (no int64 cast).
 Run:  python examples/dtype_faithful.py   (needs iverilog)

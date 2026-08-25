@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Auto-split: the traced timing budget places the pipeline registers.
 
 timing_budget.py proves the estimator's arithmetic; this example proves

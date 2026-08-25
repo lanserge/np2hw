@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """A crop states the map from output position to input position, and the
 core is built from that map.
 

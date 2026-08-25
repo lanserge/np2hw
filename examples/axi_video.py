@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """AXI4-Stream Video conformance: the generated IP is driven by a realistic
 video stream -- TUSER (Start Of Frame) on each frame's first pixel, HBLANK gaps
 between rows, VBLANK between frames, TREADY honored. The slave consumes TUSER to

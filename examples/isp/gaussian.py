@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """3x3 Gaussian blur, replicate edges (same size). A complete np2hw model file:
 run with `np2hw run examples/isp/gaussian.py in.png out.png`."""
 import numpy as np

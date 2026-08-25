@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Per-pixel gain (Q4.4 register) + saturate -- the AWB stage.
 Run: np2hw run examples/isp/gain.py in.png out.png --param gain=24"""
 import numpy as np

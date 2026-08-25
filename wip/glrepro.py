@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Prove scanout's v7 genlock: the clock is steered, the raster is still.
 
 Two REAL clocks: the raster's (74.25-class, 13.468 ns) and the

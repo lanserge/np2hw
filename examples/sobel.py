@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Signed arithmetic: Sobel-X gradient with negative coefficients, validated
 against the SAME NumPy function in int16 (results go negative).
 

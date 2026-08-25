@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """NumPy -> tree -> Verilog, validated against the SAME NumPy function (real uint8).
 Run:  python examples/numpy_to_ir.py   (needs iverilog)
 """

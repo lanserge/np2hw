@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Phase-selected STENCILS: `out[py::2, px::2] = taps[py::2, px::2]`.
 
 The CFA interpolation case. cfa_phase.py showed per-plane COEFFICIENTS

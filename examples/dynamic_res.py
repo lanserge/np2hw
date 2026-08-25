@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """Full runtime-variable resolution: generate(..., framing="eof", max_width=N).
 
 For a reprogrammable sensor that changes resolution live, ONE synthesized core

@@ -1,3 +1,5 @@
+# Copyright 2026 Serge Rabyking
+# SPDX-License-Identifier: MIT
 """The netlist checks: every rule a streaming design can die by, refused early.
 
 np2hw's handshake implies laws about the GRAPH -- who may drive whom, when an
