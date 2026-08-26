@@ -3614,6 +3614,21 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         a(f"    wire {'signed ' if r.signed else ''}[{r.bits-1}:0] param_{r.name};"
           f"   // @ 0x{r.offset:04x}")
     a("")
+    if arm:
+        # The arm handshake runs BETWEEN the register file and the datapath,
+        # so it is neither a port of this wrapper nor bound by a caller --
+        # which is why it was dropped from `declared` above. Dropping it
+        # there and declaring it nowhere left both signals implicit: legal
+        # Verilog, one bit wide by default, and correct here only because
+        # they happen to be one bit. Verilator refuses them, and it is
+        # right to -- the same omission on a multi-bit signal is silent
+        # truncation.
+        a("    // The arm handshake, internal to this wrapper: the register")
+        a("    // file raises `req` and the datapath answers `ack` when it has")
+        a("    // taken the batch.")
+        a(f"    wire {arm[1]};")
+        a(f"    wire {arm[2]};")
+        a("")
     if frame_sync:
         a("    // Shadow -> live at the frame boundary: software may write a register")
         a("    // at any time, and the frame that follows sees ALL of the writes or")

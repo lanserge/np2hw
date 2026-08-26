@@ -7,6 +7,22 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
+## 0.5.1
+
+### Fixed
+
+- **`control_wrap` declares the arm handshake it wires.** The `arm_req` /
+  `arm_ack` pair runs between the register file and the datapath, so it is
+  neither a port of the wrapper nor bound by a caller — and having been
+  dropped from the port list it was then declared nowhere, leaving both
+  signals implicit.
+
+  Legal Verilog, one bit wide by default, and correct here only because
+  they happen to be one bit. Verilator refuses them and is right to: the
+  same omission on a multi-bit signal is silent truncation rather than a
+  warning. Synthesis accepted it, which is why a board build never
+  complained.
+
 ## 0.5.0
 
 ### Added to the public API
