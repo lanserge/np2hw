@@ -17,6 +17,14 @@ jobs:
   examples:
     name: Example suite (iverilog)
     runs-on: ubuntu-latest
+    # Every version the packaging metadata CLAIMS. It claimed five and
+    # tested one, which is a classifier list rather than evidence -- and
+    # the versions most likely to break are the oldest and the newest,
+    # neither of which was the one being run.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +32,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install iverilog
         run: sudo apt-get update && sudo apt-get install -y iverilog
