@@ -7,6 +7,38 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
+## Unreleased
+
+### Added
+
+- **The memory seam.** Every line buffer a registered-read stencil emits
+  (the edge and CFA-phase emitters) now lives in its own module,
+  `<module>_linebuf` — one write port, one read port, both synchronous,
+  read-before-write on collision, no reset — instantiated once per
+  buffer. On an FPGA it infers block RAM exactly as the inline array did;
+  on silicon it is the module an integrator binds a memory macro to, by
+  name. The contract is on the module and in `docs/memories.md`.
+  Behaviour is bit-identical: the array moved, its enables did not.
+- **`generate(..., sync_memory=True)`** refuses a core whose line
+  buffers read combinationally — the general window and the mux — by
+  module name, with the count and the fix. No SRAM macro implements a
+  combinational read; without the flag those emitters are unchanged,
+  because on an FPGA distributed RAM is the right answer for them.
+- **`core["memories"]`** — every generated core publishes the memories it
+  inferred: instance, seam module (or `None`), width, depth, and whether
+  the read is `sync` or `async`.
+
+### Changed
+
+- **Every AXI4-Lite slave port declares its bundle.** `axil_regfile`,
+  `control_top` and `control_wrap` carry `X_INTERFACE_INFO` on every
+  bus port, clocks name the bus they drive and its reset, and resets
+  state their polarity — as `ddc_slave` and `framebuffer_read` already
+  did for their masters. Verilog attributes only; simulation and
+  synthesis ignore them, and an IP packager reads exactly these.
+- The two-stage phase stencil's registered write address is
+  `POS` bits wide, not 32. Same values, sized by construction.
+
 ## 0.5.1
 
 ### Fixed

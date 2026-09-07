@@ -116,7 +116,9 @@ def main():
     # buffers (one window, shared), three positional muxes (one per
     # channel), and the select follows the OUTPUT pixel's position through
     # the edge flushes, XORed with the phase registers.
-    buffers = core.verilog.count("] mem")
+    # one seam module per emitter, instantiated once per line buffer --
+    # so count the instances, which is what a line buffer is now
+    buffers = core.verilog.count(" u_linebuf")
     muxes = core.verilog.count("case ({sel_row, sel_col})")
     positional = "wire sel_row = o_row[0] ^ param_py" in core.verilog
     print(f"  {core['phases']} planes x {core['channels']} channels -> "

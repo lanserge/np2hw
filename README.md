@@ -82,6 +82,7 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/supported-ops.md](docs/supported-ops.md) | Exact list of traced operators/methods/`np.*` functions (and what isn't yet) |
 | [docs/parameters.md](docs/parameters.md) | Config registers: `Param`, `Params` namespace, defaults, matrix kernels, bool/bypass, live control |
 | [docs/streaming-and-bitwidths.md](docs/streaming-and-bitwidths.md) | Streaming model, line buffers, edge handling, dtype/bitwidth semantics |
+| [docs/memories.md](docs/memories.md) | The memory seam: line buffers as a bindable module, the macro contract, `sync_memory` |
 | [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOF framing, continuous frames, parametric & dynamic resolution |
 | [docs/interfaces.md](docs/interfaces.md) | AXI4-Stream Video, Switchboard, AXI-Lite/UMI register files, `control_top` |
 | [docs/backends.md](docs/backends.md) | numpy / iverilog / cxxrtl / switchboard (verilator, icarus) |

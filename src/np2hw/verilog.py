@@ -1378,22 +1378,32 @@ def _stamp_stream_geometry(meta, out_line):
 
 
 def generate(out_line, module_name="np2hw_top", framing="height",
-             max_width=None, clk_ns=None, label=None, dev=None) -> dict:
+             max_width=None, clk_ns=None, label=None, dev=None,
+             sync_memory=False) -> dict:
     """Emit a core, with the traced geometry stated in its interface.
 
     Thin: every decision belongs to the emitter this dispatches to. The one
     thing added here is that the stream's extents are published where its
     width already is, so a composer can thread geometry the way it already
     threads depth and channels instead of assuming it.
+
+    sync_memory=True demands that every memory this core infers reads
+    through a register -- the only kind a memory macro can implement. The
+    stencil emitters that pad or write CFA phases already do; the general
+    window and the mux read their line buffers combinationally, which is
+    distributed RAM on an FPGA and flip-flops on silicon, and under this
+    flag they refuse rather than emit it. Every core publishes what it
+    inferred as `memories`, whichever way the flag is set.
     """
     return _stamp_stream_geometry(
         _generate_core(out_line, module_name, framing, max_width, clk_ns,
-                       label, dev),
+                       label, dev, sync_memory=sync_memory),
         out_line)
 
 
 def _generate_core(out_line, module_name="np2hw_top", framing="height",
-                   max_width=None, clk_ns=None, label=None, dev=None) -> dict:
+                   max_width=None, clk_ns=None, label=None, dev=None,
+                   sync_memory=False) -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
     framing='eof': height-agnostic -- an `in_eof` input (the sensor's frame-end /
     VSYNC, pulsed on the last input pixel) triggers the bottom flush, and output
@@ -1422,7 +1432,7 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
         if n_stages > 1:
             plan = (stage_of, n_stages, dev_used)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
-        return _generate_mux(out_line, module_name)
+        return _generate_mux(out_line, module_name, sync_memory=sync_memory)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
         return _generate_expr(out_line, module_name, plan=plan)
     if type(out_line).__name__ == "ChannelStack":        # np.stack([...], axis=-1)
@@ -1449,6 +1459,10 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
                                   "(bottom flush); use an edge-padded model")
     spatial_line, post = peel_pointwise(out_line)
     weighted = flatten_weighted(spatial_line)
+    # This path reads its line buffers combinationally (see the comment at
+    # the declaration). Refuse that HERE, before a line of it is emitted.
+    if sync_memory and any(r for r, _ in weighted):
+        _refuse_async_memory(module_name, max(r for r, _ in weighted))
 
     in_bits = image.bits
     if image.signed:
@@ -1590,6 +1604,7 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
         "post": post,
         "params": [(n, b) for n, b, _, _, _ in params],
         "param_defaults": {n: d for n, _, _, d, _ in params},
+        "memories": _memories(module_name, in_bits, M, "WIDTH", "async"),
         "M": M,
         "N": N,
         "out_rows": out_rows, "out_cols": out_cols,
@@ -1617,7 +1632,7 @@ def _extend(name, frm, to, signed):
     return f"{{{pad}'b0, {name}}}"
 
 
-def _generate_mux(mux, module_name) -> dict:
+def _generate_mux(mux, module_name, sync_memory=False) -> dict:
     image = mux.image
     A, B = mux.a, mux.b
     in_bits = image.bits
@@ -1634,6 +1649,8 @@ def _generate_mux(mux, module_name) -> dict:
     tapsB = _shift_taps(B.taps, minr, minc)
     M = max(r for r, _ in tapsA | tapsB)
     N = max(c for _, c in tapsA | tapsB)
+    if sync_memory and M:                # combinational line-buffer read
+        _refuse_async_memory(module_name, M)
     rows_used = sorted({r for r, _ in tapsA} | {r for r, _ in tapsB})
 
     # signed datapath if either branch's value range or any coeff is signed
@@ -1743,6 +1760,7 @@ def _generate_mux(mux, module_name) -> dict:
                .replace("OUT_SGN", "signed " if signed else ""))
     return {
         "verilog": verilog, "in_bits": in_bits, "out_bits": out_bits,
+        "memories": _memories(module_name, in_bits, M, "WIDTH", "async"),
         "signed": signed, "params": [(n, b) for n, b, _, _, _ in params],
         "param_defaults": {n: d for n, _, _, d, _ in params},
         "M": M, "N": N, "out_rows": out_rows, "out_cols": out_cols,
@@ -1780,6 +1798,104 @@ def _post_range(lo, hi, post):
         elif op[0] == "trunc" and op[1] < max(hi.bit_length(), 1):
             lo, hi = 0, (1 << op[1]) - 1     # a narrowing trunc re-ranges
     return lo, hi
+
+
+def _linebuf_module(module_name, bits, depth_default) -> list[str]:
+    """The line-buffer memory as its own module: THE MEMORY SEAM.
+
+    Every line buffer a stencil needs is one instance of this, and this is
+    the module an integrator targeting silicon replaces. Inferred as it
+    stands it is block RAM on any FPGA; on an ASIC `reg [W-1:0] mem
+    [0:D-1]` synthesises to D*W flip-flops, and one 1920-wide 12-bit line
+    is 23,040 of them. So the array lives behind a module boundary that a
+    foundry memory can be bound to BY NAME, and the contract the binding
+    has to honour is written on the module, where the person doing the
+    binding will read it.
+    """
+    name = f"{module_name}_linebuf"
+    return [
+        f"// generated by np2hw -- line buffer for {module_name}: one write",
+        "// port, one read port, both synchronous. THE MEMORY SEAM: bind a",
+        "// memory macro here, by module name, and honour four things.",
+        "//   1. write: wd lands at mem[wa] on the clk edge where we is high.",
+        "//   2. read: rd <= mem[ra] on the clk edge where re is high -- one",
+        "//      cycle of latency -- and rd HOLDS while re is low.",
+        "//   3. collision: we and re in one cycle at one address read the",
+        "//      OLD word (read-before-write). Not a corner case: a line",
+        "//      delay writes column c while reading last line's column c,",
+        "//      every beat of every line.",
+        "//   4. no reset: rd is data, not state. Nothing here clears it.",
+        "// A macro whose output does not hold under re=0, or whose",
+        "// collision is not read-old, wants W flops of hold or a bypass in",
+        "// its wrapper: cheap, the integrator's, and outside this module.",
+        f"module {name} #(",
+        f"    parameter W  = {bits},",
+        f"    parameter D  = {depth_default},",
+        f"    parameter AW = {POS}",
+        ") (",
+        "    input  wire          clk,",
+        "    input  wire          we,",
+        "    input  wire [AW-1:0] wa,",
+        "    input  wire [W-1:0]  wd,",
+        "    input  wire          re,",
+        "    input  wire [AW-1:0] ra,",
+        "    output reg  [W-1:0]  rd",
+        ");",
+        "    reg [W-1:0] mem [0:D-1];",
+        "    always @(posedge clk) begin",
+        "        if (we) mem[wa] <= wd;",
+        "        if (re) rd <= mem[ra];",
+        "    end",
+        "endmodule",
+    ]
+
+
+def _linebuf_instances(a, module_name, bits, M, depth, we, wa, wd_of, re):
+    """Instantiate the seam M times, at the end of the module body where
+    every signal it touches is already declared -- an instantiation that
+    names a net before its declaration makes an implicit one-bit wire,
+    which is legal, wrong, and silent.
+
+    `we`, `wa` and `re` are the EXACT conditions the inline array was
+    written and read under, so the array moving behind a module changes
+    nothing a simulation can see. `wd_of(k)` is buffer k's write data.
+    """
+    if not M:
+        return
+    a("    // ---- line buffers: the memory seam (the *_linebuf module) ----")
+    a(f"    wire lb_we = {we};")
+    a(f"    wire [{POS-1}:0] lb_wa = {wa};")
+    a(f"    wire lb_re = {re};")
+    for k in range(1, M + 1):
+        a(f"    wire [{bits-1}:0] lb_wd{k} = {wd_of(k)};")
+        a(f"    {module_name}_linebuf #(.W({bits}), .D({depth}), .AW({POS}))"
+          f" u_linebuf{k} (")
+        a(f"        .clk(clk), .we(lb_we), .wa(lb_wa), .wd(lb_wd{k}),")
+        a(f"        .re(lb_re), .ra(rd_col), .rd(chain{k}_q));")
+
+
+def _memories(module_name, bits, M, depth, read) -> list[dict]:
+    """What memories this module infers, published so an integrator reads
+    the fact instead of grepping for it. `read` is "sync" (behind the
+    seam, bindable to a macro) or "async" (a combinational read of the
+    array: distributed RAM on an FPGA, flip-flops on silicon)."""
+    seam = f"{module_name}_linebuf" if read == "sync" else None
+    return [{"instance": f"u_linebuf{k}" if seam else f"mem{k}",
+             "module": seam, "bits": bits, "depth": depth, "read": read}
+            for k in range(1, M + 1)]
+
+
+def _refuse_async_memory(module_name, M):
+    raise ValueError(
+        f"{module_name}: {M} line buffer{'s' if M > 1 else ''} here read "
+        "ASYNCHRONOUSLY -- a combinational read of a memory array. On an "
+        "FPGA that is distributed RAM; no SRAM macro implements it, so on "
+        "silicon it becomes one flip-flop per bit behind a select tree. "
+        "sync_memory=True refuses to emit that rather than let it through. "
+        "A model that pads (np.pad(..., mode='edge' or 'constant')), or "
+        "one that writes CFA phases, reads its line buffers through a "
+        "register and is accepted; or generate with sync_memory=False for "
+        "an FPGA, where the asynchronous read is what you want.")
 
 
 def _generate_phase_stencil(stack, module_name, clk_ns=None,
@@ -2017,9 +2133,11 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a(f"                       : (!hf ? ((col == WIDTH-1) ? {end_of_line}"
           f" : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1, 0)}) ? 0 : col));")
+    # The arrays themselves live behind the memory seam, instantiated at
+    # the end of the module (see _linebuf_instances); these are its
+    # registered read ports.
     for k in range(1, M + 1):
-        a(f"    reg  [{in_bits-1}:0] mem{k} [0:WIDTH-1];")
-        a(f"    reg  [{in_bits-1}:0] chain{k}_q;")
+        a(f"    wire [{in_bits-1}:0] chain{k}_q;")
     if v_edge and M >= 1:
         # the vertical flush replays row 1, which is the same address the
         # window is already reading -- one memory port, not two
@@ -2108,7 +2226,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a("    // schedule: a column's next read is a full line away, and")
         a("    // a frame boundary's pending write lands on a cell row 0")
         a("    // rewrites before its first read.")
-        a("    reg [31:0] wr_col;")
+        a(f"    reg [{POS-1}:0] wr_col;")
         a("    reg wr_en;")
         for k in range(1, M + 1):
             a(f"    reg [{in_bits-1}:0] wr_d{k};")
@@ -2366,23 +2484,16 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a(f"            out_valid <= q_v{sfx}; out_sof <= q_sof{sfx};")
         a(f"            out_eol <= q_eol{sfx}; out_last <= q_last{sfx};")
         a(f"            out_data <= {result};")
-        a("            if (wr_en) begin")
-        for k in range(1, M + 1):
-            a(f"                mem{k}[wr_col] <= wr_d{k};")
-        a("            end")
+        # the registered line-buffer write (wr_en/wr_col/wr_d*) lands in
+        # the seam instances below, under exactly this block's condition
     a("            if (en) begin")
     if stages == 1:
         a(f"                out_valid <= {okv};")
         a(f"                out_sof <= {sof}; out_eol <= {eol}; "
           f"out_last <= {last};")
         a(f"                out_data <= {result};")
-    for k in range(1, M + 1):
-        a(f"                chain{k}_q <= mem{k}[rd_col];")
-    if stages == 1:
-        for k in range(1, M + 1):
-            src = "chain0" if k == 1 else f"chain{k-1}_q"
-            a(f"                if (!hf || in_sof) mem{k}[ecol] <= "
-              f"vbc ? chain0 : {src};")
+    # line-buffer reads (and the one-stage write) are the seam's, below,
+    # under this same `en`
     for r in rows_used:
         for d in range(N, 0, -1):
             src = f"cur{r}" if d == 1 else f"row{r}_d{d-1}"
@@ -2414,7 +2525,24 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     a("            end")
     a("        end")
     a("    end")
+    # The seam. Enables restate the nesting the inline array sat under:
+    # the always block's `else` of rst, then `if (!stall)`, then -- for the
+    # read and the one-stage write -- `if (en)`, which itself carries
+    # !stall. The two-stage write fires on its own captured wr_en.
+    if stages == 2:
+        _linebuf_instances(a, module_name, in_bits, M, "WIDTH",
+                           we="!rst && !stall && wr_en", wa="wr_col",
+                           wd_of=lambda k: f"wr_d{k}", re="!rst && en")
+    else:
+        _linebuf_instances(a, module_name, in_bits, M, "WIDTH",
+                           we="!rst && en && (!hf || in_sof)", wa="ecol",
+                           wd_of=lambda k: "vbc ? chain0 : "
+                           + ("chain0" if k == 1 else f"chain{k-1}_q"),
+                           re="!rst && en")
     a("endmodule")
+    if M:
+        L.append("")
+        L.extend(_linebuf_module(module_name, in_bits, realW))
 
     verilog = ("\n".join(L)
                .replace("OUT_BITS-1", f"{out_bits-1}")
@@ -2433,6 +2561,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         "signed": out_signed,
         "params": [(n, b) for n, b, _, _, _ in params],
         "param_defaults": {n: d for n, _, _, d, _ in params},
+        "memories": _memories(module_name, in_bits, M, "WIDTH", "sync"),
         "M": M, "N": N,
         "phases": len(flat) // max(1, len(channels)),
         "channels": len(channels),
@@ -2555,9 +2684,10 @@ def _generate_edge(out_line, image, module_name, framing="height",
         a(f"    wire [{POS-1}:0] rd_col = in_sof ? {POS}\'d1")
         a(f"                       : (!hf ? ((col == {aw}-1) ? {eol} : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1,0)}) ? 0 : col));")
+    # the arrays live behind the memory seam, instantiated at the end of
+    # the module (_linebuf_instances); these are its registered read ports
     for k in range(1, M + 1):
-        a(f"    reg  [{in_bits-1}:0] mem{k} [0:{wparam}-1];")
-        a(f"    reg  [{in_bits-1}:0] chain{k}_q;")       # mem{k} at the current column
+        a(f"    wire [{in_bits-1}:0] chain{k}_q;")       # mem{k} at the current column
     if v_edge and M >= 1:                                # bottom flush recirculates
         flush_src = "chain1_q" if rep else "0"           # the same registered read
         a(f"    wire [{in_bits-1}:0] chain0 = (vf && !in_sof) ? {flush_src} : in_data;")
@@ -2642,11 +2772,9 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a(f"                out_data <= {result};")
     if eof:                                              # latch the frame-end mark
         a("                if (in_active && in_valid && in_eof) eof_l <= 1'b1;")
-    # line-buffer write at real columns (or a SOF pixel), never during hflush
-    for k in range(1, M + 1):
-        src = "chain0" if k == 1 else f"chain{k-1}_q"
-        a(f"                if (!hf || in_sof) mem{k}[ecol] <= vbc ? chain0 : {src};")
-        a(f"                chain{k}_q <= mem{k}[rd_col];")
+    # line-buffer write at real columns (or a SOF pixel), never during
+    # hflush, and the registered read: both are the seam's, below, under
+    # this same `en`
     # horizontal shift: broadcast col0, else shift cur into the register chain
     for r in rows_used:
         for d in range(N, 0, -1):
@@ -2679,7 +2807,18 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a("            end")                                  # close if (!stall)
     a("        end")
     a("    end")
+    # The seam. The inline array was written and read inside `if (en)`,
+    # inside `if (!stall)`, inside the `else` of rst; `en` carries !stall.
+    _linebuf_instances(a, module_name, in_bits, M, wparam,
+                       we="!rst && en && (!hf || in_sof)", wa="ecol",
+                       wd_of=lambda k: "vbc ? chain0 : "
+                       + ("chain0" if k == 1 else f"chain{k-1}_q"),
+                       re="!rst && en")
     a("endmodule")
+    if M:
+        L.append("")
+        L.extend(_linebuf_module(module_name, in_bits,
+                                 max_width if dyn else realW))
 
     verilog = ("\n".join(L)
                .replace("OUT_BITS-1", f"{out_bits-1}")
@@ -2694,6 +2833,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
         "post": post,
         "params": [(n, b) for n, b, _, _, _ in params],
         "param_defaults": {n: d for n, _, _, d, _ in params},
+        "memories": _memories(module_name, in_bits, M, wparam, "sync"),
         "M": M, "N": N,
         "out_rows": out_rows, "out_cols": out_cols,
         "module": module_name,

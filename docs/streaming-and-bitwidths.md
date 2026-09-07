@@ -8,7 +8,9 @@ needs context around the current pixel, which the generated RTL provides with:
 - **Horizontal extent** (columns within a row) → a **shift register** of depth
   `max-col - min-col`.
 - **Vertical extent** (rows of context) → **line buffers**; a `V`-row window needs
-  `V-1` line buffers, each `WIDTH` deep (one full row).
+  `V-1` line buffers, each `WIDTH` deep (one full row). Where those arrays
+  land — block RAM, distributed RAM, or on silicon a macro bound to the
+  emitted `*_linebuf` module — is [memories.md](memories.md).
 
 The compiler derives these from the traced tap map and counts the delay lines
 automatically; shared sub-expressions are hash-consed so two ops over the same window

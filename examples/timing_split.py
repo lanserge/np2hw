@@ -339,8 +339,10 @@ def main():
     # same stencil closed at 1280 and missed at 1920. Assert the shape,
     # because simulation cannot see which primitive the tools pick.
     src = generate(outs, module_name="dm_shape")["verilog"]
-    registered = ("chain1_q <= mem1[rd_col]" in src
-                  and "mem1[ecol]" not in src.split("rd_col")[0])
+    # behind the memory seam: a *_linebuf module with a registered read
+    # port driving chain1_q, and no continuous read of any array
+    registered = (".rd(chain1_q)" in src and "if (re) rd <= mem[ra];" in src
+                  and "chain1 = mem1[" not in src)
     one_ahead = "rd_col = in_sof" in src
     result("stencil: line buffers are read through a register", registered)
     result("stencil: the address is one column AHEAD, so no schedule "

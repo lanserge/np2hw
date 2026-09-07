@@ -88,11 +88,14 @@ def main():
     from np2hw import Image2D, to_ir, generate
     _, out = to_ir(gaussian2d_edge, Image2D("img", H, W, bits=8))
     src = generate(out, module_name="edge_shape")["verilog"]
-    registered = "chain1_q <= mem1[rd_col]" in src
+    # The line buffers live behind the memory seam now: a *_linebuf
+    # module whose read port is registered, driven at the datapath's
+    # `chain1_q`. That is the block-RAM shape, stated once per module.
+    registered = ".rd(chain1_q)" in src and "if (re) rd <= mem[ra];" in src
     one_ahead = "rd_col = in_sof" in src
-    # a READ is "= mem1[...]"; a write is "mem1[ecol] <= ...", so look
-    # for the read form anywhere, not merely before the first rd_col
-    async_read = "= mem1[ecol]" in src
+    # the async form is a CONTINUOUS read of the array (`wire ... =
+    # mem1[...]`), which the general core emits and the seam never does
+    async_read = "chain1 = mem1[" in src
     print(f"  line buffers read through a register           "
           f"{'PASS' if registered else 'FAIL'}")
     print(f"  the address is one column AHEAD, no shift       "

@@ -151,16 +151,17 @@ def check_sb_packed(name, fn, A, params=None, param_values=None, bits=8):
 
 
 def check(name, fn, A, params=None, param_values=None, show=0, bits=8,
-          channels=1, clk_ns=None):
+          channels=1, clk_ns=None, **generate_kwargs):
     """`bits` is the WORD width; with channels > 1 the input A is (H, W, C)
     and rides the wire as packed words, channel 0 in the low bits.
-    clk_ns applies the traced timing budget (auto-split when too deep)."""
+    clk_ns applies the traced timing budget (auto-split when too deep).
+    Anything else goes to generate() as given (sync_memory=...)."""
     params = params or []
     param_values = param_values or {}
     H, W = A.shape[0], A.shape[1]
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params,
                    channels=channels)
-    meta = generate(out, module_name=name, clk_ns=clk_ns)
+    meta = generate(out, module_name=name, clk_ns=clk_ns, **generate_kwargs)
 
     with open(os.path.join(BUILD, f"{name}.v"), "w") as fh:
         fh.write(meta["verilog"] + "\n")
