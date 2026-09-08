@@ -111,6 +111,65 @@ something that did **not** generate the RTL has to work the grouping out.
 `tee`'s `en_a`/`en_b`/`torn_a`/`torn_b` stay loose for the same reason
 in reverse: they are the tee's own controls, not the stream protocol.
 
+## How a tool binds the XML to a wire
+
+Nothing is matched by name. The binding is stated on the port itself,
+and it is three space-separated fields inside one attribute:
+
+```verilog
+, (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 sensor VALID" *)
+  input  wire        sensor_valid
+```
+
+The fields are the **VLNV** of the abstraction definition, the **name of
+the interface instance** this port joins, and the **logical port** it
+plays within it. Each answers a different question.
+
+**1. The VLNV says which document.** A packager resolves it against its
+IP catalogue, which is why the catalogue has to be pointed at the
+definitions before the RTL is added. Note the `_rtl` suffix: this names
+the *abstraction* definition (`np2hw_stream_rtl`), not the bus
+definition (`np2hw_stream`). The abstraction reaches the bus through its
+own `busType` element, so a port names the encoding and the encoding
+names the protocol.
+
+**2. The bundle name says which interface.** Every port carrying
+`sensor` becomes one interface instance called `sensor`, by string
+equality alone — no prefix is parsed out of the port names. That is what
+makes the label free to differ from the ports: it can be renamed to
+avoid a reserved word while the ports, which other designs wire by name,
+stay exactly as they were.
+
+**3. The logical name says which signal of the protocol.** `VALID` is
+looked up as a `logicalName` in the abstraction definition. **The
+physical name is never read.** `sensor_valid`, `foo_v` and `q` bind
+identically; only the attribute decides.
+
+### Master and slave are solved, not declared
+
+The abstraction definition gives every logical port a direction under
+each role, so the role follows from the directions the RTL already has:
+
+| port | dir | logical | onMaster | onSlave | fits |
+| --- | --- | --- | --- | --- | --- |
+| `sensor_valid` | input | VALID | out | in | slave |
+| `sensor_ready` | output | READY | in | out | slave |
+| `sensor_data` | input | DATA | out | in | slave |
+
+All of them agree, so this end is a sink. Reverse every direction and
+the same XML yields a master. A role that is inferred this way cannot
+contradict the RTL, because it is computed from it — which is the
+argument for declaring directions per role rather than tagging a module
+"master" somewhere and hoping the ports match.
+
+`presence` finishes the job: a missing `required` signal is an error, a
+missing `optional` one is simply a stream that does not carry that flag.
+
+**Inference does still exist — for ports with no attribute.** That is
+the failure mode these declarations displace, and publishing a
+definition briefly makes it worse rather than better. The next section
+is what that cost.
+
 ## Consuming it: what a real block design taught
 
 Authoring the definition is the easy half. Handing it to a tool taught
