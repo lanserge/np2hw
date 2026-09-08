@@ -3252,13 +3252,13 @@ def _stream_ports(prefix, data_bits, direction, flags, signed=False,
     interfaces rather than one confused one.
     """
     from .ipxact import stream_port_attribute
-    from .stream import STREAM_SIGNALS
+    from .stream import STREAM_FLAGS, STREAM_SIGNALS
 
     src = direction == "out"          # this module SOURCES the stream
     sign = "signed " if signed else ""
     out = []
     for suffix, _logical, width, from_source, _presence, _doc in STREAM_SIGNALS:
-        if width == 1 and suffix not in ("valid", "ready") and suffix not in flags:
+        if suffix in STREAM_FLAGS and suffix not in flags:
             continue                  # a flag this stream does not carry
         # READY runs against the data; everything else runs with it.
         outgoing = src if from_source else not src
