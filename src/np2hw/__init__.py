@@ -11,7 +11,9 @@ from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
 from .netlist import Endpoint, Netlist, Node
-from .stream import boundary_report, cdc_fifo, combinational_outputs, skid, tee
+from .stream import (STREAM_SIGNALS, boundary_report, cdc_fifo,
+                     combinational_outputs, skid, tee)
+from . import ipxact
 from .i2c import ddc_slave
 from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
@@ -60,4 +62,5 @@ __all__ = [
     # instances at bases -- with the regfile emitters and renderings over it.
     "Reg", "RegBlock", "RegInstance", "AddrMap", "systemrdl",
     "axil_regfile", "control_wrap",
+    "ipxact", "STREAM_SIGNALS",
 ]

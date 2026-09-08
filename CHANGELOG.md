@@ -27,6 +27,20 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 - **`core["memories"]`** — every generated core publishes the memories it
   inferred: instance, seam module (or `None`), width, depth, and whether
   the read is `sync` or `async`.
+- **The elastic stream has an IP-XACT bus definition.**
+  `np2hw.ipxact` renders the bus/abstraction definition pair, and every
+  stream port now carries the matching `X_INTERFACE_INFO`. Both are
+  generated from `np2hw.stream.STREAM_SIGNALS`, so a tool's view of the
+  protocol and the RTL's cannot disagree. With the definitions in an IP
+  catalogue, a packager sees each stream as one interface with its
+  master/slave role inferred, instead of six loose wires. Flags are
+  declared `optional` because a core takes SOF and regenerates the rest;
+  see `docs/ipxact.md`. Declared on the composed top and on every module
+  a board design instantiates by hand -- `skid`, `tee`, `cdc_fifo`,
+  `bayerlink_in` -- and `cdc_fifo`'s two clocks each name the face they
+  carry, which is the one fact a dual-clock crossing exists for. A
+  generated core's internal blocks are wired by the composer, which
+  emitted both ends and infers nothing, so they are left alone.
 
 ### Changed
 

@@ -149,3 +149,10 @@ simulation.
 All take the `core` dict from `generate(...)` and pass the `param_*` ports through, so a
 model with config registers works through every adapter unchanged. The core itself is
 never modified — adapters are pure wrappers.
+
+## Packaging these interfaces
+
+Every bus port here declares the bundle it belongs to, so an IP
+packager sees one interface rather than a heap of wires -- including
+the elastic stream, which has a bus definition of its own. See
+[ipxact.md](ipxact.md).

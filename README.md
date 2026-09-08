@@ -84,6 +84,7 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/streaming-and-bitwidths.md](docs/streaming-and-bitwidths.md) | Streaming model, line buffers, edge handling, dtype/bitwidth semantics |
 | [docs/memories.md](docs/memories.md) | The memory seam: line buffers as a bindable module, the macro contract, `sync_memory` |
 | [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOF framing, continuous frames, parametric & dynamic resolution |
+| [docs/ipxact.md](docs/ipxact.md) | IP-XACT: packaging a component, and the stream's own bus definition |
 | [docs/interfaces.md](docs/interfaces.md) | AXI4-Stream Video, Switchboard, AXI-Lite/UMI register files, `control_top` |
 | [docs/backends.md](docs/backends.md) | numpy / iverilog / cxxrtl / switchboard (verilator, icarus) |
 | [docs/view.md](docs/view.md) | Live viewer: camera/screen sources, sliders, FPS |

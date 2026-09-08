@@ -3237,6 +3237,49 @@ def _read_expr(reg: Reg, source: str) -> str:
     return f"{{{32 - reg.bits}'b0, {source}}}"
 
 
+def _stream_ports(prefix, data_bits, direction, flags, signed=False,
+                  leading_comma=False) -> list[str]:
+    """One elastic stream's ports, each DECLARING the bundle it belongs to.
+
+    Without this a stream is six loose wires that an integrator groups by
+    reading documentation, and that a block-design writer groups by
+    matching port names with a regex. The attributes name np2hw's own bus
+    definition (:mod:`np2hw.ipxact`, rendered from the same declaration
+    these directions come from), so the grouping is stated by the module
+    that owns the ports rather than inferred by everyone downstream.
+
+    `prefix` is the bundle name, so a module with two streams presents two
+    interfaces rather than one confused one.
+    """
+    from .ipxact import stream_port_attribute
+    from .stream import STREAM_SIGNALS
+
+    src = direction == "out"          # this module SOURCES the stream
+    sign = "signed " if signed else ""
+    out = []
+    for suffix, _logical, width, from_source, _presence, _doc in STREAM_SIGNALS:
+        if width == 1 and suffix not in ("valid", "ready") and suffix not in flags:
+            continue                  # a flag this stream does not carry
+        # READY runs against the data; everything else runs with it.
+        outgoing = src if from_source else not src
+        kind = "output" if outgoing else "input "
+        decl = (f"{kind} wire {sign}[{data_bits-1}:0] {prefix}_{suffix}"
+                if width is None else
+                f"{kind} wire        {prefix}_{suffix}")
+        # An attribute binds to what FOLLOWS it, so with leading commas
+        # the comma goes ahead of the attribute -- `port (* attr *) ,
+        # port` is a syntax error, and one iverilog catches where a
+        # synthesiser might not.
+        attr = stream_port_attribute(prefix, suffix)
+        if leading_comma:
+            out.append(f"    , {attr}")
+            out.append(f"      {decl}")
+        else:
+            out.append(f"    {attr}")
+            out.append(f"    {decl},")
+    return out
+
+
 def _clock_port(name, busif, reset_name=None) -> list[str]:
     """A clock port that names the bus it drives, and that bus's reset."""
     assoc = f"ASSOCIATED_BUSIF {busif}"
@@ -3792,20 +3835,10 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         a(f"    // context, not configuration: this arrives with the data")
         a(f"    , input  wire [{bits-1}:0] {name}")
     for stream in streams:
-        p, bits = stream["prefix"], stream["data_bits"]
-        sign = "signed " if stream.get("signed") else ""
-        if stream["direction"] == "in":
-            a(f"    , input  wire        {p}_valid")
-            a(f"    , output wire        {p}_ready")
-            a(f"    , input  wire {sign}[{bits-1}:0] {p}_data")
-            for flag in stream["flags"]:
-                a(f"    , input  wire        {p}_{flag}")
-        else:
-            a(f"    , output wire        {p}_valid")
-            a(f"    , input  wire        {p}_ready")
-            a(f"    , output wire {sign}[{bits-1}:0] {p}_data")
-            for flag in stream["flags"]:
-                a(f"    , output wire        {p}_{flag}")
+        L.extend(_stream_ports(stream["prefix"], stream["data_bits"],
+                               stream["direction"], stream["flags"],
+                               signed=bool(stream.get("signed")),
+                               leading_comma=True))
     a(");")
     a("")
     for r in rw:
