@@ -111,6 +111,58 @@ something that did **not** generate the RTL has to work the grouping out.
 `tee`'s `en_a`/`en_b`/`torn_a`/`torn_b` stay loose for the same reason
 in reverse: they are the tee's own controls, not the stream protocol.
 
+## Consuming it: what a real block design taught
+
+Authoring the definition is the easy half. Handing it to a tool taught
+three things, each of which cost a run to find and none of which is
+guessable from the XML.
+
+**The definition has to be in the consumer's catalogue.** A port naming
+a VLNV the project has never been given is not ignored quietly: Vivado
+reports every one of them as a CRITICAL WARNING (`IP_Flow 19-4976`,
+"Interface VLNV not found ... Ignoring X_INTERFACE_INFO parameter") and
+falls back to loose pins. Nine ports, nine warnings, on a board whose
+build had none of that class. So a project that consumes these modules
+must point its IP repository at the directory `write_definitions()`
+wrote, before adding the RTL.
+
+**An interface may not be named after a reserved word.** `in` and `out`
+are the obvious names for a stream's two ends and both are HDL keywords;
+an interface called either is `BD 41-1367`. So the INTERFACE is renamed
+-- `in_stream`, `out_stream` -- and the PORTS are not, because ports are
+the module's and renaming them would ripple through every design that
+wires them. Whoever reads the attributes back should group by the port
+name, not by the label: they are free to differ, and only the label has
+to be legal. `bundle_name()` is where that rule lives.
+
+**Publishing a definition hands the tool the means to guess.** Once a
+stream bus definition is in the catalogue, a tool will happily infer one
+from port names alone -- and then report the required signals the
+"interface" is missing. A probe with `rx_valid` and no handshake became
+an inferred stream missing its READY (`IP_Flow 19-1965`). A port that is
+not part of an interface now says so, with `X_INTERFACE_IGNORE`. The
+irony is worth stating plainly: the declarations exist to stop a
+grouping being guessed from names, and publishing them briefly enabled
+exactly that guess one layer up.
+
+### What it is worth, measured
+
+On a composed ISP, packaged with the definition in the catalogue:
+
+| | before | after |
+| --- | --- | --- |
+| ports claimed by no interface | 16 | **4** |
+| stream interfaces | 0 | **2** (`isp_in` slave, `isp_out` master) |
+
+The four that remain are stream context -- not a bus, and correctly
+unclaimed. Master and slave were **inferred from the port directions**
+rather than declared, which is what the abstraction definition's
+`onMaster`/`onSlave` sections are for.
+
+In the block design that instantiates these modules directly, eighteen
+stream interfaces are inferred and used, and the build's critical
+warnings are unchanged from before any of this existed.
+
 ## Version
 
 Written against **IEEE 1685-2009** (the SPIRIT namespace), which is what
