@@ -25,6 +25,38 @@ Verilog emitters also read to attach the matching port attributes. One
 declaration, two renderings, so a tool's view of the protocol and the
 RTL's cannot drift apart.
 
+## What would change, and what would not
+
+Two things are foreseen and neither wants anticipating in the shape of
+this module today.
+
+A **component** -- the document describing the ISP itself: its files,
+ports, parameters and memory map -- would be one more `build` function
+handed to :func:`_document`, because every IP-XACT document shares the
+same skeleton and that skeleton is already factored out. It would own no
+new fact: the traced boundary, the register map and the file list are
+published elsewhere already, and a component aggregates them. A vendor
+packager produces one today from the RTL, which is why this has not been
+written; that output is tied to that vendor's bus definitions and is no
+use to a flow that cannot resolve them.
+
+An **AXI4-Lite bus definition of our own** would be a second call to
+:func:`bus_definition`'s shape. There is no universally published
+neutral one -- each vendor ships its own -- so a neutral component
+needs it.
+
+A **newer schema** (1685-2014, 1685-2022) is NOT `NS` as a parameter,
+and the constant is deliberate. The revisions rename and drop elements;
+a module that let a caller swap the namespace would look like it handled
+versions while emitting 2009 structure under a 2022 name, which is worse
+than not offering it. It wants a second renderer sharing this
+declaration.
+
+And the definition functions take no arguments ON PURPOSE. If a caller
+could pass its own signal list, it could describe a protocol the Verilog
+emitters do not attach -- which is the drift this module exists to make
+impossible. The absence of a parameter is the guarantee.
+
 Written against **IEEE 1685-2009** (the SPIRIT namespace), which is what
 the FPGA vendor packagers read and write today. 1685-2014 and 1685-2022
 exist and differ mainly in namespace and in element names dropped or
