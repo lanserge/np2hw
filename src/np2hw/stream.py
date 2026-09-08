@@ -73,6 +73,44 @@ STREAM_FLAGS = tuple(s for s, _, _, _, p, _ in STREAM_SIGNALS
                      if p == "optional")
 
 
+# A bus interface named after an HDL reserved word is a critical warning
+# in a block design -- `in` and `out` are the two a stream prefix collides
+# with, and they are the two most natural names for a stream's ends. The
+# INTERFACE is renamed, never the ports: the ports are the module's and
+# renaming them would ripple through every design that wires them.
+_RESERVED = frozenset({
+    "in", "out", "inout", "buffer", "signal", "entity", "block", "process",
+    "port", "map", "type", "of", "is", "end", "begin", "for", "when",
+})
+
+
+def bundle_name(prefix: str) -> str:
+    """The interface name for a stream whose ports are ``<prefix>_*``.
+
+    The prefix where it is safe, so a block design shows the name the
+    ports already carry; suffixed where it is a reserved word. Whoever
+    reads these attributes back groups by the PORT name rather than by
+    this label, so the two need not agree and only this one has to be
+    legal.
+    """
+    return f"{prefix}_stream" if prefix in _RESERVED else prefix
+
+
+def stream_port_attribute(prefix: str, suffix: str) -> str:
+    """The attribute one stream port carries, naming its bundle and role.
+
+    Same form the AXI4-Lite ports use, pointing at OUR definition instead
+    of a vendor's. `prefix` is the bundle -- `in`, `out`, `isp_in` -- so
+    two streams on one module stay two interfaces. Returned unindented:
+    an attribute binds to the declaration that FOLLOWS it, so in a port
+    list written with leading commas the comma has to come first and only
+    the caller knows which style it is emitting.
+    """
+    logical = next(logical for s, logical, *_ in STREAM_SIGNALS if s == suffix)
+    return (f'(* X_INTERFACE_INFO = "{":".join(STREAM_RTL_VLNV)} '
+            f'{bundle_name(prefix)} {logical}" *)')
+
+
 def stream_signal(suffix: str) -> tuple:
     """The declaration for one signal, by its port suffix."""
     for entry in STREAM_SIGNALS:
@@ -118,17 +156,17 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
     a(") (")
     a("    input  wire         clk,")
     a("    input  wire         rst,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 s DATA" *)')
+    a(f"    {stream_port_attribute('s', 'data')}")
     a("    input  wire [W-1:0] s_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 s VALID" *)')
+    a(f"    {stream_port_attribute('s', 'valid')}")
     a("    input  wire         s_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 s READY" *)')
+    a(f"    {stream_port_attribute('s', 'ready')}")
     a("    output wire         s_ready,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 m DATA" *)')
+    a(f"    {stream_port_attribute('m', 'data')}")
     a("    output wire [W-1:0] m_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 m VALID" *)')
+    a(f"    {stream_port_attribute('m', 'valid')}")
     a("    output wire         m_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 m READY" *)')
+    a(f"    {stream_port_attribute('m', 'ready')}")
     a("    input  wire         m_ready")
     a(");")
     a("    reg [W-1:0] out_data;")
@@ -307,25 +345,25 @@ def cdc_fifo(data_bits: int, addr_bits: int = 4,
     a(f"    parameter W = {W},")
     a(f"    parameter A = {A}")
     a(") (")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 wclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF in, ASSOCIATED_RESET wrst" *)')
+    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 wclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF in_stream, ASSOCIATED_RESET wrst" *)')
     a("    input  wire         wclk,")
     a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 wrst RST", X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
     a("    input  wire         wrst,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in DATA" *)')
+    a(f"    {stream_port_attribute('in', 'data')}")
     a("    input  wire [W-1:0] in_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in VALID" *)')
+    a(f"    {stream_port_attribute('in', 'valid')}")
     a("    input  wire         in_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in READY" *)')
+    a(f"    {stream_port_attribute('in', 'ready')}")
     a("    output wire         in_ready,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 rclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF out, ASSOCIATED_RESET rrst" *)')
+    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 rclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF out_stream, ASSOCIATED_RESET rrst" *)')
     a("    input  wire         rclk,")
     a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rrst RST", X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
     a("    input  wire         rrst,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out DATA" *)')
+    a(f"    {stream_port_attribute('out', 'data')}")
     a("    output wire [W-1:0] out_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out VALID" *)')
+    a(f"    {stream_port_attribute('out', 'valid')}")
     a("    output wire         out_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out READY" *)')
+    a(f"    {stream_port_attribute('out', 'ready')}")
     a("    input  wire         out_ready")
     a(");")
     a("    reg [W-1:0] mem [0:(1<<A)-1];")
@@ -460,27 +498,27 @@ def tee(data_bits: int, module_name: str = "tee") -> dict:
     a(") (")
     a("    input  wire         clk,")
     a("    input  wire         rst,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in VALID" *)')
+    a(f"    {stream_port_attribute('in', 'valid')}")
     a("    input  wire         in_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in READY" *)')
+    a(f"    {stream_port_attribute('in', 'ready')}")
     a("    output wire         in_ready,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in DATA" *)')
+    a(f"    {stream_port_attribute('in', 'data')}")
     a("    input  wire [W-1:0] in_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 in SOF" *)')
+    a(f"    {stream_port_attribute('in', 'sof')}")
     a("    input  wire         in_sof,")
     a("    input  wire         en_a,")
     a("    input  wire         en_b,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 a VALID" *)')
+    a(f"    {stream_port_attribute('a', 'valid')}")
     a("    output wire         a_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 a READY" *)')
+    a(f"    {stream_port_attribute('a', 'ready')}")
     a("    input  wire         a_ready,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 a DATA" *)')
+    a(f"    {stream_port_attribute('a', 'data')}")
     a("    output wire [W-1:0] a_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 b VALID" *)')
+    a(f"    {stream_port_attribute('b', 'valid')}")
     a("    output wire         b_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 b READY" *)')
+    a(f"    {stream_port_attribute('b', 'ready')}")
     a("    input  wire         b_ready,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 b DATA" *)')
+    a(f"    {stream_port_attribute('b', 'data')}")
     a("    output wire [W-1:0] b_data,")
     a("    // sticky until reset: that branch lost mid-frame beats")
     a("    output reg          torn_a,")

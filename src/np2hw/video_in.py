@@ -62,6 +62,8 @@ time, so the protocol tables have exactly one owner.
 """
 from __future__ import annotations
 
+from .stream import stream_port_attribute
+
 from .stream import skid
 
 
@@ -185,17 +187,17 @@ def bayerlink_in(max_line_bytes: int = 4096,
     a("    // The elastic stream a generated core consumes. Samples are")
     a(f"    // ALIGNED to {bits} bits: whatever depth the header names,")
     a("    // what leaves here is full scale at this build's depth.")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out VALID" *)')
+    a(f"    {stream_port_attribute('out', 'valid')}")
     a("    output wire        out_valid,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out READY" *)')
+    a(f"    {stream_port_attribute('out', 'ready')}")
     a("    input  wire        out_ready,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out DATA" *)')
+    a(f"    {stream_port_attribute('out', 'data')}")
     a(f"    output wire [{bits - 1}:0] out_data,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out SOF" *)')
+    a(f"    {stream_port_attribute('out', 'sof')}")
     a("    output wire        out_sof,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out EOL" *)')
+    a(f"    {stream_port_attribute('out', 'eol')}")
     a("    output wire        out_eol,")
-    a('    (* X_INTERFACE_INFO = "lanserge:interface:np2hw_stream_rtl:1.0 out LAST" *)')
+    a(f"    {stream_port_attribute('out', 'last')}")
     a("    output wire        out_last,")
     a("    // STICKY until reset: unobservable loss is a debugging season.")
     a("    output reg         overflow,")

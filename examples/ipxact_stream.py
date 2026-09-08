@@ -31,7 +31,8 @@ import numpy as np
 from np2hw import (Image2D, Param, control_wrap, generate, ipxact,
                    saturate, to_ir)
 from np2hw.regmap import Reg
-from np2hw.stream import STREAM_FLAGS, STREAM_REQUIRED, STREAM_SIGNALS
+from np2hw.stream import (STREAM_FLAGS, STREAM_REQUIRED,
+                          STREAM_SIGNALS, bundle_name)
 
 NS = {"s": ipxact.NS}
 
@@ -109,7 +110,8 @@ def main():
         if vlnv in line:
             bundle, logical = line.split(vlnv)[1].split('"')[0].split()
             declared.setdefault(bundle, set()).add(logical)
-    two_bundles = set(declared) == {"in", "out"}
+    two_bundles = set(declared) == {bundle_name("in"),
+                                    bundle_name("out")}
     print(f"  the wrapper presents two stream interfaces        "
           f"{'PASS' if two_bundles else 'FAIL'}")
     results.append(two_bundles)
@@ -145,8 +147,10 @@ def main():
     from np2hw import bayerlink_in, cdc_fifo, skid, tee
     import re
 
-    expected = {"skid": {"s", "m"}, "tee": {"in", "a", "b"},
-                "cdc_fifo": {"in", "out"}, "bayerlink_in": {"out"}}
+    expected = {n: {bundle_name(b) for b in bundles} for n, bundles in
+                {"skid": {"s", "m"}, "tee": {"in", "a", "b"},
+                 "cdc_fifo": {"in", "out"},
+                 "bayerlink_in": {"out"}}.items()}
     built = {"skid": skid(12), "tee": tee(12), "cdc_fifo": cdc_fifo(12, 8),
              "bayerlink_in": bayerlink_in(bits=12)}
     plumbing = True
@@ -163,10 +167,25 @@ def main():
     # a crossing whose two faces run on different clocks has to say which
     # clock carries which face, or the one fact it exists for is inferred
     cdc = built["cdc_fifo"]["verilog"]
-    faces = ("ASSOCIATED_BUSIF in" in cdc and "ASSOCIATED_BUSIF out" in cdc)
+    faces = (f'ASSOCIATED_BUSIF {bundle_name("in")}' in cdc
+             and f'ASSOCIATED_BUSIF {bundle_name("out")}' in cdc)
     print(f"  the CDC FIFO's clocks name the face each carries  "
           f"{'PASS' if faces else 'FAIL'}")
     results.append(faces)
+
+    # a bus interface named after an HDL reserved word is a critical
+    # warning in a block design -- `in` and `out` are exactly the two a
+    # stream prefix reaches for, so the label is renamed and the ports
+    # are not (renaming ports would ripple through every design).
+    from np2hw.stream import _RESERVED
+    labels = {b for v in built.values()
+              for b in re.findall(r"np2hw_stream_rtl:1\.\d+ (\w+) ",
+                                  v["verilog"])}
+    labels |= set(declared)
+    legal = labels and not (labels & _RESERVED)
+    print(f"  no interface label is an HDL reserved word         "
+          f"{'PASS' if legal else 'FAIL'}")
+    results.append(legal)
 
     ok = all(results)
     print("\n" + ("IPXACT STREAM PASS" if ok else "FAIL"))

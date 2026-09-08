@@ -165,18 +165,3 @@ def write_definitions(directory) -> dict:
     written["bus"].write_text(bus_definition())
     written["abstraction"].write_text(abstraction_definition())
     return written
-
-
-def stream_port_attribute(prefix: str, suffix: str) -> str:
-    """The attribute one stream port carries, naming its bundle and role.
-
-    Same form the AXI4-Lite ports use, pointing at OUR definition instead
-    of a vendor's. `prefix` is the bundle -- `in`, `out`, `isp_in` -- so
-    two streams on one module stay two interfaces. Returned unindented:
-    an attribute binds to the declaration that FOLLOWS it, so in a port
-    list written with leading commas the comma has to come first and only
-    the caller knows which style it is emitting.
-    """
-    logical = next(logical for s, logical, *_ in STREAM_SIGNALS if s == suffix)
-    return (f'(* X_INTERFACE_INFO = "{vlnv_string(STREAM_RTL_VLNV)} '
-            f'{prefix} {logical}" *)')
