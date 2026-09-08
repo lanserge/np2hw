@@ -325,6 +325,13 @@ def cdc_fifo(data_bits: int, addr_bits: int = 4,
     synchroniser): pointers that reset on one side only disagree
     forever after. The board wiring owns that contract; the module
     states it.
+
+    A timing or CDC flow has to be TOLD about the two pointer paths --
+    they are synchronised by construction and no tool can see that --
+    and `docs/clock-crossings.md` says exactly what to tell it: which
+    signals cross, why gray coding makes a bounded max-delay safe
+    rather than merely conventional, and what an ASIC flow needs that
+    an FPGA one does not.
     """
     if data_bits < 1:
         raise ValueError(f"data_bits {data_bits} must be at least 1")

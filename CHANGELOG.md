@@ -9,6 +9,17 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ## Unreleased
 
+### Documentation
+
+- **`docs/clock-crossings.md`** — the intent a timing and CDC flow needs
+  for `cdc_fifo`, stated by the module that owns it. Which two pointer
+  paths cross and in which direction, why gray coding makes a *bounded*
+  max-delay the right constraint rather than a waiver to infinity, the
+  reset contract (both sides, or the pointers disagree forever), and the
+  three things an ASIC flow needs that an FPGA one does not. Nothing
+  about the crossing changed; it was undocumented, and a crossing a tool
+  cannot be told about is one that fails somebody's signoff.
+
 ### Added
 
 - **The memory seam.** Every line buffer a registered-read stencil emits
