@@ -7,8 +7,12 @@ human by reading documentation, an SoC assembly tool not at all.
 
 np2hw states it instead. Every AXI4-Lite port names its bundle, every
 clock names the bus it drives, every reset its polarity, and every
-stream port names np2hw's own bus definition. The rest of this document
-is what that buys and how to use it.
+stream port names np2hw's own bus definition.
+
+What follows is one argument in order: what the standard is, what np2hw
+publishes for its own stream, how a tool binds that to a wire, where
+both come from, who declares, and what it was worth on a real board.
+The packaging recipe is at the end, once the parts have names.
 
 ## The two standards in play
 
@@ -20,31 +24,6 @@ tools read to connect IP automatically instead of by hand.
 ([`systemrdl()`](api.md)). The two overlap on memory maps; SystemRDL is
 the better description of a register file and converts to IP-XACT when a
 flow wants one document.
-
-Nothing here duplicates either. The component is an *aggregation* of
-facts already published elsewhere — the `.core` manifest names the
-files, the traced interface names the ports, the register map names the
-addresses — so no fact is stated twice.
-
-## Getting a component: you already have one
-
-The port attributes are what an IP packager reads, so a packaged
-component falls out of the RTL with no extra work:
-
-```tcl
-create_project probe /tmp/probe -part <part>
-set_property ip_repo_paths [list <busdef_dir>] [current_project]
-update_ip_catalog -rebuild
-add_files <generated>.v
-set_property top <toplevel> [current_fileset]
-ipx::package_project -root_dir <out> -vendor <you> -library <lib> \
-    -taxonomy /UserIP -import_files -force
-```
-
-`component.xml` is IP-XACT. On a generated ISP that yields one AXI4-Lite
-slave with all 17 ports mapped, a memory map whose range is derived from
-the RTL, the bus clock and reset as their own typed interfaces, and each
-stream as one interface with its direction inferred.
 
 ## The stream's own bus definition
 
@@ -80,36 +59,7 @@ present.
 **The master is the source.** Everything travels with the data except
 READY, which is the sink answering — the handshake's whole asymmetry,
 and what lets a packager tell a consumer from a producer without being
-told.
-
-## One declaration behind both
-
-`np2hw.stream.STREAM_SIGNALS` is the protocol: the signals, their
-widths, which the source drives, and whether each is required. The XML
-is rendered from it and the Verilog attributes are emitted from it, so a
-tool's view of the protocol and the RTL's cannot drift apart.
-
-That mattered before it was written down. `gen/netlist.py` in a
-downstream project groups stream ports by matching
-`(.+)_(valid|ready|data|sof|eol|last)$` and deciding a prefix is a
-stream if it carries valid *and* ready — inference, from names, in a
-project's own tooling. A declaration is what replaces a guess.
-
-## Which modules declare
-
-Everything a design instantiates **by hand**: the composed top from
-`control_wrap`, and the plumbing — `skid` (`s`/`m`), `tee` (`in`/`a`/`b`),
-`cdc_fifo` (`in`/`out`, each clock naming the face it carries) and
-`bayerlink_in` (`out`).
-
-A generated core's internal blocks do not, and that is deliberate. They
-are wired by `compose()`, which emitted both ends of every connection —
-nothing there is inferring anything, so a declaration would add noise
-without removing a guess. The rule is that a bundle is declared wherever
-something that did **not** generate the RTL has to work the grouping out.
-
-`tee`'s `en_a`/`en_b`/`torn_a`/`torn_b` stay loose for the same reason
-in reverse: they are the tee's own controls, not the stream protocol.
+told. How it does that is the next section.
 
 ## How a tool binds the XML to a wire
 
@@ -167,8 +117,40 @@ missing `optional` one is simply a stream that does not carry that flag.
 
 **Inference does still exist — for ports with no attribute.** That is
 the failure mode these declarations displace, and publishing a
-definition briefly makes it worse rather than better. The next section
-is what that cost.
+definition briefly makes it worse rather than better. What that cost is
+in *Consuming it*, below.
+
+## One declaration behind both
+
+Both halves of that binding — the XML a tool resolves and the attribute
+a port carries — are rendered from the same place.
+
+`np2hw.stream.STREAM_SIGNALS` is the protocol: the signals, their
+widths, which the source drives, and whether each is required. The XML
+is rendered from it and the Verilog attributes are emitted from it, so a
+tool's view of the protocol and the RTL's cannot drift apart.
+
+That mattered before it was written down. `gen/netlist.py` in a
+downstream project groups stream ports by matching
+`(.+)_(valid|ready|data|sof|eol|last)$` and deciding a prefix is a
+stream if it carries valid *and* ready — inference, from names, in a
+project's own tooling. A declaration is what replaces a guess.
+
+## Which modules declare
+
+Everything a design instantiates **by hand**: the composed top from
+`control_wrap`, and the plumbing — `skid` (`s`/`m`), `tee` (`in`/`a`/`b`),
+`cdc_fifo` (`in`/`out`, each clock naming the face it carries) and
+`bayerlink_in` (`out`).
+
+A generated core's internal blocks do not, and that is deliberate. They
+are wired by `compose()`, which emitted both ends of every connection —
+nothing there is inferring anything, so a declaration would add noise
+without removing a guess. The rule is that a bundle is declared wherever
+something that did **not** generate the RTL has to work the grouping out.
+
+`tee`'s `en_a`/`en_b`/`torn_a`/`torn_b` stay loose for the same reason
+in reverse: they are the tee's own controls, not the stream protocol.
 
 ## Consuming it: what a real block design taught
 
@@ -221,6 +203,35 @@ rather than declared, which is what the abstraction definition's
 In the block design that instantiates these modules directly, eighteen
 stream interfaces are inferred and used, and the build's critical
 warnings are unchanged from before any of this existed.
+
+## Getting a component: you already have one
+
+Everything above is about interfaces. A **component** — the document
+describing a whole module — is a separate artifact, and needs no work
+here: the port attributes are what an IP packager reads, so one falls
+out of the RTL already.
+
+```tcl
+create_project probe /tmp/probe -part <part>
+set_property ip_repo_paths [list <busdef_dir>] [current_project]
+update_ip_catalog -rebuild
+add_files <generated>.v
+set_property top <toplevel> [current_fileset]
+ipx::package_project -root_dir <out> -vendor <you> -library <lib> \
+    -taxonomy /UserIP -import_files -force
+```
+
+`component.xml` is IP-XACT. On a generated ISP that yields one AXI4-Lite
+slave with all 17 ports mapped, a memory map whose range is derived from
+the RTL, the bus clock and reset as their own typed interfaces, and each
+stream as one interface with its direction inferred.
+
+Which is why none of this is hand-written. A component is an
+*aggregation* of facts already published elsewhere — the `.core`
+manifest names the files, the traced interface names the ports, the
+register map names the addresses — so writing one by hand would state
+every fact a second time, and a second statement is a thing that can
+disagree.
 
 ## Version
 
