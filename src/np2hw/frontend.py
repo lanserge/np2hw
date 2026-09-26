@@ -361,13 +361,18 @@ class Traced:
             else:
                 tlo, thi = 0, (1 << self.image.bits) - 1
         node = None
-        for (r, c), w in sorted(self.taps.items()):
-            if isinstance(w, Param):
-                raise NotImplementedError(
-                    "a Param tap coefficient cannot join a window expression; "
-                    "multiply by the register after the spatial sum")
+        for (r, c), w in sorted(self.taps.items(), key=lambda kv: kv[0]):
             leaf = PExpr("tap", (r, c, shift, field), tlo, thi)
-            if w != 1:
+            if isinstance(w, Param):
+                # `g * x` was taken as a programmable tap coefficient, in
+                # case a spatial sum followed. Arithmetic past it means none
+                # did: the register becomes a leaf, as in any expression.
+                plo = -(1 << (w.bits - 1)) if w.signed else 0
+                phi = (1 << (w.bits - (1 if w.signed else 0))) - 1
+                corners = sorted((tlo * plo, tlo * phi, thi * plo, thi * phi))
+                leaf = PExpr("mul", (leaf, PExpr("param", (w,), plo, phi)),
+                             corners[0], corners[-1])
+            elif w != 1:
                 corners = sorted((tlo * w, thi * w))
                 leaf = PExpr("mul", (leaf, PExpr("const", (int(w),),
                                                  int(w), int(w))),
@@ -450,7 +455,9 @@ class Traced:
             raise NotImplementedError(
                 f"gather from {parent.name!r}: only 1-D register arrays are "
                 "gatherable in this version")
-        index = self._as_expr()
+        # any value that converts: a bare pixel, or one past a shift or a
+        # clip (`knots[x >> 6]`, `knots[x // 64]` alike)
+        index = self._any_expr()
         size = parent.shape[0]
         if index.lo < 0 or index.hi >= size:
             raise ValueError(
@@ -468,7 +475,7 @@ class Traced:
         sit inside the table, proven here at trace time rather than read
         as garbage in hardware.
         """
-        index = self._as_expr()
+        index = self._any_expr()
         size = len(table)
         if index.lo < 0 or index.hi >= size:
             raise ValueError(
@@ -598,6 +605,15 @@ class Traced:
     def __rshift__(self, o):
         if not isinstance(o, (int, np.integer)) or o < 0:
             return NotImplemented
+        bare = (self.taps == {(0, 0): 1} and not self.post
+                and self.mode == "none" and self.phase is None)
+        if self.expr is None and self.lane is None and not bare:
+            # x >> k IS x // 2**k (both floor). Past a register gain or a
+            # spatial sum it takes the same path as the division -- a
+            # trailing shift on the chain, the form those emitters expect.
+            # A BARE pixel stays an expression leaf: a model that also masks
+            # or compares it must see one leaf, not a tap and a pixel.
+            return self // (1 << int(o))
         node = self._any_expr()
         return self._expr_derive(PExpr("shr", (node, int(o)),
                                        node.lo >> int(o), node.hi >> int(o)))
@@ -624,8 +640,19 @@ class Traced:
     def __add__(self, o):
         if self.expr is not None or (isinstance(o, Traced) and o.expr is not None):
             return self._expr_binary(o, "add")
-        if isinstance(o, (int, np.integer)) and o == 0:
-            return self                                   # identity (enables sum())
+        if isinstance(o, (int, np.integer)):
+            if o == 0:
+                return self                               # identity (enables sum())
+            # A constant bias -- rounding before a shift, an offset, a
+            # centring -- is an expression leaf: the expression carries its
+            # range, so width and sign follow from the arithmetic. Exact
+            # arithmetic is NumPy's only while the result fits this value's
+            # dtype; past it NumPy wraps, and the hardware would not.
+            if self.lane is None:
+                node = self._any_expr()
+                self._fits_dtype(node.lo + int(o), node.hi + int(o),
+                                 f"x + {int(o)}")
+            return self._expr_binary(o, "add")
         if self.lane is not None or (isinstance(o, Traced)
                                      and o.lane is not None):
             # Field extraction is nonlinear: lane arithmetic leaves chain
@@ -671,6 +698,34 @@ class Traced:
         if self.expr is not None or (isinstance(o, Traced) and o.expr is not None):
             return self._expr_binary(o, "sub")
         return self.__add__(o * -1)
+
+    def __rsub__(self, o):
+        if not isinstance(o, (int, np.integer)):
+            return NotImplemented
+        if self.expr is None and self.lane is None:
+            node = self._any_expr()
+            self._fits_dtype(int(o) - node.hi, int(o) - node.lo, f"{int(o)} - x")
+        return (self * -1).__add__(o)                     # k - x == (-x) + k
+
+    def _fits_dtype(self, lo, hi, what):
+        """Refuse arithmetic whose exact range leaves this value's dtype.
+
+        NumPy computes in the dtype and wraps; the traced expression computes
+        exactly. The two agree only while the result fits, so past that the
+        model and its hardware would differ, silently. Asked only of a value
+        whose `bits` IS its dtype -- not of a field taken out of a packed
+        word, whose `bits` is the field's width whatever the model widened
+        the word to."""
+        if self.signed:
+            dlo, dhi = -(1 << (self.bits - 1)), (1 << (self.bits - 1)) - 1
+        else:
+            dlo, dhi = 0, (1 << self.bits) - 1
+        if lo < dlo or hi > dhi:
+            kind = f"{'int' if self.signed else 'uint'}{self.bits}"
+            raise NotImplementedError(
+                f"{what} reaches [{lo}, {hi}], outside {kind}: NumPy wraps "
+                "there and the hardware would not. Widen first, e.g. "
+                "x.astype(np.int16)")
 
     def __neg__(self):
         return self * -1
@@ -912,9 +967,14 @@ def lower(traced: Traced):
     if getattr(traced, "expr", None) is not None:
         # A pointwise expression DAG: collect the gathered register arrays in
         # first-use order and hand the whole thing to the expression emitter.
-        parents, seen = [], set()
+        parents, seen, visited = [], set(), set()
 
         def walk(node):
+            # A DAG: visit each shared node once, or the walk is
+            # exponential in depth (see verilog._walk_expr_params).
+            if id(node) in visited:
+                return
+            visited.add(id(node))
             if node.op == "gather":
                 parent = node.args[0]
                 if ("gather", parent.name) not in seen:
@@ -947,8 +1007,39 @@ def lower(traced: Traced):
     # emitter's margin already expresses. A declared CROP is the opposite:
     # its offset is the window's position in the frame and means something,
     # so it is kept and the emitter gates to it.
-    if not traced.declared_extent and (min(r for r, _ in taps) != 0
-                                or min(c for _, c in taps) != 0):
+    rmin, cmin = min(r for r, _ in taps), min(c for _, c in taps)
+    padded = traced.mode != "none" and any(traced.pad)
+    if not traced.declared_extent and padded and (rmin or cmin):
+        # On a PADDED image the offsets count from the padded origin, so a
+        # kernel that never reaches the first padded row or column -- a
+        # vertical-only kernel reads column 1 of `np.pad(x, 1)` and nothing
+        # else -- starts past zero. Normalise it, and take the padding it
+        # never reads off with it: a pad no tap reaches is no pad at all.
+        pt, pb, pl, pr = traced.pad
+        rmax, cmax = max(r for r, _ in taps), max(c for _, c in taps)
+        pt_n = pt - rmin
+        pb_n = pb - ((image.height + pt + pb) - (rmax + shape[0]))
+        pl_n = pl - cmin
+        pr_n = pr - ((image.width + pl + pr) - (cmax + shape[1]))
+        if min(pt_n, pb_n, pl_n, pr_n) < 0:
+            raise ValueError(
+                "a padded stencil must cover its output pixel: this one reads "
+                "only one side of it, which shifts the image rather than "
+                "filtering it")
+        if (pt_n and not pb_n) or (pl_n and not pr_n):
+            # A kernel reaching back only -- a backward difference on
+            # np.pad(x, 1) -- leaves padding on its top or left alone. The
+            # window emitters place a margin on both sides of the output
+            # pixel and build that wrong, so it is refused, not emitted.
+            raise ValueError(
+                "this padded stencil reads its padding on the "
+                f"{'top' if pt_n and not pb_n else 'left'} only, which the "
+                "window emitters do not build; write the difference forward "
+                "(x[1:] - x[:-1]) or read both sides of the pixel")
+        taps = {(r - rmin, c - cmin): w for (r, c), w in taps.items()}
+        traced = traced._derive(taps=taps, pad=(pt_n, pb_n, pl_n, pr_n))
+        rmin = cmin = 0
+    if not traced.declared_extent and (rmin or cmin):
         raise ValueError("v1 expects a stencil whose smallest offset is 0 "
                          "(write slices starting at 0, e.g. img[:-2], img[1:-1], img[2:])")
 

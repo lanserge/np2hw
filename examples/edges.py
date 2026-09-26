@@ -65,6 +65,75 @@ def gaussian2d_zero(img):
              +   x[2:, :-2] + 2*x[2:, 1:-1] +   x[2:, 2:]) // 16).astype(np.uint8)
 
 
+def hdiff_zero_signed(img):
+    """Horizontal difference, ZERO borders, SIGNED arithmetic: negative out.
+
+    Signed taps read an unsigned pixel through a {1'b0, px} concatenation, so
+    the left-edge zero mux sits INSIDE a concatenation -- where an unsized 0
+    is illegal (indefinite width). The unsigned cases above never reach it."""
+    x = np.pad(img.astype(np.int16), ((0, 0), (1, 1)), mode="constant")
+    return (x[:, 2:] - x[:, :-2]).astype(np.int16)
+
+
+def laplace8_zero_signed(img):
+    """8-neighbour Laplacian, ZERO all borders, signed: both edge muxes."""
+    x = np.pad(img.astype(np.int16), 1, mode="constant")
+    return (8 * x[1:-1, 1:-1] - x[:-2, :-2] - x[:-2, 1:-1] - x[:-2, 2:]
+            - x[1:-1, :-2] - x[1:-1, 2:] - x[2:, :-2] - x[2:, 1:-1] - x[2:, 2:]
+            ).astype(np.int16)
+
+
+def vblur_padded_all(img):
+    """Vertical [1,2,1] on an image padded on ALL sides: the kernel reads
+    column 1 of the padded image and nothing else, so its offsets start past
+    zero. Normalised, with the column padding it never reads dropped."""
+    x = np.pad(img.astype(np.uint16), 1, mode="edge")
+    return ((x[:-2, 1:-1] + 2 * x[1:-1, 1:-1] + x[2:, 1:-1]) // 4).astype(np.uint8)
+
+
+def hblur_padded_all(img):
+    """The horizontal twin, zero borders: row 1 of the padded image only."""
+    x = np.pad(img.astype(np.uint16), 1, mode="constant")
+    return ((x[1:-1, :-2] + 2 * x[1:-1, 1:-1] + x[1:-1, 2:]) // 4).astype(np.uint8)
+
+
+def laplace4_zero_signed(img):
+    """4-neighbour Laplacian: no corner tap, so no offset reaches (0, 0)."""
+    x = np.pad(img.astype(np.int16), 1, mode="constant")
+    return (4 * x[1:-1, 1:-1] - x[:-2, 1:-1] - x[2:, 1:-1]
+            - x[1:-1, :-2] - x[1:-1, 2:]).astype(np.int16)
+
+
+def cross_in_wide_pad(img):
+    """A 3x3 cross inside a pad of 2: reads only the middle of the padding."""
+    x = np.pad(img.astype(np.uint16), 2, mode="edge")
+    return ((x[1:-3, 2:-2] + x[3:-1, 2:-2] + x[2:-2, 1:-3] + x[2:-2, 3:-1])
+            // 4).astype(np.uint8)
+
+
+def forward_diff_padded(img):
+    """A difference reaching forward on a pad of 1: its left padding unread."""
+    x = np.pad(img.astype(np.int16), 1)
+    return (x[1:-1, 2:] - x[1:-1, 1:-1]).clip(0, 255).astype(np.uint8)
+
+
+def backward_diff_padded(img):
+    """Its mirror reads only the TOP-LEFT padding: refused, not built wrong."""
+    x = np.pad(img.astype(np.int16), 1)
+    return x[1:-1, 1:-1] - x[1:-1, :-2]
+
+
+def refused_one_sided():
+    from np2hw import Image2D, to_ir
+    try:
+        to_ir(backward_diff_padded, Image2D("img", W, H, 8))
+    except ValueError as e:
+        print(f"  backward_diff  refused: {str(e)[:52]}...  PASS")
+        return True
+    print("  backward_diff  BUILT -- one-sided padding  FAIL")
+    return False
+
+
 def main():
     print("edge handling (full-size output, DUT vs np.pad oracle):")
     r = [
@@ -75,6 +144,14 @@ def main():
         check("gaussian2d_edge", gaussian2d_edge, A),  # full 2D replicate
         check("hblur_zero", hblur_zero, A),         # horizontal zero
         check("gaussian2d_zero", gaussian2d_zero, A),  # full 2D zero
+        check("hdiff_zero_s", hdiff_zero_signed, A),   # signed, left zero
+        check("lap8_zero_s", laplace8_zero_signed, A), # signed, all zero
+        check("vblur_padall", vblur_padded_all, A),    # 1-D in a 2-D pad
+        check("hblur_padall", hblur_padded_all, A),
+        check("lap4_zero_s", laplace4_zero_signed, A), # no corner tap
+        check("cross_pad2", cross_in_wide_pad, A),     # unread padding
+        check("fwd_diff_pad", forward_diff_padded, A), # left padding unread
+        refused_one_sided(),                           # left padding only
     ]
     oh, ow = gaussian2d_edge(A).shape
     print(f"\n2D gaussian output = {oh}x{ow} (input {H}x{W}) -> "

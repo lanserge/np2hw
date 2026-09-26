@@ -45,6 +45,18 @@ def main():
         check("pick_on", pick_filter, A, [en], {"enable": 1}),
         check("pick_off", pick_filter, A, [en], {"enable": 0}),
     ]
+    # A mux model is a module like any other: generate() hands back a Core
+    # whose interface a composer reads, on this path as on every other.
+    from np2hw import Image2D, generate, to_ir
+    from np2hw.verilog import Core
+    _, out = to_ir(bypass, Image2D("img", W, H, bits=8), en)
+    core = generate(out, module_name="bypass_core")
+    ports = core.interface if isinstance(core, Core) else {}
+    typed = (isinstance(core, Core) and ports.get("output") is not None
+             and [p[0] for p in ports.get("params", ())] == ["enable"])
+    print(f"  generate() returns a Core with its interface   "
+          f"{'PASS' if typed else 'FAIL'}")
+    r.append(typed)
     print("\n" + ("ALL PASS" if all(r) else "SOME FAILED"))
     return 0 if all(r) else 1
 

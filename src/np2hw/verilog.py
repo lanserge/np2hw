@@ -934,9 +934,19 @@ def _walk_expr_params(roots):
     and future -- is covered by construction."""
     from .ir import PExpr
 
-    parents, seen = [], set()
+    parents, seen, visited = [], set(), set()
 
     def walk(node):
+        # The expression is a DAG: a value the model reuses is ONE node
+        # reached by many paths. `seen` dedupes the leaves, but only
+        # `visited` stops the walk re-descending a shared subtree -- and
+        # without it the walk is exponential in depth while the emitted
+        # Verilog is linear (8 CORDIC rounds: 14.8M visits of 252 nodes).
+        # A skipped subtree's leaves were all collected the first time,
+        # so first-use order is unchanged.
+        if id(node) in visited:
+            return
+        visited.add(id(node))
         if node.op == "gather":
             parent = node.args[0]
             if ("gather", parent.name) not in seen:
@@ -963,9 +973,13 @@ def _wexpr_taps(root):
     """Window positions a windowed expression reads."""
     from .ir import PExpr
 
-    taps = set()
+    taps, visited = set(), set()
 
     def walk(node):
+        # A DAG: visit each shared node once (see _walk_expr_params).
+        if id(node) in visited:
+            return
+        visited.add(id(node))
         if node.op == "tap":
             taps.add((node.args[0], node.args[1]))
         for arg in node.args:
@@ -1632,7 +1646,7 @@ def _extend(name, frm, to, signed):
     return f"{{{pad}'b0, {name}}}"
 
 
-def _generate_mux(mux, module_name, sync_memory=False) -> dict:
+def _generate_mux(mux, module_name, sync_memory=False) -> Core:
     image = mux.image
     A, B = mux.a, mux.b
     in_bits = image.bits
@@ -1758,14 +1772,15 @@ def _generate_mux(mux, module_name, sync_memory=False) -> dict:
     verilog = ("\n".join(L)
                .replace("OUT_BITS-1", f"{out_bits-1}")
                .replace("OUT_SGN", "signed " if signed else ""))
-    return {
+    return Core({
         "verilog": verilog, "in_bits": in_bits, "out_bits": out_bits,
+        "interface": _interface(in_bits, out_bits, signed, params),
         "memories": _memories(module_name, in_bits, M, "WIDTH", "async"),
         "signed": signed, "params": [(n, b) for n, b, _, _, _ in params],
         "param_defaults": {n: d for n, _, _, d, _ in params},
         "M": M, "N": N, "out_rows": out_rows, "out_cols": out_cols,
         "module": module_name, "image": image,
-    }
+    })
 
 
 # --------------------------------------------------------------------------- #
@@ -2172,7 +2187,10 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             return f"cur{r}"
         base = f"row{r}_d{delay}"
         if zero_h:
-            return f"((!hf && ecol < {delay}) ? 0 : {base})"
+            # a SIZED zero: an unsized 0 is a 32-bit integer, which makes the
+            # mux of indefinite width -- illegal inside the {1'b0, px}
+            # concatenation a signed tap reads through
+            return f"((!hf && ecol < {delay}) ? {in_bits}'d0 : {base})"
         return base
 
     def px_read(r, dc):
@@ -2723,7 +2741,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
             return f"cur{r}"
         base = f"row{r}_d{delay}"
         if zero_h:                                       # left zero: cols < 0 -> 0
-            return f"((!hf && ecol < {delay}) ? 0 : {base})"
+            return f"((!hf && ecol < {delay}) ? {in_bits}'d0 : {base})"
         return base
 
     def term(r, c, w):
