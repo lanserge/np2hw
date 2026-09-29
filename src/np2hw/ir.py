@@ -119,27 +119,11 @@ class Rom:
         return self.data[idx]
 
 
-@dataclass
-class PExpr:
-    """One node of a POINTWISE expression DAG.
-
-    The trailing-op chain describes a straight line of operations on one
-    value; a lookup table cannot be written that way -- it derives a segment
-    index and a fraction from the same input, reads two table entries, and
-    recombines. This is that shape: a small DAG whose leaves are the spatial
-    result ('acc'), constants, and register-array reads ('gather'), and whose
-    interior is ordinary arithmetic. Every node carries the exact value
-    range it can take, because the emitter sizes every wire from the range,
-    not from a container width.
-
-    ops: 'acc' | 'const' | 'gather' | 'add' | 'sub' | 'mul' | 'shr'
-         | 'mask' | 'clip'
-    """
-
-    op: str
-    args: tuple
-    lo: int
-    hi: int
+# One node of a POINTWISE expression DAG, which is now a node of the one graph
+# (see docs/one-graph.md and np2hw.graph). Every node carries the exact value
+# range it can take, because the emitter sizes every wire from the range, not
+# from a container width.
+from .graph import PExpr  # noqa: E402  (re-exported: np2hw.ir.PExpr)
 
 
 @dataclass
@@ -167,6 +151,147 @@ class Indexer:
         return Indexer(start=self.start + child.start * self.step,
                        step=self.step * child.step,
                        count=child.count)
+
+
+@dataclass(frozen=True)
+class Index:
+    """One axis of a pixel read: ``start + step * i`` for ``i`` in ``0 .. count-1``.
+
+    Built by arithmetic, the way a model's slices compose::
+
+        i = Index(8)          # 0, 1, ..., 7
+        2 * i                 # step 2:           0, 2, ..., 14
+        3 * (2 * i)           # step 6
+        2 * i + 1             # step 2, start 1:  1, 3, ..., 15
+        3 * (2 * i + 1)       # 6 * i + 3: a multiply scales the start too
+
+    A start may also hold REGISTERS -- the CFA phase: ``2 * Index(n) + p.py``
+    reads the rows the register selects, and ``1 - p.py`` is the other half.
+    Registers enter the start only by addition, with integer coefficients,
+    so the index stays affine: a register never multiplies a register, and
+    never multiplies ``i``.
+
+    `compose` is indexing an indexed value: reading ``j`` from what was read
+    through ``self``. A NumPy slice is `from_slice`. The three numbers of an
+    `Indexer` are this, without the algebra and without registers.
+    """
+    count: int
+    step: int = 1
+    start: int = 0
+    regs: tuple = ()               # ((register name, coefficient), ...), sorted
+
+    def __post_init__(self):
+        if self.count < 0:
+            raise ValueError(f"an index cannot count {self.count}")
+        if self.step < 1:
+            raise ValueError(
+                f"step {self.step}: a stream is read forwards, one pixel after "
+                "another; a step below 1 reverses or repeats it")
+
+    # -- arithmetic ---------------------------------------------------------- #
+
+    def __mul__(self, k):
+        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
+            return NotImplemented
+        k = int(k)
+        if k < 1:
+            raise ValueError(f"an index scaled by {k} would not move forwards")
+        return Index(self.count, self.step * k, self.start * k,
+                     tuple((r, c * k) for r, c in self.regs))
+
+    __rmul__ = __mul__
+
+    def __add__(self, k):
+        if isinstance(k, (int, np.integer)) and not isinstance(k, bool):
+            return Index(self.count, self.step, self.start + int(k), self.regs)
+        if isinstance(k, PhaseRef):        # r, or 1 - r
+            if k.invert:
+                return Index(self.count, self.step, self.start + 1,
+                             _add_reg(self.regs, k.param.name, -1))
+            return Index(self.count, self.step, self.start,
+                         _add_reg(self.regs, k.param.name, 1))
+        if isinstance(k, Param):
+            return Index(self.count, self.step, self.start,
+                         _add_reg(self.regs, k.name, 1))
+        return NotImplemented
+
+    __radd__ = __add__
+
+    def __sub__(self, k):
+        if isinstance(k, (int, np.integer)) and not isinstance(k, bool):
+            return self + (-int(k))
+        return NotImplemented
+
+    def compose(self, child: "Index") -> "Index":
+        """Read ``child`` from what ``self`` reads: ``self(child(j))``."""
+        start = self.start + self.step * child.start
+        regs = self.regs
+        for r, c in child.regs:
+            regs = _add_reg(regs, r, c * self.step)
+        return Index(child.count, self.step * child.step, start, regs)
+
+    # -- reading it ---------------------------------------------------------- #
+
+    @property
+    def constant(self) -> bool:
+        """True when the start holds no register."""
+        return not self.regs
+
+    @property
+    def last(self) -> int:
+        """The last position read, for a constant start."""
+        self._need_constant("last")
+        return self.start + self.step * (self.count - 1)
+
+    def positions(self, regs: dict | None = None) -> list[int]:
+        """Every position read, with the registers given their values."""
+        base = self.start + sum(c * int((regs or {})[r]) for r, c in self.regs)
+        return [base + self.step * i for i in range(self.count)]
+
+    @classmethod
+    def from_slice(cls, s, dim: int) -> "Index":
+        """The index a NumPy slice (or an integer) reads from an axis of `dim`."""
+        if isinstance(s, (int, np.integer)) and not isinstance(s, bool):
+            s = int(s)
+            if not 0 <= s < dim:
+                raise IndexError(f"index {s} outside an axis of {dim}")
+            return cls(1, 1, s)
+        if not isinstance(s, slice):
+            raise TypeError(f"not an index or a slice: {s!r}")
+        start, stop, step = s.indices(dim)
+        return cls(len(range(start, stop, step)), step, start)
+
+    def to_indexer(self) -> "Indexer":
+        self._need_constant("an Indexer")
+        return Indexer(start=self.start, step=self.step, count=self.count)
+
+    def as_attr(self) -> tuple:
+        """Plain data, for a graph node's attributes."""
+        return (self.count, self.step, self.start, self.regs)
+
+    @classmethod
+    def from_attr(cls, a: tuple) -> "Index":
+        return cls(*a)
+
+    def _need_constant(self, what):
+        if self.regs:
+            raise ValueError(f"{what} of an index whose start holds registers "
+                             f"({self}) depends on their values")
+
+    def __repr__(self):
+        term = "i" if self.step == 1 else f"{self.step}*i"
+        start = "".join(f" {'+' if c > 0 else '-'} "
+                        f"{'' if abs(c) == 1 else f'{abs(c)}*'}{r}"
+                        for r, c in self.regs)
+        if self.start:
+            start += f" {'+' if self.start > 0 else '-'} {abs(self.start)}"
+        return f"Index({term}{start}, i < {self.count})"
+
+
+def _add_reg(regs: tuple, name: str, coef: int) -> tuple:
+    out = dict(regs)
+    out[name] = out.get(name, 0) + coef
+    return tuple(sorted((r, c) for r, c in out.items() if c))
 
 
 @dataclass(frozen=True)

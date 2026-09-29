@@ -5,7 +5,7 @@
 Public API for writing model files and driving the compiler:
     from np2hw import Param, Image2D, to_ir, generate
 """
-from .ir import Param, Params, Const, Image2D, Indexer, PhaseRef, Rom
+from .ir import Param, Params, Const, Image2D, Index, Indexer, PhaseRef, Rom
 from .frontend import coords, make_coords, saturate, to_ir
 from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl

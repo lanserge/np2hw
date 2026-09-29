@@ -1409,6 +1409,39 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     flag they refuse rather than emit it. Every core publishes what it
     inferred as `memories`, whichever way the flag is set.
     """
+    from .core.pipeline import CoreModule
+    if isinstance(out_line, CoreModule):
+        from .core import emit
+        from .core.pipeline import stage_ns
+        fits = clk_ns is None or stage_ns(out_line, dev) <= clk_ns
+        if framing == "height" and max_width is None and fits:
+            return _stamp_stream_geometry(
+                emit.generate(out_line.unit, module_name), out_line)
+        # an option the new compiler does not honour yet: the reference
+        # lowers this model instead, rather than the option being ignored --
+        # but only where the two agree. The new compiler computes in NumPy's
+        # dtypes; the reference computes an expression exactly, so a model
+        # whose arithmetic overflows a dtype comes out of them differently,
+        # and an option must not change what a model computes.
+        core_facts = emit.generate(out_line.unit, module_name)
+        from .trace import reference, trace as trace_graph
+        fn, image, params, channels = out_line.recipe
+        _, out_line = reference(trace_graph(fn, image, *params,
+                                            channels=channels),
+                                channels=channels)
+        meta = _generate_core(out_line, module_name, framing, max_width,
+                              clk_ns, label, dev, sync_memory=sync_memory)
+        want = (core_facts["out_bits"], bool(core_facts["signed"]))
+        got = (meta["out_bits"], bool(meta.get("signed", meta.get("out_signed", False))))
+        if want != got:
+            raise ValueError(
+                f"{module_name}: the reference compiler, which "
+                f"{'clk_ns' if not fits else 'framing/max_width'} needs, "
+                f"lowers this model to a {got[0]}-bit output where the new "
+                f"compiler makes {want[0]} bits -- its arithmetic leaves a "
+                "dtype that NumPy wraps and the reference does not. Widen the "
+                "arithmetic in the model, or drop the option")
+        return _stamp_stream_geometry(meta, out_line)
     return _stamp_stream_geometry(
         _generate_core(out_line, module_name, framing, max_width, clk_ns,
                        label, dev, sync_memory=sync_memory),

@@ -29,12 +29,13 @@ Const(value)                                            # compile-time constant
 ## Trace: `to_ir`
 
 ```python
-out_line = to_ir(fn, image, *params, out_bits=None)     # returns (stream, out_line)
+_, out = to_ir(fn, image, *params, out_bits=None, channels=1)
 ```
 - `fn` — the model function. `to_ir(fn, image, *param_objs)` (list form) or
   `to_ir(fn, image, params_namespace)` (single `Params`).
-- Returns `(None, Mux)` for an `np.where` model, else `(stream, out_line)`. Pass the
-  second element to `generate`.
+- Returns `(None, module)` when the new compiler (`np2hw.core`) takes the model
+  -- the pointwise family today -- `(None, Mux | PhaseCanvas | ChannelStack)` for
+  those shapes, else `(stream, out_line)`. Pass the second element to `generate`.
 
 ```python
 _, out = to_ir(model, Image2D("img", 1920, 1080, 8), Param("gain", np.uint8))

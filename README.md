@@ -91,9 +91,11 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/view.md](docs/view.md) | Live viewer: camera/screen sources, sliders, FPS |
 | [docs/zeroasic.md](docs/zeroasic.md) | Switchboard stack, Logik/FPGA, Platypus, cloud emulation |
 | [docs/api.md](docs/api.md) | Python API: `to_ir`, `generate`, adapter generators |
+| [docs/one-graph.md](docs/one-graph.md) | The one-graph compiler (`np2hw.core`): model, graph, lowering, how it is judged; worked cases in [one-graph-examples.md](docs/one-graph-examples.md) |
+| [docs/context-switching.md](docs/context-switching.md) | Design note: time-multiplexing several sensors through one datapath |
 
 Design rationale (the "why" behind each mechanism) lives in
-[`design/`](design/) (`01`–`07`).
+[`design/`](design/) (`01`–`08`).
 
 ## What it can do (built and validated)
 
@@ -123,7 +125,8 @@ Design rationale (the "why" behind each mechanism) lives in
   validated bit-exact against the NumPy reference.
 - **Tooling**: a generic CLI (`run` file-to-file, `view` live camera/screen with
   sliders + FPS); models are plain `.py` files (no built-in names).
-- **FuseSoC**: ships as a generator (`np2hw.core`, command `np2hw-fusesoc`) --
+- **FuseSoC**: ships as a generator (the `np2hw.core` FuseSoC file at the repo
+  root, command `np2hw-fusesoc`) --
   a consuming core names a model file and geometry, and the Verilog core is
   traced during that project's own build, byte-identical on every run.
 - **Stream plumbing** for the boundaries a traced core sits between: `skid`
@@ -149,7 +152,10 @@ The compiler, interfaces, register files, simulation backends and CLI are
 implemented and validated (NumPy == RTL, bit-exact, across the example suite).
 Pointwise expression DAGs cover LUT-with-gather and matrix arithmetic with
 register coefficients, so multi-channel packed streams (a CCM's shape) trace
-today. Next: reductions, >1 pixel/clock, and the FPGA bitstream flow via Logik
+today. Pointwise models compile through the new one-graph core
+([docs/one-graph.md](docs/one-graph.md)); the rest lower through the present
+compiler, its reference. Next: reductions, >1 pixel/clock, and the FPGA bitstream
+flow via Logik
 — see [docs/zeroasic.md](docs/zeroasic.md) for the path to FPGA/Platypus.
 
 ## What it generates, in hardware

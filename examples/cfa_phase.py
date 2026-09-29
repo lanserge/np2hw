@@ -113,16 +113,20 @@ def main():
     core = generate(canvas, module_name="cfa_phase")
 
     # The claim, stated as something that can fail: FOUR planes, but ONE
-    # accumulator and ONE coefficient mux -- not four datapaths, and no line
-    # buffers, because nothing was actually decimated.
-    accumulators = sum(1 for line in core.verilog.splitlines() if " acc = " in line)
-    muxes = core.verilog.count("case ({sel_row, sel_col})")
-    print(f"  {core['phases']} planes -> {accumulators} accumulator(s), "
-          f"{muxes} coefficient mux, {core.line_buffers} line buffers")
-    print(f"  coefficient selected by pixel position: "
-          f"{'sel_row = erow[0] ^ param_py' in core.verilog}")
-    shape_ok = (accumulators == 1 and muxes == 1 and core.line_buffers == 0
-                and "sel_row = erow[0] ^ param_py" in core.verilog)
+    # datapath and ONE selection by pixel position -- not four datapaths,
+    # and no line buffers, because nothing was actually decimated. Checked
+    # where the claim lives: the canonical graph has one select over the
+    # position's remainders and no canvas; the core has no line buffers.
+    from np2hw.core.canonical import canonicalise
+    from np2hw.core.graph import walk
+    from np2hw.core.trace import trace
+    c = canonicalise(trace(black_level, Image2D("img", W, H, bits=BITS),
+                           *params))
+    kinds = [n.kind for n in walk([c.output])]
+    selects, canvases = kinds.count("model.select"), kinds.count("model.canvas")
+    print(f"  4 planes -> {selects} select by position, {canvases} canvas, "
+          f"{core.line_buffers} line buffers")
+    shape_ok = selects == 1 and canvases == 0 and core.line_buffers == 0
 
     print("\n" + ("CFA PHASE PASS" if all(results) and shape_ok else "FAIL"))
     return 0 if all(results) and shape_ok else 1

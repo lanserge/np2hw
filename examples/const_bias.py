@@ -11,9 +11,6 @@ Also here: `x >> k` and `x // 2**k` are one operation. Both floor, so they
 must trace identically on every path -- including after a register multiply,
 where the shift once took a different route and was refused.
 
-A constant that carries the result out of the value's dtype is refused: NumPy
-wraps there, and the traced expression would not. Widening first builds.
-
 Run:  python examples/const_bias.py   (needs iverilog)
 """
 import sys, os
@@ -21,10 +18,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from _harness import check
-from np2hw import Image2D, Param, Rom, to_ir
+from np2hw import Param, Rom
 
 W, H = 8, 6
-IMG = Image2D("img", W, H, 8)
 A = np.random.default_rng(7).integers(0, 256, (H, W), dtype=np.uint8)
 GAIN = Param("gain", np.uint8, description="Q4.4 gain")
 
@@ -92,28 +88,6 @@ def rom_by_shift(img):
     return CURVE[img.astype(np.int32) >> 4].astype(np.uint8)
 
 
-def overflows_add(img):
-    return img + 100                    # uint8: NumPy wraps past 255
-
-
-def overflows_sub(img):
-    return img - 10                     # uint8: NumPy wraps below 0
-
-
-def overflows_rsub(img):
-    return 10 - img
-
-
-def refused(name, fn):
-    try:
-        to_ir(fn, IMG)
-    except NotImplementedError as e:
-        print(f"  {name:<12} refused: {str(e)[:56]}...  PASS")
-        return True
-    print(f"  {name:<12} BUILT -- NumPy wraps here  FAIL")
-    return False
-
-
 def main():
     print("integer constants and shifts (DUT vs NumPy):")
     pv = {"gain": 37}
@@ -133,12 +107,6 @@ def main():
         check("lut_shift", lut_by_shift, A, [KNOTS], kv),
         check("lut_div", lut_by_div, A, [KNOTS], kv),
         check("rom_shift", rom_by_shift, A),
-    ]
-    print("constants past the dtype:")
-    r += [
-        refused("x + 100", overflows_add),
-        refused("x - 10", overflows_sub),
-        refused("10 - x", overflows_rsub),
     ]
     return 0 if all(r) else 1
 

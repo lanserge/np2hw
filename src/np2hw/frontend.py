@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .ir import (ImageStreamer, Image2D, Indexer, ImageOp, Const, Param,
+from .ir import (ImageStreamer, Image2D, Index, Indexer, ImageOp, Const, Param,
                  Params, PExpr, ExprLine, PhaseRef)
 
 
@@ -836,6 +836,8 @@ def coords(img):
     already carry the same fact in their op names, so the analysis has
     somewhere to stand when it is written.
     """
+    if hasattr(img, "_coords"):              # a value that traces itself
+        return img._coords()
     # A multi-channel model is handed a Channels view, not the word
     # itself; position belongs to the pixel either way.
     if isinstance(img, Channels):
@@ -911,6 +913,8 @@ def make_coords(img, rows, cols):
     model using them stays runnable and stays its own oracle -- the same
     bargain `coords` makes.
     """
+    if hasattr(img, "_make_coords"):         # a value that traces itself
+        return img._make_coords(int(rows), int(cols))
     if isinstance(img, Channels):
         img = img.word
     rows, cols = int(rows), int(cols)
@@ -999,6 +1003,20 @@ def lower(traced: Traced):
                                            if root.lo >= 0 else traced.bits),
                               out_signed=root.lo < 0)
 
+    # The chain goes THROUGH the graph: encoded as graph nodes, and read
+    # back by recognising their shape. During the transition the reading is
+    # checked against the fields it replaces, which the lowering below no
+    # longer consults.
+    if traced.taps:
+        root, symbols = _chain_graph(traced)
+        read = _chain_from_graph(root, symbols)
+        old = (dict(traced.taps), list(traced.post), traced.pad, traced.mode,
+               traced.spatial_bits, bool(traced.spatial_signed))
+        if (read["taps"], read["post"], read["pad"], read["mode"],
+                read["spatial_bits"], read["spatial_signed"]) != old:
+            raise AssertionError("the chain did not survive the graph: "
+                                 f"{read!r} != {old!r}")
+        traced = traced._derive(**read)
     image, taps, post, shape = traced.image, traced.taps, traced.post, traced.shape
     if not taps:
         raise ValueError("empty expression")
@@ -1100,6 +1118,126 @@ def lower(traced: Traced):
                 "for same-size output")
         out.edge = (pt, pb, pl, pr, traced.mode, image.height, image.width)
     return s, out
+
+
+# --------------------------------------------------------------------------- #
+# The chain form in the graph (stage 1, step 2; see docs/one-graph.md)
+# --------------------------------------------------------------------------- #
+
+def _param_node(b, name, bits, signed, default, description):
+    return b.op("model.param", name=name, bits=bits, signed=bool(signed),
+                default=default, description=description)
+
+
+def _chain_graph(traced: Traced):
+    """A chain as graph nodes.
+
+    The spatial sum is one `lin` over window taps -- a register coefficient
+    a `mul` of its tap and the register inside it -- wrapped in the
+    accumulator's declared container; each trailing operation is then its
+    own node. Padding and edge mode are facts of the taps. Registers are
+    symbols, their objects kept by name for the lowering that needs them.
+    """
+    from . import graph as G
+    b = G.Builder(fold=False, locations=False)
+    image = traced.image
+    lo = -(1 << (image.bits - 1)) if image.signed else 0
+    hi = ((1 << (image.bits - 1)) - 1) if image.signed else (1 << image.bits) - 1
+    operands, weights = [], []
+    rows, cols = traced.shape
+    for (r, c), w in sorted(traced.taps.items(), key=lambda kv: kv[0]):
+        # a read of the (padded) source: one index per axis over the extent
+        tap = b.op("model.tap", row=(Index(rows) + r).as_attr(),
+                   col=(Index(cols) + c).as_attr(), shift=0, field=None,
+                   lo=lo, hi=hi, pad=tuple(traced.pad), mode=traced.mode)
+        if isinstance(w, Param):
+            b.symbols[w.name] = {"object": w}
+            tap = b.op("model.mul", tap,
+                       _param_node(b, w.name, w.bits, w.signed, w.default,
+                                   w.description), tap_coefficient=True)
+            weights.append(1)
+        else:
+            weights.append(int(w))
+        operands.append(tap)
+    node = b.node("model.lin", operands, {"weights": tuple(weights)}).value
+    node = b.op("model.declare", node, bits=traced.spatial_bits,
+                signed=bool(traced.spatial_signed))
+    for op in traced.post:
+        kind = op[0]
+        if kind == "shr":
+            node = b.op("model.shr", node, amount=op[1])
+        elif kind == "mulc":
+            node = b.op("model.mul", node, b.const(op[1]))
+        elif kind in ("mulp", "addp"):
+            reg = _param_node(b, *op[1:6])
+            node = b.op("model.mul" if kind == "mulp" else "model.add",
+                        node, reg)
+        elif kind == "clip":
+            node = b.op("model.clip", node, lo=op[1], hi=op[2])
+        elif kind == "trunc":
+            node = b.op("model.trunc", node, bits=op[1])
+        else:
+            raise NotImplementedError(f"chain op {kind!r} has no graph node")
+    return node, b.symbols
+
+
+def _chain_from_graph(root, symbols) -> dict:
+    """Read a chain back out of the graph, by the shape `_chain_graph`
+    builds: trailing operations down to the declared container, then the
+    `lin` of taps inside it."""
+    def split(n, want):
+        """(the operand of kind `want`, the other one)."""
+        a, c = n.operands
+        return (a, c) if a.node.kind == want else (c, a)
+
+    post = []
+    v = root
+    while v.node.kind != "model.declare":
+        n = v.node
+        if n.kind == "model.shr":
+            post.append(("shr", n.attr("amount")))
+            v = n.operands[0]
+        elif n.kind == "model.clip":
+            post.append(("clip", n.attr("lo"), n.attr("hi")))
+            v = n.operands[0]
+        elif n.kind == "model.trunc":
+            post.append(("trunc", n.attr("bits")))
+            v = n.operands[0]
+        elif n.kind in ("model.mul", "model.add"):
+            kinds = {o.node.kind for o in n.operands}
+            if "model.const" in kinds and n.kind == "model.mul":
+                c, v = split(n, "model.const")
+                post.append(("mulc", c.node.attr("value")))
+            elif "model.param" in kinds:
+                p, v = split(n, "model.param")
+                pn = p.node
+                post.append(("mulp" if n.kind == "model.mul" else "addp",
+                             pn.attr("name"), pn.attr("bits"),
+                             pn.attr("signed"), pn.attr("default"),
+                             pn.attr("description")))
+            else:
+                raise NotImplementedError(f"{n.kind} outside the chain shape")
+        else:
+            raise NotImplementedError(f"{n.kind} outside the chain shape")
+    post.reverse()
+    decl = v.node
+    lin = decl.operands[0].node
+    taps, pad, mode = {}, (0, 0, 0, 0), "none"
+    for operand, w in zip(lin.operands, lin.attr("weights")):
+        n = operand.node
+        if n.kind == "model.mul":                 # a register coefficient
+            t, p = split(n, "model.tap")
+            name = p.node.attr("name")
+            n, w = t.node, symbols[name]["object"]
+        row, col = Index.from_attr(n.attr("row")), Index.from_attr(n.attr("col"))
+        if row.step != 1 or col.step != 1 or not (row.constant and col.constant):
+            raise NotImplementedError(
+                f"a chain reads with step 1 and a constant start: {row}, {col}")
+        taps[(row.start, col.start)] = w
+        pad, mode = n.attr("pad"), n.attr("mode")
+    return {"taps": taps, "post": post, "pad": pad, "mode": mode,
+            "spatial_bits": decl.attr("bits"),
+            "spatial_signed": decl.attr("signed")}
 
 
 # --------------------------------------------------------------------------- #
@@ -1409,19 +1547,13 @@ def _make_mux(cond, x, y):
 
 
 def to_ir(fn, image: Image2D, *params, out_bits=None, channels=1):
-    # a single Params namespace -> hand the model its Param-valued view
-    if len(params) == 1 and isinstance(params[0], Params):
-        params = (params[0].trace_view(),)
-    source = Traced.image_input(image)
-    if channels > 1:
-        # A multi-channel input word: the model indexes pixel[..., c] and
-        # never writes the field extraction itself.
-        source = Channels(source, channels)
-    traced = fn(source, *params)
-    if isinstance(traced, ChannelStack):
-        traced.in_channels = channels
-    if isinstance(traced, (Mux, PhaseCanvas, ChannelStack)):
-        return None, traced                  # generate() handles these terminals
-    if out_bits is not None:
-        traced = traced.astype(out_bits)
-    return lower(traced)
+    """Trace a NumPy model: the graph (np2hw.trace), lowered.
+
+    The model runs once, on traced values, and is recorded as the one graph;
+    what reaches the emitters comes from that graph alone. The classes
+    below (Traced and its kin) are, until lowering passes replace them, the
+    lowering the graph is evaluated onto -- no longer the tracer.
+    """
+    from . import trace
+    return trace.to_ir(fn, image, *params, out_bits=out_bits,
+                       channels=channels)
