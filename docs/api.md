@@ -8,6 +8,7 @@ from np2hw import compose, Instance, Connection, Port, StreamType   # compositio
 from np2hw import Netlist, Node, Endpoint                          # graph, pre-emission
 from np2hw import Reg, RegBlock, RegInstance, AddrMap, systemrdl   # register maps
 from np2hw import axil_regfile, control_wrap                       # control plane
+from np2hw import skid, tee, cdc_fifo, frame_history               # plumbing
 from np2hw.testing import (Beat, frame_to_beats, beats_to_words,   # verification
                            check_framing, reset_stream, run_frame,
                            AxiLiteMaster, axis_video_map)
@@ -200,6 +201,18 @@ video cannot be stalled, only missed -- data loss must be observable. The
 result self-describes as a source (no stream input), so `compose()` puts it
 at the head of a pipeline. Proven bit-exact against the reference codec's
 containers in `examples/bayerlink_in.py`.
+
+## A stream's recent past (`np2hw.frame_history`)
+
+```python
+frame_history(frames, bits, width, height, loop=None,
+              module_name="frame_history") -> dict
+```
+Each pixel delivered with its `frames` predecessors at the same position,
+as channels of one word, with a tag per frame -- for a model that computes
+across frames, a time-of-flight phase set say. The store sits behind the
+`<module_name>_mem` seam, under the same contract as the line buffers
+([memories.md](memories.md)), and is reported in the core's `memories`.
 
 ## Verification models (`np2hw.testing`)
 

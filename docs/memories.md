@@ -78,6 +78,7 @@ the seam's contract, which is why the module stays as small as it is.
 | CFA phases — `out[py::2, px::2] = ...` | phase stencil | **registered** | accepted, behind the seam |
 | unpadded window | general core | combinational | **refused** |
 | `np.where(enable, A, B)` over a window | mux | combinational | **refused** |
+| a stream's recent past | `frame_history` | **registered** | behind its own seam, `<module>_mem`, same four rules; reported in its `memories` |
 
 The two combinational readers are not a defect. On an FPGA a
 combinational read is distributed RAM, and for a window that fits it is
