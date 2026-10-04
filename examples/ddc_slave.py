@@ -239,7 +239,9 @@ def main():
 
     lines = [l.strip() for l in v.splitlines()]
     check("open-drain by construction: sda_pull is the only SDA output",
-          "output wire sda_pull," in v
+          [p["name"] for p in core["interface"]["ports"]
+           if p["direction"] != "input" and "sda" in p["name"]]
+          == ["sda_pull"]
           and not any("sda_o" in l or "assign sda " in l for l in lines),
           "a push-pull driver simulates fine and shorts on a PCB")
     check("the pins cross two flops and a majority before any logic",

@@ -249,39 +249,22 @@ def compose(module_name: str, instances, connections, ports,
         a("//")
         L.extend(notes)
     a("")
-    a(f"module {module_name} (")
-    a("    input  wire        clk,")
-    a("    input  wire        rst,")
-    for index, port in enumerate(ports):
-        last = index == len(ports) - 1
-        if port.comment:
-            # Wrapped, not truncated: a description carried into the RTL is only
-            # useful in full, and an 800-column comment is not readable.
-            for line in textwrap.wrap(" ".join(port.comment.split()), width=72):
-                a(f"    // {line}")
+    from .ports import Pin, header as port_header, published
+    from .stream import stream_pins
+    pins = [Pin("clk", "input"), Pin("rst", "input")]
+    for port in ports:
+        # Wrapped, not truncated: a description carried into the RTL is only
+        # useful in full, and an 800-column comment is not readable.
+        about = tuple(textwrap.wrap(" ".join(port.comment.split()), width=72)) \
+            if port.comment else ()
         if port.stream is None:
-            rng = "" if port.width == 1 else f"[{port.width - 1}:0] "
-            sign = "signed " if port.signed else ""
-            direction = "input  wire" if port.direction == "in" else "output wire"
-            a(f"    {direction} {sign}{rng}{port.name}" + ("" if last else ","))
+            pins.append(Pin(port.name,
+                            "input" if port.direction == "in" else "output",
+                            port.width, signed=port.signed, before=about))
             continue
-        bits = port.stream.data_bits
-        if port.direction == "in":
-            a(f"    input  wire        {port.name}_valid,")
-            a(f"    output wire        {port.name}_ready,")
-            a(f"    input  wire [{bits - 1}:0] {port.name}_data,")
-            flags = [f"    input  wire        {port.name}_{f}"
-                     for f in port.stream.flags]
-        else:
-            a(f"    output wire        {port.name}_valid,")
-            a(f"    input  wire        {port.name}_ready,")
-            a(f"    output wire [{bits - 1}:0] {port.name}_data,")
-            flags = [f"    output wire        {port.name}_{f}"
-                     for f in port.stream.flags]
-        for i, line in enumerate(flags):
-            tail = "" if (last and i == len(flags) - 1) else ","
-            a(line + tail)
-    a(");")
+        pins += stream_pins(port.name, port.direction, port.stream.data_bits,
+                            flags=port.stream.flags, before=about)
+    L += port_header(module_name, pins)
     a("")
 
     a("    // Stream nets. Every boundary carries the full ready/valid handshake,")
@@ -571,9 +554,10 @@ def compose(module_name: str, instances, connections, ports,
         a("")
 
     a("endmodule")
+    interface = _composed_interface(module_name, ports)
+    interface["ports"] = published(pins)
     return {"verilog": "\n".join(L), "module": module_name,
-            "nets": sorted(sources),
-            "interface": _composed_interface(module_name, ports)}
+            "nets": sorted(sources), "interface": interface}
 
 
 def _composed_interface(module_name: str, ports) -> dict:

@@ -34,6 +34,8 @@ tune because there is no phase to get wrong.
 """
 from __future__ import annotations
 
+from .ports import Pin, header, published
+
 
 def framebuffer_read(data_bits: int = 32,
                      clk_hz: int = 0,
@@ -88,83 +90,80 @@ def framebuffer_read(data_bits: int = 32,
     a(f"// {fifo_depth} beats of prefetch. Addresses come from the ports,")
     a("// so the first beat emitted IS the frame's first pixel and says so")
     a("// on tuser: there is no start offset to measure or correct.")
-    a(f"module {module_name} (")
     freq = f", FREQ_HZ {clk_hz}" if clk_hz else ""
-    a(f'    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axi:m_axis{freq}" *)')
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)')
-    a("    input  wire        clk,")
-    a('    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)')
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst_n RST" *)')
-    a("    input  wire        rst_n,   // AXI convention: active LOW")
-    a("    // WHERE the frame is, and what shape. Ports, not registers:")
-    a("    // a stream whose geometry changes moves these and the next")
-    a("    // frame is already right. Sampled at each frame's start, so a")
-    a("    // change lands on a boundary and never mid-picture.")
-    a(f"    input  wire [{addr_bits-1}:0] base_addr,")
-    a("    input  wire [15:0] line_beats,   // beats of PICTURE per line")
-    a("    input  wire [15:0] lines,")
-    a(f"    input  wire [{addr_bits-1}:0] stride_bytes, // line pitch in memory")
-    a("    // Written from wherever software lives, which is not this")
-    a("    // clock. ENABLE is synchronised because a single bit crossing")
-    a("    // asynchronously is exactly what a synchroniser is for. The")
-    a("    // geometry and the address are NOT, and must not be sampled")
-    a("    // until after enable has risen: they are quasi-static by")
-    a("    // contract -- write them, then enable -- so a synchroniser on")
-    a("    // each would cost 80 flops to protect a value that is already")
-    a("    // still. Enable rising is the handshake that says so.")
-    a("    input  wire        enable,")
-    a('    (* X_INTERFACE_PARAMETER = "READ_WRITE_MODE READ_ONLY" *)')
-    a("    // AXI4 read address")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARID" *)')
-    a("    output reg  [3:0]  m_axi_arid,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARADDR" *)')
-    a(f"    output reg  [{addr_bits-1}:0] m_axi_araddr,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARLEN" *)')
-    a("    output reg  [7:0]  m_axi_arlen,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARSIZE" *)')
-    a("    output wire [2:0]  m_axi_arsize,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARBURST" *)')
-    a("    output wire [1:0]  m_axi_arburst,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARCACHE" *)')
-    a("    output wire [3:0]  m_axi_arcache,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARPROT" *)')
-    a("    output wire [2:0]  m_axi_arprot,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARVALID" *)')
-    a("    output reg         m_axi_arvalid,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi ARREADY" *)')
-    a("    input  wire        m_axi_arready,")
-    a("    // AXI4 read data")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi RDATA" *)')
-    a(f"    input  wire [{data_bits-1}:0] m_axi_rdata,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi RRESP" *)')
-    a("    input  wire [1:0]  m_axi_rresp,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi RLAST" *)')
-    a("    input  wire        m_axi_rlast,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi RVALID" *)')
-    a("    input  wire        m_axi_rvalid,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi RREADY" *)')
-    a("    output wire        m_axi_rready,")
-    a("    // the raster's stream")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TDATA" *)')
-    a(f"    output wire [{data_bits-1}:0] m_axis_tdata,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TVALID" *)')
-    a("    output wire        m_axis_tvalid,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TREADY" *)')
-    a("    input  wire        m_axis_tready,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TUSER" *)')
-    a("    output wire        m_axis_tuser,   // first beat of a frame")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TLAST" *)')
-    a("    output wire        m_axis_tlast,   // last beat of a line")
-    a("    // STICKY until reset, because a fetch that silently fell")
-    a("    // behind is a picture nobody can explain later.")
-    a("    output reg         underflow,      // the raster asked, we had none")
-    a("    output reg         slverr,")
-    a("    // WHY it is doing nothing, which a sticky error bit cannot")
-    a("    // say. Held in reset, never enabled, and asking a bus that")
-    a("    // never answers all look identical from outside: no data, no")
-    a("    // error. One bit each and they stop looking identical.")
-    a("    output wire [7:0]  dbg")
-    a(");")
+
+    def bus(kind, bundle, signal, name, direction, width=1, reg=False,
+            **kw):
+        return Pin(name, direction, width, reg=reg,
+                   bus=(f"xilinx.com:interface:{kind}:1.0", bundle, signal),
+                   **kw)
+
+    def axi(signal, *args, **kw):
+        return bus("aximm", "m_axi", signal, f"m_axi_{signal.lower()}",
+                   *args, **kw)
+
+    def axis(signal, *args, **kw):
+        return bus("axis", "m_axis", signal, f"m_axis_{signal.lower()}",
+                   *args, **kw)
+
+    pins = [
+        Pin("clk", "input", attribute=(
+            f'(* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axi:m_axis{freq}" *)',
+            '(* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)')),
+        Pin("rst_n", "input", note="AXI convention: active LOW", attribute=(
+            '(* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)',
+            '(* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst_n RST" *)')),
+        Pin("base_addr", "input", addr_bits, before=(
+            "WHERE the frame is, and what shape. Ports, not registers:",
+            "a stream whose geometry changes moves these and the next",
+            "frame is already right. Sampled at each frame's start, so a",
+            "change lands on a boundary and never mid-picture.")),
+        Pin("line_beats", "input", 16, note="beats of PICTURE per line"),
+        Pin("lines", "input", 16),
+        Pin("stride_bytes", "input", addr_bits, note="line pitch in memory"),
+        Pin("enable", "input", before=(
+            "Written from wherever software lives, which is not this",
+            "clock. ENABLE is synchronised because a single bit crossing",
+            "asynchronously is exactly what a synchroniser is for. The",
+            "geometry and the address are NOT, and must not be sampled",
+            "until after enable has risen: they are quasi-static by",
+            "contract -- write them, then enable -- so a synchroniser on",
+            "each would cost 80 flops to protect a value that is already",
+            "still. Enable rising is the handshake that says so.")),
+        Pin("m_axi_arid", "output", 4, reg=True,
+            before=("AXI4 read address",),
+            attribute='(* X_INTERFACE_PARAMETER = "READ_WRITE_MODE READ_ONLY" *)',
+            bus=("xilinx.com:interface:aximm:1.0", "m_axi", "ARID")),
+        axi("ARADDR", "output", addr_bits, reg=True),
+        axi("ARLEN", "output", 8, reg=True),
+        axi("ARSIZE", "output", 3),
+        axi("ARBURST", "output", 2),
+        axi("ARCACHE", "output", 4),
+        axi("ARPROT", "output", 3),
+        axi("ARVALID", "output", reg=True),
+        axi("ARREADY", "input"),
+        axi("RDATA", "input", data_bits, before=("AXI4 read data",)),
+        axi("RRESP", "input", 2),
+        axi("RLAST", "input"),
+        axi("RVALID", "input"),
+        axi("RREADY", "output"),
+        axis("TDATA", "output", data_bits, before=("the raster's stream",)),
+        axis("TVALID", "output"),
+        axis("TREADY", "input"),
+        axis("TUSER", "output", note="first beat of a frame"),
+        axis("TLAST", "output", note="last beat of a line"),
+        Pin("underflow", "output", reg=True,
+            note="the raster asked, we had none", before=(
+                "STICKY until reset, because a fetch that silently fell",
+                "behind is a picture nobody can explain later.")),
+        Pin("slverr", "output", reg=True),
+        Pin("dbg", "output", 8, before=(
+            "WHY it is doing nothing, which a sticky error bit cannot",
+            "say. Held in reset, never enabled, and asking a bus that",
+            "never answers all look identical from outside: no data, no",
+            "error. One bit each and they stop looking identical.")),
+    ]
+    L += header(module_name, pins)
     a("    // One name for it inside, so the logic reads the way it did")
     a("    // before the port took the bus's convention.")
     a("    wire rst = ~rst_n;")
@@ -438,6 +437,7 @@ def framebuffer_read(data_bits: int = 32,
         "clock": "clk",
         "reset": "rst",
         "param_prefix": "param_",
+        "ports": published(pins),
         "input": None,
         "output": {"prefix": "m_axis", "data_bits": data_bits,
                    "flags": ("tuser", "tlast")},

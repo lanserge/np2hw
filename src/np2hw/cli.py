@@ -552,7 +552,8 @@ def main(argv=None):
     v.add_argument("--source", choices=("camera", "screen", "test"), default="screen")
     v.add_argument("--backend", choices=("numpy", "sim", "switchboard", "sb"),
                    default="numpy", help="numpy/sim (live, sliders) or switchboard "
-                        "(through the SB stack; params fixed at build, slower)")
+                        "(through the SB stack, sliders live through its control "
+                        "wrap; slower)")
     v.add_argument("--sim", choices=("cxxrtl",), default="cxxrtl")
     v.add_argument("--sb-tool", choices=("verilator", "icarus"), default="verilator",
                    help="engine for --backend switchboard")

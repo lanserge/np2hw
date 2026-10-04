@@ -45,9 +45,16 @@ _, out = to_ir(model, Image2D("img", 1920, 1080, 8), Param("gain", np.uint8))
 ## Generate RTL: `generate`
 
 ```python
-core = generate(out_line, module_name="np2hw_top",
-                framing="height", max_width=None)
+core = generate(out_line, module_name="np2hw_top", framing="height",
+                max_width=None, clk_ns=None, label=None, dev=None,
+                sync_memory=False)
 ```
+
+| arg | meaning |
+|---|---|
+| `framing="height"` | default: self-frame by counting to HEIGHT |
+| `framing="eof"` | height-agnostic: `in_eof`/VSYNC drives the flush ([framing-and-resolution.md](framing-and-resolution.md)); edge core only |
+| `max_width=N` | runtime-variable width: `MAX_WIDTH` param + `active_width` register |
 
 Returns a `Core`. It is a `dict` subclass, so the detail keys np2hw's own
 wrappers read are still there, but the **public surface is the typed one**:
@@ -77,6 +84,18 @@ WIDTH/HEIGHT and only needs `sof` to re-anchor); `output.flags` is what it
 regenerates. `output` is `None` for a SINK — a module that consumes a stream and
 produces none, and therefore never stalls its source.
 
+The structural generators — `skid`, `cdc_fifo`, `tee`, `bayerlink_in`,
+`scanout`, `ddc_slave`, `framebuffer_read`, `frame_history`, `axil_regfile` —
+also publish `interface["ports"]`: EVERY port, video pins and status words and
+bus ports as much as streams, as `{"name", "direction", "width"}`, plus
+`"bus": {"vlnv", "bundle", "logical"}` for a port that is part of a bus. A width
+the module takes from a parameter is published as its expression (`"W"`), with
+the defaults under `interface["parameters"]`. The header is written from the
+same list (`np2hw.ports`: `Pin`, `header`, `published`), so the two cannot
+differ; `np2hw.ports.elaborated_ports` asks Verilator what a module really
+elaborates to, which is how `examples/port_lists.py` holds every list to its
+module.
+
 ## Compose: `compose`
 
 Instantiate generated cores and wire them as a netlist. See
@@ -102,12 +121,7 @@ Checked before a line is emitted: every net's width **and domain** must match
 (a 12-bit Bayer stream and a 12-bit luma stream are identical to a compiler and
 nonsense to connect), and an output may feed one consumer that applies
 backpressure plus any number of sinks. Two blocking consumers need a buffering
-fork, which does not exist yet, so it is refused.
-| arg | meaning |
-|---|---|
-| `framing="height"` | default: self-frame by counting to HEIGHT |
-| `framing="eof"` | height-agnostic: `in_eof`/VSYNC drives the flush ([framing-and-resolution.md](framing-and-resolution.md)); edge core only |
-| `max_width=N` | runtime-variable width: `MAX_WIDTH` param + `active_width` register |
+fork; that case is refused (Next: buffered forks).
 
 Returns a **meta dict** consumed by the adapters and testbenches:
 
@@ -188,12 +202,12 @@ See `examples/netlist_rules.py`.
 ## Link receivers (`np2hw.video_in`)
 
 ```python
-bayerlink_in(cam_width, cam_height, module_name=..., fifo_depth=None,
-             lane_map=(0, 1, 2), vsync_active_high=True) -> dict
+bayerlink_in(max_line_bytes=4096, module_name="bayerlink_in", fifo_depth=1024,
+             lane_map=(0, 1, 2), vsync_active_high=True, bits=12) -> dict
 ```
 The receiving end of the bayerlink protocol
 (github.com/bayerlink/bayerlink): parallel video from an HDMI/DVI receiver
-in, one 12-bit sample per clock out on the standard elastic stream. A
+in, one sample per clock out on the standard elastic stream, aligned to `bits`. A
 half-line FIFO absorbs the two-samples-per-pixel burst (the protocol's rate
 rule is the condition it works under), `lane_map` fixes the byte-lane
 permutation at generation time, and `overflow` is a STICKY flag because

@@ -62,7 +62,9 @@ time, so the protocol tables have exactly one owner.
 """
 from __future__ import annotations
 
-from .stream import stream_port_attribute
+from .ports import Pin, header, published
+from .stream import (bundle_name, clock_attribute, reset_attribute,
+                     stream_pins)
 
 from .stream import skid
 
@@ -170,50 +172,48 @@ def bayerlink_in(max_line_bytes: int = 4096,
     a("// test pattern). Header CRC is host business; fabric refuses on")
     a("// magic, fourcc, group alignment and capacity -- sticky, coded.")
     skid_name = f"{module_name}_slice"
-    a(f"module {module_name} (")
-    a("    input  wire        clk,     // the recovered pixel clock")
-    a("    input  wire        rst,")
-    a("    // Clears the DIAGNOSTIC tallies below, and only those. It is")
-    a("    // separate from rst because rst is now the LINK's: a reset")
-    a("    // arrives on every cable drop, and a tally cleared by the")
-    a("    // event it exists to count is not a tally. This one means a")
-    a("    // person, or software, asking to start counting again.")
-    a("    input  wire        diag_clear,")
-    a("    // Parallel video from the HDMI/DVI receiver. No ready exists on")
-    a("    // this side: video cannot be stalled, only missed.")
-    a("    input  wire        vid_de,")
-    a("    input  wire        vid_vsync,")
-    a("    input  wire [23:0] vid_data,")
-    a("    // The elastic stream a generated core consumes. Samples are")
-    a(f"    // ALIGNED to {bits} bits: whatever depth the header names,")
-    a("    // what leaves here is full scale at this build's depth.")
-    a(f"    {stream_port_attribute('out', 'valid')}")
-    a("    output wire        out_valid,")
-    a(f"    {stream_port_attribute('out', 'ready')}")
-    a("    input  wire        out_ready,")
-    a(f"    {stream_port_attribute('out', 'data')}")
-    a(f"    output wire [{bits - 1}:0] out_data,")
-    a(f"    {stream_port_attribute('out', 'sof')}")
-    a("    output wire        out_sof,")
-    a(f"    {stream_port_attribute('out', 'eol')}")
-    a("    output wire        out_eol,")
-    a(f"    {stream_port_attribute('out', 'last')}")
-    a("    output wire        out_last,")
-    a("    // STICKY until reset: unobservable loss is a debugging season.")
-    a("    output reg         overflow,")
-    a("    output reg         refused,")
-    a("    output reg  [2:0]  refuse_code,  // 1 magic, 2 fourcc, 3 group")
-    a("                                     // alignment, 4 capacity, 5 zero")
-    a("    // The last ACCEPTED header, for hosts to observe.")
-    a("    output reg  [4:0]  hdr_bits,")
-    a("    output reg  [15:0] hdr_width,")
-    a("    output reg  [15:0] hdr_height,")
-    a("    output reg  [1:0]  hdr_phase,")
-    a("    output reg  [7:0]  hdr_source_id,  // WHICH camera sent it")
-    a("    output reg  [31:0] hdr_frame_seq,  // WHICH frame it is")
-    a("    output reg  [7:0]  resync_count,   // stream restarts, wrapping")
-    a("    output reg         hdr_valid")
-    a(");")
+    pins = [
+        Pin("clk", "input", note="the recovered pixel clock",
+            attribute=clock_attribute("clk", bundle_name("out"), "rst")),
+        Pin("rst", "input", attribute=reset_attribute("rst")),
+        Pin("diag_clear", "input", before=(
+            "Clears the DIAGNOSTIC tallies below, and only those. It is",
+            "separate from rst because rst is now the LINK's: a reset",
+            "arrives on every cable drop, and a tally cleared by the",
+            "event it exists to count is not a tally. This one means a",
+            "person, or software, asking to start counting again.")),
+        Pin("vid_de", "input", before=(
+            "Parallel video from the HDMI/DVI receiver. No ready exists on",
+            "this side: video cannot be stalled, only missed.")),
+        Pin("vid_vsync", "input"),
+        Pin("vid_data", "input", 24),
+        *stream_pins("out", "out", bits, flags=("sof", "eol", "last"),
+                     before=(
+            "The elastic stream a generated core consumes. Samples are",
+            f"ALIGNED to {bits} bits: whatever depth the header names,",
+            "what leaves here is full scale at this build's depth.")),
+    ]
+    pins += [
+        Pin("overflow", "output", reg=True, before=(
+            "STICKY until reset: unobservable loss is a debugging season.",)),
+        Pin("refused", "output", reg=True),
+        Pin("refuse_code", "output", 3, reg=True,
+            note=("1 magic, 2 fourcc, 3 group",
+                  "alignment, 4 capacity, 5 zero")),
+        Pin("hdr_bits", "output", 5, reg=True,
+            before=("The last ACCEPTED header, for hosts to observe.",)),
+        Pin("hdr_width", "output", 16, reg=True),
+        Pin("hdr_height", "output", 16, reg=True),
+        Pin("hdr_phase", "output", 2, reg=True),
+        Pin("hdr_source_id", "output", 8, reg=True,
+            note="WHICH camera sent it"),
+        Pin("hdr_frame_seq", "output", 32, reg=True,
+            note="WHICH frame it is"),
+        Pin("resync_count", "output", 8, reg=True,
+            note="stream restarts, wrapping"),
+        Pin("hdr_valid", "output", reg=True),
+    ]
+    L += header(module_name, pins)
     a(f"    localparam MAX_LINE_BYTES = {max_line_bytes};")
     a("")
     a("    // ---- position in the display frame ----")
@@ -872,6 +872,7 @@ def bayerlink_in(max_line_bytes: int = 4096,
         "clock": "clk",
         "reset": "rst",
         "param_prefix": "param_",
+        "ports": published(pins),
         # A SOURCE: no stream input (the video side is not an np2hw stream,
         # and cannot carry ready), one stream output.
         "input": None,

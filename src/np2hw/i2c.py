@@ -40,6 +40,9 @@ a NACK, never a wrong ack.
 """
 from __future__ import annotations
 
+from .ports import Pin, header, published
+from .stream import clock_attribute, reset_attribute
+
 
 def ddc_slave(reg_addr7: int = 0x37,
               edid: bytes | None = None,
@@ -84,46 +87,33 @@ def ddc_slave(reg_addr7: int = 0x37,
     a("// the only output is sda_pull, so no path can drive the line")
     a("// high. A SLVERR from the fabric becomes a NACK on the bus --")
     a("// the register file's refusal contract, translated.")
-    a(f"module {module_name} #(")
-    a(f"    parameter AW = {AW}")
-    a(") (")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK", '
-      'X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF M_AXI, '
-      'ASSOCIATED_RESET rst" *)')
-    a("    input  wire clk,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rst RST", '
-      'X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
-    a("    input  wire rst,")
-    a("    input  wire scl_i,")
-    a("    input  wire sda_i,")
-    a("    output wire sda_pull,")
-    a("    // AXI-lite master: the register file's language. The")
-    a("    // X_INTERFACE_INFO lines are the same lesson as reset")
-    a("    // polarity: DECLARE at the owner what a block design")
-    a("    // would otherwise guess.")
-    m = "xilinx.com:interface:aximm:1.0 M_AXI"
-    for attr, decl in [
-        (f"{m} AWADDR",  "output reg  [AW-1:0] m_awaddr,"),
-        (f"{m} AWVALID", "output reg           m_awvalid,"),
-        (f"{m} AWREADY", "input  wire          m_awready,"),
-        (f"{m} WDATA",   "output reg  [31:0]   m_wdata,"),
-        (f"{m} WVALID",  "output reg           m_wvalid,"),
-        (f"{m} WREADY",  "input  wire          m_wready,"),
-        (f"{m} WSTRB",   "output wire [3:0]    m_wstrb,"),
-        (f"{m} BRESP",   "input  wire [1:0]    m_bresp,"),
-        (f"{m} BVALID",  "input  wire          m_bvalid,"),
-        (f"{m} BREADY",  "output wire          m_bready,"),
-        (f"{m} ARADDR",  "output reg  [AW-1:0] m_araddr,"),
-        (f"{m} ARVALID", "output reg           m_arvalid,"),
-        (f"{m} ARREADY", "input  wire          m_arready,"),
-        (f"{m} RDATA",   "input  wire [31:0]   m_rdata,"),
-        (f"{m} RRESP",   "input  wire [1:0]    m_rresp,"),
-        (f"{m} RVALID",  "input  wire          m_rvalid,"),
-        (f"{m} RREADY",  "output wire          m_rready"),
-    ]:
-        a(f'    (* X_INTERFACE_INFO = "{attr}" *)')
-        a(f"    {decl}")
-    a(");")
+    m = "xilinx.com:interface:aximm:1.0"
+    pins = [
+        Pin("clk", "input", attribute=clock_attribute("clk", "M_AXI", "rst")),
+        Pin("rst", "input", attribute=reset_attribute("rst")),
+        Pin("scl_i", "input"),
+        Pin("sda_i", "input"),
+        Pin("sda_pull", "output"),
+    ]
+    for n, (signal, direction, width, reg) in enumerate([
+            ("AWADDR", "output", "AW", True), ("AWVALID", "output", 1, True),
+            ("AWREADY", "input", 1, False), ("WDATA", "output", 32, True),
+            ("WVALID", "output", 1, True), ("WREADY", "input", 1, False),
+            ("WSTRB", "output", 4, False), ("BRESP", "input", 2, False),
+            ("BVALID", "input", 1, False), ("BREADY", "output", 1, False),
+            ("ARADDR", "output", "AW", True), ("ARVALID", "output", 1, True),
+            ("ARREADY", "input", 1, False), ("RDATA", "input", 32, False),
+            ("RRESP", "input", 2, False), ("RVALID", "input", 1, False),
+            ("RREADY", "output", 1, False)]):
+        pins.append(Pin(
+            f"m_{signal.lower()}", direction, width, reg=reg,
+            bus=(m, "M_AXI", signal),
+            before=() if n else (
+                "AXI-lite master: the register file's language. The",
+                "X_INTERFACE_INFO lines are the same lesson as reset",
+                "polarity: DECLARE at the owner what a block design",
+                "would otherwise guess.")))
+    L += header(module_name, pins, parameters=[("AW", AW)])
     a("    assign m_wstrb  = 4'hF;")
     a("    assign m_bready = 1'b1;")
     a("    assign m_rready = 1'b1;")
@@ -371,6 +361,8 @@ def ddc_slave(reg_addr7: int = 0x37,
         "module": module_name,
         "interface": {
             "clock": "clk", "reset": "rst",
+            "ports": published(pins),
+            "parameters": {"AW": AW},
             "reg_addr7": reg_addr7,
             "edid_addr7": edid_addr7 if have_edid else None,
         },

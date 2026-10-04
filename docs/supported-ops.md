@@ -1,8 +1,9 @@
 # Supported operations
 
-The authoritative list of what the tracer (`frontend.py`) currently turns into
+The authoritative list of what the tracer (`trace.py`) currently turns into
 hardware. The trace is **stricter than NumPy**: anything not listed here is either
-rejected with a clear error, or (for an unhandled `np.*` function) raises `TypeError`
+rejected with a clear error, or (for an unhandled `np.*` function) raises
+`Unsupported`, a `NotImplementedError`
 — it never silently falls back to a NumPy result. If your model runs as NumPy but the
 RTL path errors, it's using something below the line.
 
@@ -32,9 +33,9 @@ RTL path errors, it's using something below the line.
 | `np.pad(x, width, mode=...)` | `mode="edge"` (replicate) or `"constant"` (zero, `constant_values=0` only); must be applied **directly to the image input** |
 | `np.where(cond, A, B)` | `cond` must be a scalar **bool `Param`** (1-bit); `A`/`B` are same-shape branches → a 2:1 mux (bypass) |
 
-**Any other `np.*` call on a traced value raises `TypeError`** (the handler returns
-`NotImplemented`). So `np.sum`, `np.matmul`, `np.clip(...)` (the function), etc. are not
-traced — see "Not yet supported" below.
+**Any other `np.*` call on a traced value raises `Unsupported`** (a
+`NotImplementedError`). So `np.sum`, `np.matmul`, `np.clip(...)` (the function), etc.
+are not traced — see "Next (roadmap)" below.
 
 ## Operands
 
@@ -49,7 +50,7 @@ spatial sum is clipped to `min(natural width, declared width)`, so `uint8` **wra
 unless widened with `.astype`. Full rules:
 [streaming-and-bitwidths.md](streaming-and-bitwidths.md).
 
-## Not yet supported (roadmap)
+## Next (roadmap)
 
 These appear in the design pattern table
 ([design/05](../design/05-isp-operation-library.md)) as the *intended* library,
@@ -60,7 +61,8 @@ but are **not implemented in the tracer yet**:
 - **`@` / `np.matmul`** (systolic array), **`np.convolve`**
 - **`np.clip` as a function** — use the `.clip(lo, hi)` **method**
 - **`.saturate(N)` / `.truncate(N)` / `.round_to(N)`** — use `.clip`, `//`, `.astype`
-- **LUT / `np.take`** lookup, **multi-channel / CCM**, **floating point**
+- **Floating point** (lookups by gather and multi-channel arithmetic -- a CCM -- do
+  trace: see below)
 
 Until then, express these with the supported ops — e.g. a fixed convolution is just an
 explicit **weighted sum of slices** (`sum(w[i,j] * x[i:.., j:..] ...)`), which is exactly

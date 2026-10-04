@@ -6,8 +6,9 @@ downstream has to work out — a block-design writer by matching names, a
 human by reading documentation, an SoC assembly tool not at all.
 
 np2hw states it instead. Every AXI4-Lite port names its bundle, every
-clock names the bus it drives, every reset its polarity, and every
-stream port names np2hw's own bus definition.
+clock names every bus it drives -- streams included -- and the reset that
+goes with them, every reset its polarity, and every stream port names
+np2hw's own bus definition.
 
 What follows is one argument in order: what the standard is, what np2hw
 publishes for its own stream, how a tool binds that to a wire, where
@@ -140,8 +141,12 @@ project's own tooling. A declaration is what replaces a guess.
 
 Everything a design instantiates **by hand**: the composed top from
 `control_wrap`, and the plumbing — `skid` (`s`/`m`), `tee` (`in`/`a`/`b`),
-`cdc_fifo` (`in`/`out`, each clock naming the face it carries) and
-`bayerlink_in` (`out`).
+`cdc_fifo` (`in`/`out`) and `bayerlink_in` (`out`). Each module's clock
+names exactly the streams it runs and their reset (ASSOCIATED_BUSIF,
+ASSOCIATED_RESET) -- the CDC FIFO's two clocks one face each --
+and `control_wrap`'s clock names `s_axil` too when there is no separate
+bus clock. `np2hw.stream.clock_attribute` and `reset_attribute` are the
+one statement of both.
 
 A generated core's internal blocks do not, and that is deliberate. They
 are wired by `compose()`, which emitted both ends of every connection —
@@ -223,8 +228,9 @@ ipx::package_project -root_dir <out> -vendor <you> -library <lib> \
 
 `component.xml` is IP-XACT. On a generated ISP that yields one AXI4-Lite
 slave with all 17 ports mapped, a memory map whose range is derived from
-the RTL, the bus clock and reset as their own typed interfaces, and each
-stream as one interface with its direction inferred.
+the RTL, the bus clock and reset as their own typed interfaces, each
+stream as one interface with its direction inferred, and every stream
+associated with the clock that runs it.
 
 Which is why none of this is hand-written. A component is an
 *aggregation* of facts already published elsewhere — the `.core`

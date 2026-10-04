@@ -132,11 +132,18 @@ def main():
     head = src.split("module ipx_top (")[1].split("\n);")[0]
     axi = "xilinx.com:interface:aximm:1.0 s_axil"
     n_axi = head.count(axi)
-    clock_names_bus = 'ASSOCIATED_BUSIF s_axil' in head
+    # the clock names EVERY bus it drives -- the register bus and both
+    # streams -- so no interface is left for the integrator to pin to a
+    # clock by guesswork
+    import re
+    assoc = re.search(r'clock:1\.0 clk CLK", X_INTERFACE_PARAMETER = '
+                      r'"ASSOCIATED_BUSIF ([^,"]+)', head)
+    clock_names_bus = bool(assoc) and set(assoc.group(1).split(":")) == {
+        "s_axil", bundle_name("in"), bundle_name("out")}
     polarity = 'POLARITY ACTIVE_' in head
     print(f"  AXI4-Lite: {n_axi:2d} ports declare their bundle         "
           f"{'PASS' if n_axi == 17 else 'FAIL'}")
-    print(f"  ...its clock names the bus, its reset the polarity "
+    print(f"  ...its clock names every bus, its reset the polarity "
           f"{'PASS' if clock_names_bus and polarity else 'FAIL'}")
     results += [n_axi == 17, clock_names_bus, polarity]
 
@@ -163,6 +170,25 @@ def main():
     print(f"  the plumbing declares its streams too            "
           f"{'PASS' if plumbing else 'FAIL'}")
     results.append(plumbing)
+
+    # ...and its clock names those same streams, and its reset: a stream
+    # no clock claims is one an integrator pins to a clock by guesswork,
+    # and a reset no clock claims is taken for an asynchronous one
+    clocked = True
+    for name, want in expected.items():
+        if name == "cdc_fifo":
+            continue                    # two clocks: checked below
+        own = built[name]["verilog"].split(f"module {name}")[1] \
+            .split("endmodule")[0]
+        assoc = re.search(r'clock:1\.0 clk CLK", X_INTERFACE_PARAMETER = '
+                          r'"ASSOCIATED_BUSIF ([^,"]+), ASSOCIATED_RESET rst"',
+                          own)
+        clocked &= (bool(assoc) and set(assoc.group(1).split(":")) == want
+                    and 'reset:1.0 rst RST", X_INTERFACE_PARAMETER = '
+                        '"POLARITY ACTIVE_HIGH"' in own)
+    print(f"  ...and its clock names them, and its reset         "
+          f"{'PASS' if clocked else 'FAIL'}")
+    results.append(clocked)
 
     # a crossing whose two faces run on different clocks has to say which
     # clock carries which face, or the one fact it exists for is inferred

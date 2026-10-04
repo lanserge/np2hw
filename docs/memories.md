@@ -115,7 +115,8 @@ composition can gather these into its build report; revela does.
   logic or as a ROM at the integrator's choice and are not behind the
   seam.
 - **The clock-crossing FIFO** (`cdc_fifo`) is a dual-clock memory, which
-  is a different macro and a different contract. Not yet behind a seam.
+  is a different macro and a different contract; its seam is a separate
+  one (Next).
 - **Verification on silicon.** Everything here is proven bit-identical
   in simulation and on an FPGA. That a given foundry macro honours the
   contract is the integrator's to verify, and this document is the

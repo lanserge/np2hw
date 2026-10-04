@@ -85,6 +85,8 @@ exists to report.
 """
 from __future__ import annotations
 
+from .ports import Pin, header, published
+
 POS = 16            # counter width for column and row, as every core uses
 
 
@@ -144,32 +146,31 @@ def frame_history(frames: int, bits: int, width: int, height: int,
     a("// out_data channel 0 (low bits) is the live pixel; channel k is the")
     a("// same pixel from k frames ago. One memory word per position holds")
     a("// the past, read one pixel ahead and written back shifted.")
-    a(f"module {module_name} #(")
-    a(f"    parameter WIDTH  = {width},")
-    a(f"    parameter HEIGHT = {height}")
-    a(") (")
-    a("    input  wire clk,")
-    a("    input  wire rst,")
-    a("    input  wire in_valid,")
-    a("    output wire in_ready,")
-    a("    input  wire in_sof,")
-    a(f"    input  wire [{bits - 1}:0] in_data,")
-    a("    output reg  out_valid,")
-    a("    input  wire out_ready,")
-    a("    output reg  out_sof,")
-    a("    output reg  out_eol,")
-    a("    output reg  out_last,")
-    a(f"    output reg  [{out_bits - 1}:0] out_data,")
-    a("    // the live frame's position in the capture loop, bit by bit, as")
-    a("    // context: constant for the frame")
-    for i in range(pb):
-        a(f"    input  wire param_pos_{i},")
-    a("    // the tag of each loop position, written by software")
-    for j in range(loop):
-        a(f"    input  wire [{bits - 1}:0] param_tag_{j},")
-    a("    // the live frame's tag, for software to read")
-    a(f"    output wire [{bits - 1}:0] live_tag")
-    a(");")
+    pins = [
+        Pin("clk", "input"),
+        Pin("rst", "input"),
+        Pin("in_valid", "input"),
+        Pin("in_ready", "output"),
+        Pin("in_sof", "input"),
+        Pin("in_data", "input", bits),
+        Pin("out_valid", "output", reg=True),
+        Pin("out_ready", "input"),
+        Pin("out_sof", "output", reg=True),
+        Pin("out_eol", "output", reg=True),
+        Pin("out_last", "output", reg=True),
+        Pin("out_data", "output", out_bits, reg=True),
+    ]
+    pins += [Pin(f"param_pos_{i}", "input", before=(
+        "the live frame's position in the capture loop, bit by bit, as",
+        "context: constant for the frame") if i == 0 else ())
+        for i in range(pb)]
+    pins += [Pin(f"param_tag_{j}", "input", bits, before=(
+        "the tag of each loop position, written by software",)
+        if j == 0 else ()) for j in range(loop)]
+    pins.append(Pin("live_tag", "output", bits,
+                    before=("the live frame's tag, for software to read",)))
+    L += header(module_name, pins,
+                parameters=[("WIDTH", width), ("HEIGHT", height)])
     a("    localparam DEPTH = WIDTH * HEIGHT;")
     a(f"    reg [{POS - 1}:0] col;")
     a(f"    reg [{POS - 1}:0] row;")
@@ -242,6 +243,7 @@ def frame_history(frames: int, bits: int, width: int, height: int,
         "clock": "clk",
         "reset": "rst",
         "param_prefix": "param_",
+        "ports": published(pins),
         "input": {"prefix": "in", "data_bits": bits, "flags": ("sof",)},
         "output": {"prefix": "out", "data_bits": out_bits, "signed": False,
                    "flags": ("sof", "eol", "last"),

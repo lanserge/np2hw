@@ -24,6 +24,8 @@ at full rate with every signal leaving a flop.
 """
 from __future__ import annotations
 
+from .ports import Pin, bus_attribute, header, published
+
 # ---------------------------------------------------------------------------
 # The elastic stream, declared ONCE.
 #
@@ -107,8 +109,35 @@ def stream_port_attribute(prefix: str, suffix: str) -> str:
     the caller knows which style it is emitting.
     """
     logical = next(logical for s, logical, *_ in STREAM_SIGNALS if s == suffix)
-    return (f'(* X_INTERFACE_INFO = "{":".join(STREAM_RTL_VLNV)} '
-            f'{bundle_name(prefix)} {logical}" *)')
+    return bus_attribute(":".join(STREAM_RTL_VLNV), bundle_name(prefix),
+                         logical)
+
+
+def clock_attribute(name: str, busifs, reset: str | None = None) -> str:
+    """The attribute a clock port carries: the buses it drives, and their
+    reset.
+
+    A stream declares its bundle; which clock runs it is not in any of
+    its signals, and an integrator told nothing has to guess -- IP
+    Integrator does, and says so, and then takes a reset it cannot tie to
+    a clock for an asynchronous one. `busifs` is a bundle name or a list
+    of them (`bundle_name` of each stream's prefix, `s_axil`), everything
+    this clock drives. Returned unindented, like stream_port_attribute.
+    """
+    names = [busifs] if isinstance(busifs, str) else list(busifs)
+    param = f"ASSOCIATED_BUSIF {':'.join(names)}"
+    if reset:
+        param += f", ASSOCIATED_RESET {reset}"
+    return (f'(* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 {name} CLK",'
+            f' X_INTERFACE_PARAMETER = "{param}" *)')
+
+
+def reset_attribute(name: str, active_low: bool = False) -> str:
+    """The attribute a reset port carries: its polarity, stated rather
+    than implied by a name."""
+    pol = "ACTIVE_LOW" if active_low else "ACTIVE_HIGH"
+    return (f'(* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 {name} RST",'
+            f' X_INTERFACE_PARAMETER = "POLARITY {pol}" *)')
 
 
 def stream_signal(suffix: str) -> tuple:
@@ -118,6 +147,37 @@ def stream_signal(suffix: str) -> tuple:
             return entry
     raise KeyError(f"{suffix!r} is not a signal of the np2hw stream; "
                    f"it carries {[s[0] for s in STREAM_SIGNALS]}")
+
+
+def stream_pins(prefix: str, direction: str, data_bits, flags=(),
+                order=None, before=(), signed=False) -> list:
+    """The ports of one stream, each carrying its bundle attribute.
+
+    `direction` is the stream's: ``"in"`` for a sink, ``"out"`` for a
+    source, and each signal faces the way STREAM_SIGNALS says its source
+    drives it. `data_bits` is a width or an expression over the module's
+    parameters; `flags` the optional signals this stream carries; `order`
+    the order the declarations appear in, which is the module's own;
+    `before` the comment lines above the first of them."""
+    carried = ["valid", "ready", "data", *flags]
+    unknown = [f for f in flags if f not in ("sof", "eol", "last")]
+    if unknown:
+        raise KeyError(f"{prefix}: {unknown} are not stream flags")
+    order = tuple(order or carried)
+    if sorted(order) != sorted(carried):
+        raise ValueError(f"{prefix}: order {order} must name exactly "
+                         f"{carried}")
+    pins = []
+    for suffix in order:
+        _, _, width, from_source, *_ = stream_signal(suffix)
+        out = (direction == "out") == from_source
+        pins.append(Pin(f"{prefix}_{suffix}", "output" if out else "input",
+                        data_bits if suffix == "data" else 1,
+                        signed=signed and suffix == "data",
+                        bus=(":".join(STREAM_RTL_VLNV), bundle_name(prefix),
+                             stream_signal(suffix)[1]),
+                        before=tuple(before) if not pins else ()))
+    return pins
 
 
 def skid(data_bits: int, module_name: str = "skid") -> dict:
@@ -151,24 +211,14 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
     a("// pass `ready` back (the path you were trying to break) or stall every")
     a("// other cycle. Holding one beat in reserve costs a register and buys")
     a("// full throughput with nothing combinational in either direction.")
-    a(f"module {module_name} #(")
-    a(f"    parameter W = {data_bits}")
-    a(") (")
-    a("    input  wire         clk,")
-    a("    input  wire         rst,")
-    a(f"    {stream_port_attribute('s', 'data')}")
-    a("    input  wire [W-1:0] s_data,")
-    a(f"    {stream_port_attribute('s', 'valid')}")
-    a("    input  wire         s_valid,")
-    a(f"    {stream_port_attribute('s', 'ready')}")
-    a("    output wire         s_ready,")
-    a(f"    {stream_port_attribute('m', 'data')}")
-    a("    output wire [W-1:0] m_data,")
-    a(f"    {stream_port_attribute('m', 'valid')}")
-    a("    output wire         m_valid,")
-    a(f"    {stream_port_attribute('m', 'ready')}")
-    a("    input  wire         m_ready")
-    a(");")
+    pins = [
+        Pin("clk", "input", attribute=clock_attribute(
+            "clk", [bundle_name("s"), bundle_name("m")], "rst")),
+        Pin("rst", "input", attribute=reset_attribute("rst")),
+        *stream_pins("s", "in", "W", order=("data", "valid", "ready")),
+        *stream_pins("m", "out", "W", order=("data", "valid", "ready")),
+    ]
+    L += header(module_name, pins, parameters=[("W", data_bits)])
     a("    reg [W-1:0] out_data;")
     a("    reg         out_valid;")
     a("    reg [W-1:0] skid_data;   // the beat accepted while the sink")
@@ -215,6 +265,8 @@ def skid(data_bits: int, module_name: str = "skid") -> dict:
         "latency": 1,
         "interface": {
             "clock": "clk", "reset": "rst", "param_prefix": "param_",
+            "ports": published(pins),
+            "parameters": {"W": data_bits},
             "input": {"prefix": "s", "data_bits": data_bits, "flags": ()},
             "output": {"prefix": "m", "data_bits": data_bits, "flags": ()},
             "streams": [
@@ -348,31 +400,17 @@ def cdc_fifo(data_bits: int, addr_bits: int = 4,
     a("// compares its own exact pointer with a two-flop-stale picture")
     a("// of the other's, so full and empty are PESSIMISTIC by up to")
     a("// the staleness -- a slot of headroom, never a corrupt word.")
-    a(f"module {module_name} #(")
-    a(f"    parameter W = {W},")
-    a(f"    parameter A = {A}")
-    a(") (")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 wclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF in_stream, ASSOCIATED_RESET wrst" *)')
-    a("    input  wire         wclk,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 wrst RST", X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
-    a("    input  wire         wrst,")
-    a(f"    {stream_port_attribute('in', 'data')}")
-    a("    input  wire [W-1:0] in_data,")
-    a(f"    {stream_port_attribute('in', 'valid')}")
-    a("    input  wire         in_valid,")
-    a(f"    {stream_port_attribute('in', 'ready')}")
-    a("    output wire         in_ready,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 rclk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF out_stream, ASSOCIATED_RESET rrst" *)')
-    a("    input  wire         rclk,")
-    a('    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 rrst RST", X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)')
-    a("    input  wire         rrst,")
-    a(f"    {stream_port_attribute('out', 'data')}")
-    a("    output wire [W-1:0] out_data,")
-    a(f"    {stream_port_attribute('out', 'valid')}")
-    a("    output wire         out_valid,")
-    a(f"    {stream_port_attribute('out', 'ready')}")
-    a("    input  wire         out_ready")
-    a(");")
+    pins = [
+        Pin("wclk", "input", attribute=clock_attribute(
+            "wclk", bundle_name("in"), "wrst")),
+        Pin("wrst", "input", attribute=reset_attribute("wrst")),
+        *stream_pins("in", "in", "W", order=("data", "valid", "ready")),
+        Pin("rclk", "input", attribute=clock_attribute(
+            "rclk", bundle_name("out"), "rrst")),
+        Pin("rrst", "input", attribute=reset_attribute("rrst")),
+        *stream_pins("out", "out", "W", order=("data", "valid", "ready")),
+    ]
+    L += header(module_name, pins, parameters=[("W", W), ("A", A)])
     a("    reg [W-1:0] mem [0:(1<<A)-1];")
     a("    // BOTH sides' pointers up front: each side's always block")
     a("    // samples the other's gray pointer, so neither can be")
@@ -438,6 +476,8 @@ def cdc_fifo(data_bits: int, addr_bits: int = 4,
         "depth": 1 << A,
         "interface": {
             "clock": "rclk", "reset": "rrst", "param_prefix": "param_",
+            "ports": published(pins),
+            "parameters": {"W": W, "A": A},
             "input": {"prefix": "in", "data_bits": W, "flags": ()},
             "output": {"prefix": "out", "data_bits": W, "flags": ()},
             "streams": [
@@ -500,37 +540,21 @@ def tee(data_bits: int, module_name: str = "tee") -> dict:
     a("// and a sticky torn output says so; the sibling and the")
     a("// pipeline never feel it. Enables are sampled at SOF and held")
     a("// for the frame, so no branch ever receives a partial head.")
-    a(f"module {module_name} #(")
-    a(f"    parameter W = {W}")
-    a(") (")
-    a("    input  wire         clk,")
-    a("    input  wire         rst,")
-    a(f"    {stream_port_attribute('in', 'valid')}")
-    a("    input  wire         in_valid,")
-    a(f"    {stream_port_attribute('in', 'ready')}")
-    a("    output wire         in_ready,")
-    a(f"    {stream_port_attribute('in', 'data')}")
-    a("    input  wire [W-1:0] in_data,")
-    a(f"    {stream_port_attribute('in', 'sof')}")
-    a("    input  wire         in_sof,")
-    a("    input  wire         en_a,")
-    a("    input  wire         en_b,")
-    a(f"    {stream_port_attribute('a', 'valid')}")
-    a("    output wire         a_valid,")
-    a(f"    {stream_port_attribute('a', 'ready')}")
-    a("    input  wire         a_ready,")
-    a(f"    {stream_port_attribute('a', 'data')}")
-    a("    output wire [W-1:0] a_data,")
-    a(f"    {stream_port_attribute('b', 'valid')}")
-    a("    output wire         b_valid,")
-    a(f"    {stream_port_attribute('b', 'ready')}")
-    a("    input  wire         b_ready,")
-    a(f"    {stream_port_attribute('b', 'data')}")
-    a("    output wire [W-1:0] b_data,")
-    a("    // sticky until reset: that branch lost mid-frame beats")
-    a("    output reg          torn_a,")
-    a("    output reg          torn_b")
-    a(");")
+    pins = [
+        Pin("clk", "input", attribute=clock_attribute(
+            "clk", [bundle_name(b) for b in ("in", "a", "b")], "rst")),
+        Pin("rst", "input", attribute=reset_attribute("rst")),
+        *stream_pins("in", "in", "W", flags=("sof",),
+                     order=("valid", "ready", "data", "sof")),
+        Pin("en_a", "input"),
+        Pin("en_b", "input"),
+        *stream_pins("a", "out", "W", order=("valid", "ready", "data")),
+        *stream_pins("b", "out", "W", order=("valid", "ready", "data")),
+        Pin("torn_a", "output", reg=True,
+            before=("sticky until reset: that branch lost mid-frame beats",)),
+        Pin("torn_b", "output", reg=True),
+    ]
+    L += header(module_name, pins, parameters=[("W", W)])
     a("    // What each branch is doing THIS frame. Latched across the")
     a("    // frame; re-decided only at a SOF beat, and the SOF beat")
     a("    // itself already obeys the new decision, so a joining branch")
@@ -578,6 +602,8 @@ def tee(data_bits: int, module_name: str = "tee") -> dict:
         "module": module_name,
         "interface": {
             "clock": "clk", "reset": "rst", "param_prefix": "",
+            "ports": published(pins),
+            "parameters": {"W": W},
             "input": {"prefix": "in", "data_bits": W, "flags": ("sof",)},
             "output": None,      # two outputs: `streams` is the truth
             "streams": [
