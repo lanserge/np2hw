@@ -137,8 +137,7 @@ Design rationale (the "why" behind each mechanism) lives in
   owned so its discipline is checked rather than trusted), and
   `boundary_report` / `combinational_outputs`, which say where a composition
   still hands its depth onward.
-- **A video path either side of the datapath**: `video_in` decodes a link and
-  aligns sample depth on the way in; `scanout` turns a pixel stream into a
+- **A video path out of the datapath**: `scanout` turns a pixel stream into a
   timed raster, with placement as a live register taken in vertical blanking;
   `framebuffer_read` reads a frame that cannot be out of phase, and says why
   it is idle rather than sitting silent.

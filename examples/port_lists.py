@@ -19,8 +19,7 @@ from np2hw import axil_regfile
 from np2hw.frame_history import frame_history
 from np2hw.i2c import ddc_slave
 from np2hw.ports import elaborated_ports, resolve
-from np2hw.stream import cdc_fifo, skid, tee
-from np2hw.video_in import bayerlink_in
+from np2hw.stream import cdc_fifo, skid, stream_cdc, tee
 from np2hw.video_mem import framebuffer_read
 from np2hw.video_out import scanout
 
@@ -28,7 +27,7 @@ CASES = {
     "skid": lambda: skid(10),
     "cdc_fifo": lambda: cdc_fifo(26, 5),
     "tee": lambda: tee(27),
-    "bayerlink_in": lambda: bayerlink_in(bits=12),
+    "stream_cdc": lambda: stream_cdc(12),
     "scanout": lambda: scanout("1080p30"),
     "scanout_genlock": lambda: scanout("1080p30", genlock=True),
     "ddc_slave": lambda: ddc_slave(),
@@ -91,7 +90,7 @@ def _wrapped(bus_clock: bool) -> dict:
 
 # The generators whose streams carry their bundle attributes; the others
 # (frame_history) declare streams without them.
-STREAMS_DECLARED = ("skid", "cdc_fifo", "tee", "bayerlink_in", "compose",
+STREAMS_DECLARED = ("skid", "cdc_fifo", "tee", "stream_cdc", "compose",
                     "control_wrap", "control_wrap_bus_clock")
 
 # One override per parameterised generator: a width that reads the
@@ -106,7 +105,11 @@ def agrees(name, result, override=None) -> bool:
     params.update(override or {})
     want = {p["name"]: (p["direction"], resolve(p["width"], params))
             for p in iface["ports"]}
-    got = elaborated_ports(result["verilog"], result["module"], override)
+    from np2hw.hdl import closure
+    # a fixed module is elaborated at the values this use sets on it, a
+    # generated one at the defaults it was written with
+    at = {**result.get("parameters", {}), **(override or {})}
+    got = elaborated_ports(closure(result), result["module"], at or None)
     label = name + (f" {override}" if override else "")
     if want == got:
         print(f"  {label:<34} {len(got):>3} ports  PASS")

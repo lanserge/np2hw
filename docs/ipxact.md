@@ -140,9 +140,9 @@ project's own tooling. A declaration is what replaces a guess.
 ## Which modules declare
 
 Everything a design instantiates **by hand**: the composed top from
-`control_wrap`, and the plumbing — `skid` (`s`/`m`), `tee` (`in`/`a`/`b`),
-`cdc_fifo` (`in`/`out`) and `bayerlink_in` (`out`). Each module's clock
-names exactly the streams it runs and their reset (ASSOCIATED_BUSIF,
+`control_wrap`, and the plumbing — `skid` (`s`/`m`), `tee` (`in`/`a`/`b`)
+and `cdc_fifo` (`in`/`out`). Each module's clock names exactly the streams
+it runs and their reset (ASSOCIATED_BUSIF,
 ASSOCIATED_RESET) -- the CDC FIFO's two clocks one face each --
 and `control_wrap`'s clock names `s_axil` too when there is no separate
 bus clock. `np2hw.stream.clock_attribute` and `reset_attribute` are the

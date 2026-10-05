@@ -66,7 +66,7 @@ module tb;
   wire         m_valid;
   reg          m_ready = 0;
 
-  skid #(.W(W)) dut (.clk(clk), .rst(rst),
+  np2hw_skid #(.W(W)) dut (.clk(clk), .rst(rst),
     .s_data(s_data), .s_valid(s_valid), .s_ready(s_ready),
     .m_data(m_data), .m_valid(m_valid), .m_ready(m_ready));
 
@@ -152,7 +152,7 @@ module tb;
   wire         m_valid;
   reg          m_ready = 0;
 
-  skid #(.W(W)) dut (.clk(clk), .rst(rst),
+  np2hw_skid #(.W(W)) dut (.clk(clk), .rst(rst),
     .s_data(s_data), .s_valid(s_valid), .s_ready(s_ready),
     .m_data(m_data), .m_valid(m_valid), .m_ready(m_ready));
 

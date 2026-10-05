@@ -58,7 +58,7 @@ module tb;
   wire             out_valid;
   reg              out_ready = 0;
 
-  cdc_fifo dut (.wclk(wclk), .wrst(wrst),
+  np2hw_cdc_fifo #(.W(%(W)d), .A(2)) dut (.wclk(wclk), .wrst(wrst),
     .in_data(in_data), .in_valid(in_valid), .in_ready(in_ready),
     .rclk(rclk), .rrst(rrst),
     .out_data(out_data), .out_valid(out_valid), .out_ready(out_ready));

@@ -36,6 +36,12 @@ argument, and it is why the constraint below is safe.
 
 ## What to constrain
 
+**It ships as a file**: `np2hw/hdl/np2hw_cdc_fifo.xdc`, written to be
+scoped to the module (in Vivado, `SCOPED_TO_REF np2hw_cdc_fifo` with
+`PROCESSING_ORDER LATE`), so one file constrains every instance by the
+module's own names, bounding each pointer path by the period of the clock
+that samples it. What follows is what that file says, and why.
+
 **The two pointer paths are asynchronous.** They are synchronised by
 construction, so a tool must not try to meet setup or hold across them.
 
@@ -64,9 +70,12 @@ the pointer's bits exceeds a destination clock period, two bits can
 change as seen by the sampler and the guarantee is gone. Constraining
 the path to a period preserves it.
 
-**Nothing else crosses.** The memory is written in one domain and read
-in the other, but never in the same cycle at the same address by
-construction — the reader is held off until the writer's pointer, safely
+**Nothing else crosses.** The memory is block RAM at every depth
+(`ram_style = "block"`), so its read port is clocked by the reader and the
+payload is never on a path a timer sees -- a LUT RAM's read would be
+combinational from what the write clock stored. It is written in one
+domain and read in the other, but never in the same cycle at the same
+address by construction — the reader is held off until the writer's pointer, safely
 synchronised, says otherwise. A CDC checker that flags the memory is
 seeing the structure and not the protection; the pointer synchronisers
 are the protection, and they are what to point it at.

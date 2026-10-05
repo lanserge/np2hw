@@ -151,20 +151,20 @@ def main():
     # The ISP's own blocks are wired by np2hw's composer, which emitted
     # both ends and infers nothing. These are the ones a human or a Tcl
     # writer connects, so these are the ones that must declare.
-    from np2hw import bayerlink_in, cdc_fifo, skid, tee
+    from np2hw import cdc_fifo, skid, tee
+    from np2hw.hdl import closure
     import re
 
     expected = {n: {bundle_name(b) for b in bundles} for n, bundles in
                 {"skid": {"s", "m"}, "tee": {"in", "a", "b"},
-                 "cdc_fifo": {"in", "out"},
-                 "bayerlink_in": {"out"}}.items()}
-    built = {"skid": skid(12), "tee": tee(12), "cdc_fifo": cdc_fifo(12, 8),
-             "bayerlink_in": bayerlink_in(bits=12)}
+                 "cdc_fifo": {"in", "out"}}.items()}
+    built = {"skid": skid(12), "tee": tee(12), "cdc_fifo": cdc_fifo(12, 8)}
     plumbing = True
     for name, want in expected.items():
-        text = built[name]["verilog"]
+        text = closure(built[name])
         # the module's OWN ports, not those of anything it bundles
-        own = text.split(f"module {name}")[1].split("endmodule")[0]
+        own = text.split(f"module {built[name]['module']}")[1] \
+            .split("endmodule")[0]
         got = set(re.findall(r"np2hw_stream_rtl:1\.0 (\w+) ", own))
         plumbing &= got == want
     print(f"  the plumbing declares its streams too            "
@@ -178,7 +178,8 @@ def main():
     for name, want in expected.items():
         if name == "cdc_fifo":
             continue                    # two clocks: checked below
-        own = built[name]["verilog"].split(f"module {name}")[1] \
+        own = closure(built[name]).split(
+            f"module {built[name]['module']}")[1] \
             .split("endmodule")[0]
         assoc = re.search(r'clock:1\.0 clk CLK", X_INTERFACE_PARAMETER = '
                           r'"ASSOCIATED_BUSIF ([^,"]+), ASSOCIATED_RESET rst"',
@@ -206,7 +207,7 @@ def main():
     from np2hw.stream import _RESERVED
     labels = {b for v in built.values()
               for b in re.findall(r"np2hw_stream_rtl:1\.\d+ (\w+) ",
-                                  v["verilog"])}
+                                  closure(v))}
     labels |= set(declared)
     legal = labels and not (labels & _RESERVED)
     print(f"  no interface label is an HDL reserved word         "

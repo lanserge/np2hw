@@ -15,7 +15,6 @@ from .stream import (STREAM_SIGNALS, boundary_report, cdc_fifo,
                      combinational_outputs, skid, tee)
 from . import ipxact
 from .i2c import ddc_slave
-from .video_in import bayerlink_in
 from .video_mem import framebuffer_read
 from .frame_history import frame_history
 from .video_out import MODES, mode_timing, scanout
@@ -52,7 +51,6 @@ __all__ = [
     # network is needed on the board.
     "ddc_slave",
     # Receivers for external links: parallel video in, elastic stream out.
-    "bayerlink_in",
     # Memory: a frame of DDR fetched back at a raster's pace, by an
     # engine that owns its addressing and therefore its phase.
     "framebuffer_read",

@@ -58,7 +58,7 @@ module tb;
   wire [%(W)d-1:0] a_data, b_data;
   wire torn_a, torn_b;
 
-  tee dut (.clk(clk), .rst(rst),
+  np2hw_tee #(.W(%(W)d)) dut (.clk(clk), .rst(rst),
     .in_valid(in_valid), .in_ready(in_ready),
     .in_data(in_data), .in_sof(in_sof),
     .en_a(en_a), .en_b(en_b),

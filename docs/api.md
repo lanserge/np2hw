@@ -84,9 +84,20 @@ WIDTH/HEIGHT and only needs `sof` to re-anchor); `output.flags` is what it
 regenerates. `output` is `None` for a SINK — a module that consumes a stream and
 produces none, and therefore never stalls its source.
 
-The structural generators — `skid`, `cdc_fifo`, `tee`, `bayerlink_in`,
-`scanout`, `ddc_slave`, `framebuffer_read`, `frame_history`, `axil_regfile` —
-also publish `interface["ports"]`: EVERY port, video pins and status words and
+The fixed modules -- `skid`, `cdc_fifo`, `stream_cdc` (a stream with its
+flags across clocks, on `cdc_fifo`), `tee` -- are Verilog files,
+`np2hw/hdl/np2hw_skid.v`, `np2hw_cdc_fifo.v`, `np2hw_stream_cdc.v`,
+`np2hw_tee.v`, read and reviewed as files: their structure never varies, only a width and a depth,
+which are module parameters set where they are instantiated. The
+Python functions return the file with the values a use sets (`"parameters"`)
+and its interface; a result that instantiates one lists it in `"requires"`,
+and `np2hw.hdl.closure(result)` is the text with everything it requires.
+Generated Verilog is for what genuinely varies: a traced model, a
+composition.
+
+They, the generators -- `scanout`, `ddc_slave`, `framebuffer_read`,
+`frame_history`, `axil_regfile` -- and `compose()`, `control_wrap()`
+publish `interface["ports"]`: EVERY port, video pins and status words and
 bus ports as much as streams, as `{"name", "direction", "width"}`, plus
 `"bus": {"vlnv", "bundle", "logical"}` for a port that is part of a bus. A width
 the module takes from a parameter is published as its expression (`"W"`), with
@@ -198,23 +209,6 @@ The four validations are laws of the streaming handshake, enforced by its
 owner: an output may feed one blocking consumer plus any number of sinks, and
 a fork to two blocking consumers is refused rather than emitted as a deadlock.
 See `examples/netlist_rules.py`.
-
-## Link receivers (`np2hw.video_in`)
-
-```python
-bayerlink_in(max_line_bytes=4096, module_name="bayerlink_in", fifo_depth=1024,
-             lane_map=(0, 1, 2), vsync_active_high=True, bits=12) -> dict
-```
-The receiving end of the bayerlink protocol
-(github.com/bayerlink/bayerlink): parallel video from an HDMI/DVI receiver
-in, one sample per clock out on the standard elastic stream, aligned to `bits`. A
-half-line FIFO absorbs the two-samples-per-pixel burst (the protocol's rate
-rule is the condition it works under), `lane_map` fixes the byte-lane
-permutation at generation time, and `overflow` is a STICKY flag because
-video cannot be stalled, only missed -- data loss must be observable. The
-result self-describes as a source (no stream input), so `compose()` puts it
-at the head of a pipeline. Proven bit-exact against the reference codec's
-containers in `examples/bayerlink_in.py`.
 
 ## A stream's recent past (`np2hw.frame_history`)
 

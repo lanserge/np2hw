@@ -19,8 +19,8 @@ So the fact is published. `combinational_outputs` is what a module hands
 on; empty is the good case, and `boundary_report()` collects it across a
 design.
 
-  THE RECEIVER IS CLEAN     it ends in a register slice, so consumers
-                            start from a flop no matter what they are.
+  A SLICE IS CLEAN          a module that ends in one hands its
+                            consumers a flop, whatever they are.
   A TRACED CORE IS NOT      `out_*` leave the last pipeline register,
                             but `in_ready` is `!stall` and `stall` reads
                             `out_ready`.
@@ -44,9 +44,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np  # noqa: E402
 
-from np2hw import (Image2D, Param, bayerlink_in, boundary_report,
+from np2hw import (Image2D, Param, boundary_report,
                    combinational_outputs, framebuffer_read, generate,
                    saturate, scanout, skid, to_ir)  # noqa: E402
+from np2hw.hdl import closure  # noqa: E402
 
 
 def traced_core():
@@ -69,7 +70,7 @@ def _combinational_in_rtl(verilog, module):
     is combinational until shown otherwise -- the conservative direction,
     since the cost of guessing "registered" wrongly is a build.
     """
-    body = verilog.split(f"module {module}")[1]
+    body = re.sub(r"//[^\n]*", "", verilog.split(f"module {module}")[1])
     header, rest = body.split(");", 1)
     body = rest.split("\nendmodule")[0]
     comb = []
@@ -151,12 +152,6 @@ def check(label, passed, detail=""):
 def main():
     print("boundaries: what each core costs the one next to it\n")
 
-    rx = bayerlink_in(max_line_bytes=4096, bits=12)
-    check("the receiver hands nothing on",
-          combinational_outputs(rx["interface"]) == (),
-          "its FIFO head goes through a slice, so a consumer's first "
-          "stage starts at a flop")
-
     sk = skid(16)
     check("a slice hands nothing on, by construction",
           combinational_outputs(sk["interface"]) == ())
@@ -188,10 +183,10 @@ def main():
     # are two things that can disagree. Whichever is easier to edit will
     # drift, and that is the dict -- so it gets checked against the
     # Verilog rather than believed.
-    for name, r in [("receiver", rx), ("slice", sk),
+    for name, r in [("slice", sk),
                     ("traced core", core), ("framebuffer", fb)]:
         claimed = set(combinational_outputs(r.get("interface", r)))
-        actual = set(_combinational_in_rtl(r["verilog"], r["module"]))
+        actual = set(_combinational_in_rtl(closure(r), r["module"]))
         check(f"the {name}'s published fact matches its RTL",
               claimed == actual,
               f"claims {sorted(claimed) or 'none'}; RTL says "
@@ -199,7 +194,7 @@ def main():
 
     CHAIN = ["bl", "wb", "hg", "hr", "cc", "gm", "lg"]
     traced = core["interface"]
-    design = ([("rx", rx["interface"])]
+    design = ([("slice", sk["interface"])]
               + [(n, traced) for n in CHAIN]
               + [("scanout", sc)])
     report = boundary_report(design)
@@ -211,8 +206,8 @@ def main():
           f"{len(report)} of {len(design)} modules, and the order is the "
           f"path: {' -> '.join(names)}")
     check("and it clears the ones that do not",
-          "rx" not in names,
-          "the receiver is absent because it earned it, not because it "
+          "slice" not in names,
+          "the slice is absent because it earned it, not because it "
           "was skipped")
 
     # The number that matters is not how many cores are dirty but how

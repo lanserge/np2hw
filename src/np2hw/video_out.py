@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """scanout: a pixel stream becomes a timed raster.
 
-The mirror of :mod:`video_in`. That module decodes a link and follows
+The mirror of a link receiver, which decodes a link and follows
 whatever the sender states; this one DEFINES a link -- it drives a
 display, so its timing is never negotiated with the sink. The one
 concession points the other way: `genlock` lets vertical blanking

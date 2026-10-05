@@ -7,6 +7,46 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
+## Unreleased
+
+### Changed
+
+- **Fixed modules are Verilog files.** `skid`, `tee` and `cdc_fifo` were
+  Verilog printed by Python, the same structure every time. They are
+  files in the package now -- `np2hw/hdl/np2hw_skid.v`, `np2hw_tee.v`,
+  `np2hw_cdc_fifo.v` -- sized by module parameters. The functions return
+  the file with the `parameters` a use sets; a result that instantiates
+  one lists it in `requires`, and `np2hw.hdl.closure(result)` is the text
+  with everything it requires. **`module_name` is gone from all three**:
+  a fixed module has one name.
+
+### Added
+
+- **`stream_cdc`** -- `np2hw/hdl/np2hw_stream_cdc.v`: a stream with its
+  `sof`/`eol`/`last` across two unrelated clocks, on `cdc_fifo`, so a
+  crossing sits between two stream ports with nothing to pack.
+  `examples/stream_cdc.py` proves the flags stay with their samples.
+- **`np2hw/hdl/np2hw_cdc_fifo.xdc`** -- the FIFO's timing intent as a file,
+  scoped to the module: each gray-pointer path datapath-only, bounded by
+  the sampling clock's period. `docs/clock-crossings.md` gave the
+  constraint; now the module ships it.
+
+### Changed (resources)
+
+- **`cdc_fifo`'s memory is block RAM at every depth.** A shallow FIFO
+  used to infer LUT RAM, whose read is combinational from the write
+  clock's stores -- a path from one domain into the other that a timer
+  sees. A block RAM's read port is the reader's, so only the two pointers
+  cross. A 16-deep crossing now costs one 18 Kb block RAM.
+
+### Removed
+
+- **The bayerlink receiver moved to bayerlink-fpga.** `bayerlink_in` and
+  `np2hw.video_in` are gone, with the `bayerlink` extra: the receiver is
+  `bayerlink_fpga/hdl/bayerlink_in.v` and `bayerlink_fpga.receiver` now,
+  beside the protocol it implements, proven there against the reference
+  codec. np2hw no longer depends on bayerlink for anything.
+
 ## 0.6.1
 
 ### Added
