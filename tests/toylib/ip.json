@@ -1,0 +1,22 @@
+{
+  "blocks": {
+    "constant": {
+      "description": "A constant.",
+      "vivado": {
+        "ip": "vendor.com:ip:constant"
+      }
+    },
+    "logic": {
+      "description": "Bitwise logic between pins.",
+      "vivado": {
+        "ip": "vendor.com:ip:logic"
+      }
+    },
+    "concat": {
+      "description": "Bits side by side into one bus.",
+      "vivado": {
+        "ip": "vendor.com:ip:concat"
+      }
+    }
+  }
+}

@@ -1,0 +1,663 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/lanserge/np2hw/src/np2hw/design/blocks.schema.json",
+  "title": "np2hw library file",
+  "description": "One JSON file of a library: named BLOCKS, each a COMPOSITE (it has nodes) or a PRIMITIVE (it does not), and named PROFILES, each the register values for one block. Everything is referenced as package.module:name, where package.module names this file, and a name means one thing in a file. No address may appear anywhere: addresses are allocated, never declared.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "blocks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/name"
+      },
+      "additionalProperties": {
+        "if": {
+          "required": [
+            "nodes"
+          ]
+        },
+        "then": {
+          "$ref": "#/$defs/composite"
+        },
+        "else": {
+          "$ref": "#/$defs/primitive"
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "name": {
+      "description": "An identifier. min, max and abs are reserved: expressions call them.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "not": {
+        "enum": [
+          "min",
+          "max",
+          "abs"
+        ]
+      }
+    },
+    "reference": {
+      "description": "A block, from the top of the import path: package.module:block, or package.module alone for the block named after its file (acme.pipelines.isp is acme.pipelines.isp:isp). The module is a Python file (a leaf) or a JSON file of this schema.",
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)+(:[a-z_][a-z0-9_]*)?$"
+    },
+    "value": {
+      "description": "A number or an array is a literal; a string is ALWAYS an expression, in Python syntax, over the parameters in the scope of the composite it is written in.",
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/literal"
+          }
+        }
+      ]
+    },
+    "literal": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/literal"
+          }
+        }
+      ]
+    },
+    "settings": {
+      "description": "Keys are paths relative to the node: a parameter of the node itself (bit_depth), or of something inside it (ccm.m).",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/value"
+      }
+    },
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/name"
+          },
+          "context": {
+            "description": "The facts that ride with the stream entering, latched at each frame's start: a port for each, and no register -- a register copy of a header fact is a second answer software could set to disagree with the picture arriving. The names are the pipeline context vocabulary its blocks were declared with.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*$"
+            }
+          },
+          "bits": {
+            "$ref": "#/$defs/value",
+            "description": "An input's sample depth: a fact of the stream entering, stated where it enters and traced from there."
+          },
+          "max_width": {
+            "$ref": "#/$defs/value",
+            "description": "The widest frame the stream entering may carry. What each block needs of it -- a line buffer's depth -- follows from the stream that reaches it."
+          },
+          "max_height": {
+            "$ref": "#/$defs/value",
+            "description": "The tallest frame the stream entering may carry; what a block that stores frames sizes its store from."
+          },
+          "description": {
+            "type": "string"
+          },
+          "when": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The port exists only where this expression over the composite's parameters is true."
+          }
+        }
+      }
+    },
+    "endpoint": {
+      "description": "A port of this composite (in), or a port of one of its nodes (ccm.in). Port names are the leaf's own, in its case (a vendor pin like S_AXI).",
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)?$"
+    },
+    "composite": {
+      "type": "object",
+      "required": [
+        "nodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "This composite's own build parameters: its interface. Declared once, here; set by whatever instantiates it.",
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/param_name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "default": {
+                "$ref": "#/$defs/value",
+                "description": "The value where nothing sets it: a literal, or an expression over the block's own parameters (a string is always an expression; a word is quoted, '1080p30')."
+              }
+            }
+          }
+        },
+        "inputs": {
+          "$ref": "#/$defs/ports"
+        },
+        "outputs": {
+          "$ref": "#/$defs/ports"
+        },
+        "nodes": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "block"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "block": {
+                "description": "What fills the node: a reference (package.module[:block]), or the name of one of this composite's own build parameters, whose value -- an expression, set from outside like any build setting -- is a reference (@package.module[:block]).",
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/reference"
+                  },
+                  {
+                    "$ref": "#/$defs/param_name"
+                  }
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "domain": {
+                "$ref": "#/$defs/name"
+              },
+              "build": {
+                "$ref": "#/$defs/settings"
+              },
+              "values": {
+                "$ref": "#/$defs/settings"
+              },
+              "when": {
+                "type": "string",
+                "minLength": 1,
+                "description": "An expression over build parameters in the composite's scope: the node is built only where it is true, and neither is anything inside it."
+              },
+              "config": {
+                "type": "object",
+                "description": "A vendor leaf's own settings, verbatim -- its names and its value syntax (No_buffer, 74.250), never expressions; a procedure's may be structured. Derived values go under build."
+              }
+            }
+          }
+        },
+        "connections": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  {
+                    "$ref": "#/$defs/endpoint"
+                  }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              },
+              {
+                "type": "object",
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "from": {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/endpoint"
+                  },
+                  "when": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "pins": {
+          "$ref": "#/$defs/pins"
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints"
+        }
+      }
+    },
+    "primitive": {
+      "description": "A leaf described in JSON: a board resource carrying its own facts and constraints. Its fields are its own; only the structural ones are checked here.",
+      "type": "object",
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "addresses"
+            ]
+          },
+          {
+            "required": [
+              "connections"
+            ]
+          }
+        ]
+      },
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "#/$defs/composite/properties/parameters"
+        },
+        "inputs": {
+          "$ref": "#/$defs/leaf_ports"
+        },
+        "outputs": {
+          "$ref": "#/$defs/leaf_ports"
+        },
+        "vivado": {
+          "$ref": "#/$defs/vivado"
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "HDL files of a module leaf, beside its library file."
+        },
+        "generated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "HDL files of a module leaf that a build step generates into <build dir>/hdl."
+        },
+        "implementations": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Ways to realise this block, by name; its `implementation` parameter chooses one. The block's own ports, parameters and description are what a design is wired to; each implementation maps them onto its own.",
+          "additionalProperties": {
+            "$ref": "#/$defs/implementation"
+          }
+        }
+      }
+    },
+    "profile": {
+      "description": "Register values for one block, keyed by paths relative to it: a register of the block itself or of anything inside it (ccm.m), as a literal of the register's shape -- or a node inside it (isp), set to another profile by reference, which is included there. A value set here wins over one an included profile sets.",
+      "type": "object",
+      "required": [
+        "for",
+        "values"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "for": {
+          "$ref": "#/$defs/reference"
+        },
+        "values": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/literal"
+              },
+              {
+                "$ref": "#/$defs/reference"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "pins": {
+      "type": "array",
+      "description": "External pins of the FPGA this composite owns: a port by direction, or an interface made external from a pin inside it. Names are global to a design.",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+            "description": "The FPGA port's name, as its constraints file spells it."
+          },
+          "dir": {
+            "enum": [
+              "I",
+              "O",
+              "IO"
+            ]
+          },
+          "interface": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "vivado": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the leaf is built in Vivado: vendor IP by VLNV, our RTL module by name (its sources beside), or a procedure a design calls.",
+      "properties": {
+        "ip": {
+          "type": "string"
+        },
+        "module": {
+          "type": "string"
+        },
+        "tcl": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "phase": {
+          "enum": [
+            "cells",
+            "late"
+          ],
+          "description": "When a procedure runs: with the cells, in declaration order (the default), or after every connection -- where the bus automation goes."
+        }
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "description": "Constraints files this block owns, beside its library file or shipped in a package (package:file); an entry may carry a `when`, and `scoped_to`: the module whose instances the file constrains, by that module's own names.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "required": [
+              "file"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "when": {
+                "type": "string"
+              },
+              "scoped_to": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "param_name": {
+      "description": "A parameter's name, in its block's own case: a Verilog parameter (SAMPLE_BITS) or a vendor property (kClkRange) keeps its spelling. min, max and abs are reserved.",
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+      "not": {
+        "enum": [
+          "min",
+          "max",
+          "abs"
+        ]
+      }
+    },
+    "leaf_ports": {
+      "description": "A leaf's ports, as the block itself has them: every port of its module, so a design can be checked against it and the module against its declaration. An entry is a plain port, a STREAM (np2hw's handshake: <name>_valid, _ready, _data and the flags it carries) or a BUS (an AXI4-Lite or AXI4-Stream bundle, <name>_<signal>). Under inputs: a port the block reads, a stream it sinks, a bus it serves; under outputs the reverse.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_]*$"
+          },
+          "width": {
+            "$ref": "#/$defs/value",
+            "description": "Bits: a plain port's, a stream's data, a bus's address (AXI4-Lite) or data (AXI4-Stream). An expression over the block's parameters. 1 when absent."
+          },
+          "stream": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "sof",
+                "eol",
+                "last"
+              ]
+            },
+            "description": "This port is a stream carrying these flags."
+          },
+          "bus": {
+            "enum": [
+              "axilite",
+              "axis",
+              "tmds",
+              "video",
+              "axi3",
+              "axi4",
+              "pins"
+            ],
+            "description": "This port is a bus of that kind: AXI4-Lite, AXI4-Stream, AXI3 or AXI4 (memory-mapped), TMDS (a display link's clock and three data pairs), video (parallel video: active_video, data, hsync, vsync, driven by the source), or pins (a vendor's bundle of package pins, listed under members)."
+          },
+          "signals": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "tkeep",
+                "tuser",
+                "tlast"
+              ]
+            },
+            "description": "An AXI4-Stream bus's optional signals."
+          },
+          "inout": {
+            "type": "boolean",
+            "description": "A bidirectional pin (listed under outputs)."
+          },
+          "description": {
+            "type": "string"
+          },
+          "when": {
+            "$ref": "#/$defs/value",
+            "description": "A port of a block described apart from its implementations that exists only when this expression over the block's parameters holds: a clock's phase-shift port, say."
+          },
+          "addr_width": {
+            "type": "integer",
+            "description": "An AXI3 or AXI4 bus's address bits; 32 when absent."
+          },
+          "id_width": {
+            "type": "integer",
+            "description": "An AXI3 or AXI4 bus's ID bits."
+          },
+          "channels": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "write",
+                "read"
+              ]
+            },
+            "description": "An AXI3 or AXI4 bus's directions, both when absent: a DMA that only writes has no read channels."
+          },
+          "omit": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Signals of the bus's kind this port does not have: an AXI4-Lite port without wstrb, an AXI4 port without IDs."
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "width": {
+                  "type": "integer"
+                },
+                "inout": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "A pins bundle's members, by their own names."
+          }
+        }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "vivado": {
+          "$ref": "#/$defs/vivado"
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "HDL files of a module leaf, beside its library file."
+        },
+        "constraints": {
+          "$ref": "#/$defs/constraints"
+        },
+        "ports": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The block's port name -> this implementation's, where they differ."
+        },
+        "facts": {
+          "type": "object",
+          "description": "What follows from this implementation, read as <node>.<fact>: a front end's lane order, say."
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          },
+          "description": "The implementation's own settings, as expressions over the block's parameters."
+        },
+        "tie": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "This implementation's inputs that no port of the block reaches, and the value each is held at. An output the block has no port for is left open."
+        },
+        "pin_names": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "A bus port of the block -> how this implementation names its signals: a pattern with {signal} (axi_awaddr) or {SIGNAL} (AWADDR), where it is not <port>_<signal>."
+        }
+      }
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "blocks"
+      ]
+    },
+    {
+      "required": [
+        "profiles"
+      ]
+    }
+  ]
+}

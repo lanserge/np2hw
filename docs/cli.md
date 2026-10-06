@@ -1,7 +1,8 @@
 # CLI reference
 
-The CLI has two commands: **`run`** (file-to-file) and **`view`** (live). The model
-is always a **`.py` file** — there are no built-in model names. See
+The CLI has two commands for a model: **`run`** (file-to-file) and **`view`**
+(live). The model is always a **`.py` file** — there are no built-in model names.
+A pipeline has its own: **`pipeline run`** and **`pipeline generate`**, below. See
 [writing-models.md](writing-models.md) for the model-file convention.
 
 ```bash
@@ -72,6 +73,34 @@ np2hw view examples/isp/gaussian.py --source screen --backend sim --sim cxxrtl
   ```bash
   np2hw view examples/isp/gaussian.py --source test --frames 4 --snapshot montage.png
   ```
+
+---
+
+## `np2hw pipeline` — a composite of blocks
+
+A pipeline is a composite of model blocks, named by reference
+(`package.module:name`, found on the import path or under `--library DIR`).
+
+```bash
+np2hw pipeline run acme.isp:core in.npy out.png
+np2hw pipeline run acme.isp:core --from gamma.in mid.npy out.png   # a sub-chain
+np2hw pipeline run acme.isp:core --rtl in.npy out.npy              # the RTL twin too
+np2hw pipeline generate acme.isp:core --out build --clock-mhz 148.5
+```
+
+`run` applies the models over one frame (`.npy` raw integers, `.png` an 8-bit
+view), the whole pipeline or the blocks between `--from` and `--to`;
+`--profile` layers a block's register values, `--set INSTANCE.REG=VALUE` one
+register, `--context SIGNAL=VALUE` one context signal, and `--explain` prints
+where every value came from. `--rtl` runs the generated Verilog under
+Verilator beside the models and fails on any difference.
+
+`generate` proves the pipeline's Verilog bit-exact against its models under
+Verilator, then writes the design pack (`np2hw.pipeline.pack`): the Verilog,
+the register map, SystemRDL, the register documentation, `<name>_build.json`
+(top, latency, geometry, boundary widths, memories) and a FuseSoC `.core`.
+`--no-control` stops at the datapath, `--sync-memory` refuses a line buffer
+that reads combinationally, `--vlnv` names the core.
 
 ---
 

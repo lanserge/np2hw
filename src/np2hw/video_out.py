@@ -104,6 +104,16 @@ def mode_timing(mode: str) -> dict:
             "vsync_positive": bool(vp)}
 
 
+def pixel_khz(mode: str) -> int:
+    """The pixel clock of a mode by its name ('1080p30'), in kHz: what a
+    design's expression reads -- ``"@np2hw.video_out:pixel_khz(mode)"`` --
+    where it needs a raster's pixel clock."""
+    return int(round(float(mode_timing(mode)["pixel_mhz"]) * 1000))
+
+
+pixel_khz.expression = True
+
+
 def _bits(value: int) -> int:
     return max(1, int(value).bit_length())
 

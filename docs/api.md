@@ -9,6 +9,12 @@ from np2hw import Netlist, Node, Endpoint                          # graph, pre-
 from np2hw import Reg, RegBlock, RegInstance, AddrMap, systemrdl   # register maps
 from np2hw import axil_regfile, control_wrap                       # control plane
 from np2hw import skid, tee, cdc_fifo, frame_history               # plumbing
+from np2hw.blocks import block, configblock, StreamPort, ContextBit  # blocks
+from np2hw.blocks.params import Param, ParamSet, Context, StatsWindow
+from np2hw.blocks.stream import StreamSpec
+from np2hw.design import composite                                 # designs
+from np2hw import pipeline                                         # pipelines
+from np2hw.pipeline import compose, run
 from np2hw.testing import (Beat, frame_to_beats, beats_to_words,   # verification
                            check_framing, reset_stream, run_frame,
                            AxiLiteMaster, axis_video_map)
@@ -106,6 +112,82 @@ same list (`np2hw.ports`: `Pin`, `header`, `published`), so the two cannot
 differ; `np2hw.ports.elaborated_ports` asks Verilator what a module really
 elaborates to, which is how `examples/port_lists.py` holds every list to its
 module.
+
+## Blocks (`np2hw.blocks`)
+
+A block is a NumPy model plus what its arithmetic cannot say: its registers
+(`np2hw.blocks.params`: `Param`, `ParamSet`, `StatsWindow`, LOCAL offsets
+only, a composer assigning each instance its base), the names of its stream
+ports (`StreamPort`; widths are traced, never declared), and the pipeline
+context it reads (`consumes`, `ContextBit`).
+
+```python
+@block(version=(1, 0), description="...", inputs=(StreamPort("in"),),
+       outputs=(StreamPort("out"),), consumes=("phase",),
+       context=(ContextBit("row", "phase", bit=1),),
+       params=[Param("gain", bits=16, frac=8, description="...")],
+       vocabulary=CONTEXT)                      # {name: Context}
+def gain(pixel, p, ctx, bit_depth): ...
+```
+
+The decorated function IS the block: `Block.run(frame, values, bit_depth,
+**context)` runs it validated from the declarations -- each consumed signal's
+range from the vocabulary, a frame with an odd dimension refused where a
+signal says `even_frame` -- and `Block.generate(spec, width, height,
+module_name)` traces it into Verilog. `Block.configure()` gives the cached
+variant with register attributes overridden. `registry(package)` and
+`resolve(package, name)` discover the blocks declared under a package.
+
+Content binds its context vocabulary once, in its own decorator
+(`functools.partial(block, vocabulary=...)`); np2hw names no context
+signal. Verilog traced from a model carries the copyright and
+`SPDX-License-Identifier` its source file states (`model_header`): a design
+derived from a model is under the model's terms.
+
+## Designs (`np2hw.design`)
+
+A design is JSON: a library file `{"blocks": {name: {...}}}`
+(`np2hw/design/blocks.schema.json`) of leaves and composites, a composite
+holding nodes -- each a block by reference, `package.module:block` from the
+top of the import path -- their connections, and settings by path (`build`
+for what shapes the hardware, `values` for what it holds; outermost wins;
+a string is always an expression). `composite.load(ref, build=None)`
+flattens one into leaves at their full paths; its `.netlist`
+(`np2hw.design.netlist`) is the design as every tool reads it -- each leaf
+with its implementation, settings and resolved ports, every bundle and net
+-- and `np2hw.design.wiring` checks it at load. A block may be described
+apart from its implementations, chosen by its `implementation` parameter.
+`np2hw.design.profile` holds a set of register values for a block.
+
+## Pipelines (`np2hw.pipeline`)
+
+`pipeline.load(ref)` loads a composite of model blocks as a pipeline;
+`np2hw.pipeline.compose` composes it: `stages` (every instance with its
+base address, the context block first at base 0), `register_map` (the JSON
+map the host reads), `write_systemrdl`, `generate` (the Verilog, with the
+AXI4-Lite register file with `control=True`). A pipeline's blocks bring
+their content's `Vocabulary`, which names the context block and its commit
+register; blocks of two vocabularies are refused. The map's `licence` and
+the generated files' headers are what the models' sources state.
+`np2hw.pipeline.run` runs a chain -- the models, and the RTL twin under
+Verilator beside them. `np2hw.pipeline.pack.emit(design, out, vlnv=None,
+control=True, clock_mhz=None, verify=True, sync_memory=False)` writes the
+design pack once the twin agrees with the models on every input's chain;
+`np2hw pipeline run|generate` (docs/cli.md) and the FuseSoC generator's
+`design` parameter call it.
+
+## Toolchains (`np2hw.toolchain`)
+
+A toolchain renders a loaded design for the tool that builds it and decides
+nothing about it. `np2hw.toolchain.vivado.emit(design, out, name=None)`
+writes the block design (`bd.tcl`, named `name` or the design's name) and
+the implementation scripts; `np2hw.toolchain.vivado.bdtrace` traces a built
+block design. Two checks hold Vivado to the design:
+`python -m np2hw.toolchain.vivado.vendor_check OUT` compares every described
+vendor cell's pins, dumped once the block design validates, with its
+description, and `python -m np2hw.toolchain.vivado.checkhwh HWH` audits the
+hardware handoff as built. `np2hw.video_out.pixel_khz(mode)` is a raster's
+pixel clock, callable from a design's expressions.
 
 ## Compose: `compose`
 
@@ -230,6 +312,16 @@ no simulator), and the cocotb BFMs — `reset_stream`, `run_frame` (randomised
 backpressure on both sides), and `AxiLiteMaster`, whose handshake timing
 matches the register file np2hw emits. `axis_video_map` states the AXI4-Stream
 Video signal mapping, owned here because `axis_video_wrap` writes it.
+
+## Simulations (`np2hw.testing`)
+
+`run_cocotb(workdir, verilog, toplevel, test_module, case, test_dir=None)`
+builds a design under Verilator and runs a cocotb testbench over it; the
+testbench reads `case` with `load_case()`. `np2hw.testing.block` is the
+testbench for any block: `case = {"block": "package.module:name", "width",
+"height", "bit_depth", "registers" (overrides), "in_channels", "trials":
+[{"seed", "frame", "values", "context"}]}`, each trial compared word for
+word and flag for flag with the block's model under randomised backpressure.
 
 ## Minimal end-to-end
 

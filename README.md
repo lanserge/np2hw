@@ -124,11 +124,13 @@ Design rationale (the "why" behind each mechanism) lives in
   **Switchboard** stack (Verilator/Icarus + `PySbTx`/`PySbRx` queues) — every path
   validated bit-exact against the NumPy reference.
 - **Tooling**: a generic CLI (`run` file-to-file, `view` live camera/screen with
-  sliders + FPS); models are plain `.py` files (no built-in names).
+  sliders + FPS); models are plain `.py` files (no built-in names). A pipeline
+  of blocks runs and generates its design pack with `np2hw pipeline`.
 - **FuseSoC**: ships as a generator (the `np2hw.core` FuseSoC file at the repo
   root, command `np2hw-fusesoc`) --
   a consuming core names a model file and geometry, and the Verilog core is
-  traced during that project's own build, byte-identical on every run.
+  traced during that project's own build, byte-identical on every run; or it
+  names a pipeline (`design`), and gets the pipeline's verified design pack.
 - **Stream plumbing** for the boundaries a traced core sits between: `skid`
   (a registered boundary, so one core's combinational depth stops being the
   next one's), `tee` (one stream, two consumers, never stalling -- a consumer

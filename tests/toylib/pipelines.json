@@ -1,0 +1,139 @@
+{
+  "blocks": {
+    "pipelines": {
+      "description": "A gain then an offset: the smallest pipeline of two blocks.",
+      "parameters": {
+        "bits": {
+          "default": 8,
+          "description": "depth into the pipeline"
+        }
+      },
+      "inputs": [
+        {
+          "name": "in",
+          "bits": "bits",
+          "max_width": 64,
+          "max_height": 8,
+          "context": [
+            "width",
+            "height"
+          ],
+          "description": "samples"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "description": "samples, gained and offset"
+        }
+      ],
+      "nodes": {
+        "g": {
+          "block": "toylib.blocks:gain"
+        },
+        "o": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 5
+          }
+        }
+      },
+      "connections": [
+        [
+          "in",
+          "g.in"
+        ],
+        [
+          "g.out",
+          "o.in"
+        ],
+        [
+          "o.out",
+          "out"
+        ]
+      ]
+    },
+    "wide": {
+      "description": "The pipeline at 10 bits, set from outside.",
+      "inputs": [
+        {
+          "name": "in"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out"
+        }
+      ],
+      "nodes": {
+        "p": {
+          "block": "toylib.pipelines",
+          "build": {
+            "bits": 10
+          }
+        }
+      },
+      "connections": [
+        [
+          "in",
+          "p.in"
+        ],
+        [
+          "p.out",
+          "out"
+        ]
+      ]
+    },
+    "rgb": {
+      "description": "One sample into three channels: a gain, a splitter, a joiner.",
+      "inputs": [
+        {
+          "name": "in",
+          "bits": 10,
+          "max_width": 64,
+          "max_height": 48,
+          "context": [
+            "width",
+            "height"
+          ],
+          "description": "samples"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "description": "three channels"
+        }
+      ],
+      "nodes": {
+        "g": {
+          "block": "toylib.blocks:gain"
+        },
+        "p": {
+          "block": "toylib.blocks:pair"
+        },
+        "t": {
+          "block": "toylib.blocks:triple"
+        }
+      },
+      "connections": [
+        [
+          "in",
+          "g.in"
+        ],
+        [
+          "g.out",
+          "p.in"
+        ],
+        [
+          "p.out",
+          "t.in"
+        ],
+        [
+          "t.out",
+          "out"
+        ]
+      ]
+    }
+  }
+}

@@ -20,6 +20,12 @@ Two layers, deliberately separable:
                 :class:`AxiLiteMaster`. Imported lazily, so this module works
                 without cocotb installed until a BFM is actually used.
 
+  THE RUNNER    :func:`run_cocotb` builds a design under Verilator and runs a
+                cocotb testbench over it, handing the testbench its case as
+                JSON (:func:`load_case`). :mod:`np2hw.testing.block` is the
+                one testbench for every block: it reads what to drive and what
+                to expect from the block's declarations and its model.
+
 The framing rules, in one place because this file is now their reference:
 `sof` marks the first beat of a frame, `eol` the last beat of every line,
 `last` the final beat of the frame. A generated core consumes only `sof` (it
@@ -29,7 +35,10 @@ derived from `last`.
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 # --------------------------------------------------------------------------- #
@@ -335,3 +344,74 @@ class AxiLiteMaster:
             f"read of {address:#06x} was never answered within "
             f"{self.limit} cycles")
         return result
+
+
+# --------------------------------------------------------------------------- #
+# The runner
+# --------------------------------------------------------------------------- #
+
+#: The environment variable a testbench reads its case's path from.
+CASE = "NP2HW_CASE"
+
+
+def load_case() -> dict:
+    """The case :func:`run_cocotb` handed this testbench."""
+    return json.loads(Path(os.environ[CASE]).read_text())
+
+
+def run_cocotb(workdir, verilog: str, toplevel: str, test_module: str,
+               case: dict, test_dir=None) -> None:
+    """Build one design with Verilator and run a cocotb testbench over it.
+
+    Args:
+        workdir: where the source, the case and the build go.
+        verilog: the complete generated source.
+        toplevel: module to elaborate.
+        test_module: the testbench, importable from ``test_dir`` or from the
+            import path (``np2hw.testing.block``).
+        case: stimulus and configuration, handed to the testbench as JSON.
+            The testbench recomputes what to expect from the NumPy model
+            itself, so the model stays the one reference.
+        test_dir: a directory the testbench is imported from, if it is not
+            on the import path.
+
+    Raises:
+        AssertionError: if any cocotb test failed.
+    """
+    from cocotb_tools.runner import get_results, get_runner
+
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    source = workdir / f"{toplevel}.v"
+    source.write_text(verilog)
+    case_path = workdir / "case.json"
+    case_path.write_text(json.dumps(case))
+
+    build_dir = workdir / "sim_build"
+    runner = get_runner("verilator")
+    runner.build(
+        sources=[source],
+        hdl_toplevel=toplevel,
+        build_dir=build_dir,
+        always=True,
+        # np2hw's cores compare unsigned counters against constants and widen
+        # accumulators intentionally; those warnings are expected and are not
+        # allowed to fail the build. Genuine errors still do.
+        build_args=["-Wno-fatal", "--timing"],
+        timescale=("1ns", "1ps"),
+    )
+    results = runner.test(
+        hdl_toplevel=toplevel,
+        test_module=test_module,
+        test_dir=None if test_dir is None else str(test_dir),
+        build_dir=build_dir,
+        # beside the build, not in the test directory or wherever the
+        # runner was started from
+        results_xml=str(workdir / "results.xml"),
+        timescale=("1ns", "1ps"),
+        extra_env={CASE: str(case_path)},
+    )
+    total, failed = get_results(results)
+    assert failed == 0, (
+        f"{failed} of {total} cocotb test(s) failed for {toplevel}; "
+        f"see {results} and the log above")

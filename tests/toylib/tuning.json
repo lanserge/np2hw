@@ -1,0 +1,31 @@
+{
+  "profiles": {
+    "dim": {
+      "for": "toylib.blocks:gain",
+      "values": {
+        "gain": 1
+      }
+    },
+    "rgb": {
+      "for": "toylib.pipelines:rgb",
+      "values": {
+        "g": "toylib.tuning:dim"
+      }
+    },
+    "camera": {
+      "for": "toylib.isp",
+      "values": {
+        "balance.gain": [
+          [
+            300,
+            256
+          ],
+          [
+            256,
+            300
+          ]
+        ]
+      }
+    }
+  }
+}

@@ -201,6 +201,25 @@ class AddrMap:
 # SystemRDL rendering
 # --------------------------------------------------------------------------- #
 
+# SystemRDL 2.0's reserved words. A register, block or design named one of
+# these -- a threshold called ``level``, say -- is written as an escaped
+# identifier (``\level``), which names the same component without the word.
+_RDL_KEYWORDS = frozenset("""
+    abstract accesstype addressingtype addrmap alias all alternate bit boolean
+    bothedge byte compact component componentwidth constraint default encode
+    enum external false field fullalign hw inside int internal level longint
+    mem na negedge nonsticky number onreadtype onwritetype posedge
+    precedencetype property r rclr real ref reg regalign regfile rset ruser rw
+    rw1 shortint shortreal signal signed string struct sw this true type
+    unsigned w w1 wclr with within woclr woset wot wr wset wuser wzc wzs wzt
+""".split())
+
+
+def _rdl_id(name: str) -> str:
+    """An identifier as SystemRDL source: escaped where it is a keyword."""
+    return f"\\{name}" if name in _RDL_KEYWORDS else name
+
+
 def _rdl_string(text: str) -> str:
     """One SystemRDL string literal, whitespace-normalised."""
     return '"' + " ".join(str(text).split()).replace('"', '\\"') + '"'
@@ -259,11 +278,11 @@ def systemrdl(addrmap: AddrMap, header=()) -> str:
                         f"({declared[key]} and {kind}); a SystemRDL property "
                         "has exactly one")
     for key, kind in sorted(declared.items()):
-        a(f"property {key} {{ type = {kind}; component = field; }};")
+        a(f"property {_rdl_id(key)} {{ type = {kind}; component = field; }};")
     if declared:
         a("")
 
-    a(f"addrmap {addrmap.name} {{")
+    a(f"addrmap {_rdl_id(addrmap.name)} {{")
     if addrmap.description:
         a(f"    desc = {_rdl_string(addrmap.description)};")
     a(f"    default regwidth = {addrmap.data_bits};")
@@ -299,13 +318,13 @@ def systemrdl(addrmap: AddrMap, header=()) -> str:
             a(f"                {access}")
             a(f"                reset = 0x{reset:X};")
             for key, value in reg.properties.items():
-                a(f"                {key} = {_property_literal(value)};")
+                a(f"                {_rdl_id(key)} = {_property_literal(value)};")
             a(f"            }} value[{reg.bits - 1}:0];")
-            a(f"        }} {reg.name} @ 0x{reg.offset:04X};")
+            a(f"        }} {_rdl_id(reg.name)} @ 0x{reg.offset:04X};")
         a("    };")
         a("")
 
     for inst in addrmap.instances:
-        a(f"    {inst.block.name}_rf {inst.flat} @ 0x{inst.base:04X};")
+        a(f"    {inst.block.name}_rf {_rdl_id(inst.flat)} @ 0x{inst.base:04X};")
     a("};")
     return "\n".join(lines) + "\n"

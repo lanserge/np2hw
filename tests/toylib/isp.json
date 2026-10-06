@@ -1,0 +1,60 @@
+{
+  "blocks": {
+    "isp": {
+      "description": "The toy ISP: a bias, then a balance. Geometry arrives with the stream.",
+      "parameters": {
+        "bit_depth": {
+          "description": "depth samples arrive at"
+        },
+        "max_width": {
+          "description": "widest frame"
+        },
+        "max_height": {
+          "description": "tallest frame"
+        }
+      },
+      "inputs": [
+        {
+          "name": "in",
+          "bits": "bit_depth",
+          "max_width": "max_width",
+          "max_height": "max_height",
+          "context": [
+            "width",
+            "height",
+            "phase"
+          ],
+          "description": "samples"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "description": "samples, biased and balanced"
+        }
+      ],
+      "nodes": {
+        "bias": {
+          "block": "toylib.blocks:bias"
+        },
+        "balance": {
+          "block": "toylib.blocks:balance"
+        }
+      },
+      "connections": [
+        [
+          "in",
+          "bias.in"
+        ],
+        [
+          "bias.out",
+          "balance.in"
+        ],
+        [
+          "balance.out",
+          "out"
+        ]
+      ]
+    }
+  }
+}

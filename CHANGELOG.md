@@ -19,9 +19,69 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   one lists it in `requires`, and `np2hw.hdl.closure(result)` is the text
   with everything it requires. **`module_name` is gone from all three**:
   a fixed module has one name.
+- **`Block.run` hands the model the type the trace gives its input.** The
+  frame is cast to the smallest unsigned integer holding `bit_depth` bits
+  (`uint8` for an 8-bit stream), so a model that adds before widening wraps
+  in NumPy exactly as in the generated RTL. It used to keep the caller's
+  type (often `uint16` or `int64`), and such a model disagreed with its own
+  hardware; only the twin caught it. A frame with a value outside
+  `bit_depth` bits is now refused instead of being passed through.
+- **A run of the models reads each stage's depth from the trace.**
+  `np2hw.pipeline.run.run_model` tells each block the depth of the word it
+  is given as the composer does, from its driver's traced output
+  (`compose.handed_on`). **`out_depth` is gone from `block`**: it declared
+  a block's output depth beside the trace that already published it, and
+  only the model run read it.
+- **Geometry is read from the trace too, by both.** `compose.handed_on`
+  returns the channels, depth, width and height a block hands on
+  (`compose.Handed`). The composer no longer falls back to the design's
+  geometry for a block that states none -- it refuses -- and a model run
+  builds each block at the traced geometry and refuses a model whose frame
+  comes out other than its trace says.
 
 ### Added
 
+- **`np2hw.blocks`** -- the block framework, moved from revela and
+  relicensed MIT by its author: `block` (the decorator), `Block`,
+  `StreamPort`, `ContextBit`, `configblock`, discovery (`registry`,
+  `resolve`); `np2hw.blocks.params` (register declarations, address
+  allocation) and `np2hw.blocks.stream` (the stream spec and beat helpers).
+  The content that writes blocks binds its pipeline context vocabulary in
+  its own decorator; Verilog traced from a model carries the licence the
+  model's source file states. `tests/` holds the framework's tests, apart
+  from the examples.
+- **`np2hw.design` and `np2hw.pipeline`** -- moved from revela, relicensed
+  MIT by its author. `np2hw.design`: the JSON composite format (its schema,
+  `composite.load`), the netlist a loaded design is, the wiring check,
+  interfaces and profile values. `np2hw.pipeline`: `load`, the composer
+  (`compose`: allocation, the register map, SystemRDL, Verilog) and the RTL
+  twin (`run`). Two of revela's conventions left with the move: the context
+  block (a pipeline's blocks bring a `Vocabulary` naming it, and its commit
+  register) and the licence of generated files and of the map (the one the
+  models' sources state). The schema states no context vocabulary, and
+  generated modules are prefixed with the models' package. `jsonschema` is
+  a dependency.
+- **`np2hw.toolchain.vivado`** -- moved from revela, relicensed MIT by its
+  author: `emit` (the block design and implementation scripts; `name=`
+  names the block design apart from the design), `bdtrace`, and the two
+  checks of what Vivado built, `vendor_check` and `checkhwh`.
+- **`np2hw.pipeline.pack` and `np2hw pipeline run|generate`** -- moved from
+  revela (its `revela.fusesoc` and `revela` command), relicensed MIT by its
+  author. `pack.emit` proves a pipeline's Verilog against its models and
+  writes the design pack; the FuseSoC generator builds one from a `design`
+  parameter. The twin's context comes from the vocabulary
+  (`run.synthetic_context`), and `--context SIGNAL=VALUE` sets one signal
+  for a run. The default VLNV is `:<models' package>:<pipeline>:0`.
+  `python -m np2hw` is the command.
+- **`np2hw.testing.run_cocotb` and `np2hw.testing.block`** -- moved from
+  revela's tests, relicensed MIT by its author: the Verilator + cocotb
+  runner, and the one testbench for every block, which reads what to drive
+  from the block's declarations and names the block by reference.
+  `np2hw.testing` is a package now; what it exported is unchanged. CI
+  installs Verilator, and the `test` extra brings cocotb (Python 3.13 at
+  most; the simulations skip above it).
+- **`np2hw.video_out.pixel_khz(mode)`** -- a raster's pixel clock in kHz,
+  callable from a design's expressions.
 - **`stream_cdc`** -- `np2hw/hdl/np2hw_stream_cdc.v`: a stream with its
   `sof`/`eol`/`last` across two unrelated clocks, on `cdc_fifo`, so a
   crossing sits between two stream ports with nothing to pack.
@@ -30,6 +90,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   scoped to the module: each gray-pointer path datapath-only, bounded by
   the sampling clock's period. `docs/clock-crossings.md` gave the
   constraint; now the module ships it.
+
+### Fixed
+
+- **The SystemRDL map escapes SystemRDL's keywords.** A register, design or
+  instance named one -- a threshold called `level` -- was written bare, and
+  the reference compiler refused the file. It is written as an escaped
+  identifier (`\level`), which names the same component.
 
 ### Changed (resources)
 

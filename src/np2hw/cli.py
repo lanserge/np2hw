@@ -10,6 +10,9 @@ has no built-in model names. Point it at a .py file:
   np2hw run my_isp.py:sharpen in.gif out.gif    # pick a function by name
   np2hw run my_isp.py in.png out.png --param gain=24
 
+A pipeline -- a composite of blocks, by reference -- has its own commands
+(np2hw.pipeline.cli): ``np2hw pipeline run`` and ``np2hw pipeline generate``.
+
 A model file is plain NumPy plus an optional param list:
 
   # my_isp.py
@@ -563,9 +566,13 @@ def main(argv=None):
     v.add_argument("--snapshot", help="headless: write a montage file instead of a window")
     v.add_argument("--frames", type=int, default=8, help="frames for --snapshot")
     v.set_defaults(func=cmd_view)
+    from .pipeline import cli as pipeline_cli
+    pipeline_cli.add_commands(sub)
     args = p.parse_args(argv)
+    if args.cmd == "pipeline":
+        return pipeline_cli.handle(args)
     args.func(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

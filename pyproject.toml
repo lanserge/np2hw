@@ -32,13 +32,18 @@ classifiers = [
     "Topic :: Software Development :: Compilers",
     "Topic :: Software Development :: Embedded Systems",
 ]
-dependencies = ["numpy"]
+dependencies = ["numpy", "jsonschema>=4.0"]
 
 [project.optional-dependencies]
 media = ["pillow"]            # CLI image/GIF IO
 camera = ["opencv-python"]    # `np2hw view --source camera` (webcam)
 switchboard = ["switchboard-hw", "umi"]   # `np2hw run --backend switchboard`
 fusesoc = ["PyYAML"]          # generator-protocol input parsing (FuseSoC ships it too)
+test = ["pytest",              # tests/ -- tests, apart from the examples
+        "systemrdl-compiler>=1.29",  # elaborates the emitted .rdl (MIT)
+        # the simulations (np2hw.testing.run_cocotb); cocotb 2.0 builds for
+        # Python 3.13 at most, so above that they skip
+        'cocotb>=2.0; python_version < "3.14"']
 
 [project.urls]
 Homepage = "https://github.com/lanserge/np2hw"
@@ -53,4 +58,7 @@ np2hw-fusesoc = "np2hw.fusesoc:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-np2hw = ["hdl/*.v", "hdl/*.xdc"]
+np2hw = ["hdl/*.v", "hdl/*.xdc", "design/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
