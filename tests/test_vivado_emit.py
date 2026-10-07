@@ -207,3 +207,109 @@ def test_a_block_is_emitted_by_its_implementations_names(library, tmp_path):
     assert "CONFIG.MODE {fast}" in tcl
     assert "[get_bd_pins rx/Q_A]" in tcl
     assert "rx/q]" not in tcl
+
+
+def test_each_window_a_leaf_publishes_is_set_where_vivado_records_it(
+        library, tmp_path):
+    """The decoder's windows become the slaves' segments, each in the space
+    of the decoder port it hangs off, at the address the hardware decodes;
+    the processor's own map is left to Vivado's assignment, after."""
+    lib = library({"top": {
+        "nodes": {
+            "dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["a.S_AXI.window", "b.S_AXI.window"],
+                "base": 0x4000_0000, "span": 0x4000_0000}},
+            "a": {"block": f"{IP}:regs"},
+            "b": {"block": f"{IP}:regs"}},
+        "connections": [["dec.m00_axi", "a.S_AXI"],
+                        ["dec.m01_axi", "b.S_AXI"]]}})
+    design = load(f"{lib}.lib:top")
+    windows = design.instances["dec"].leaf["facts"]["windows"]
+    _, s = render(design, tmp_path)
+    explicit = [a for a in s["addresses"] if "-offset" in a]
+    assert explicit == [
+        ["-target_address_space", f"/dec/{port}", "-offset", f"{base:#010x}",
+         "-range", "4K", f"{slave}/S_AXI"]
+        for (port, (base, _)), slave in zip(windows.items(), ("a", "b"))]
+    assert s["addresses"][-1] == []           # then Vivado's, for the rest
+
+    # and the host's map is the same windows, by slave
+    from np2hw.bus import address_map
+    assert address_map(design) == {
+        slave: {"base": base, "size": size, "port": "S_AXI"}
+        for slave, (base, size) in zip(("a", "b"), windows.values())}
+
+
+def test_a_window_is_walked_through_a_block_that_only_forwards(library,
+                                                               tmp_path):
+    """Behind an arbiter, the slave that decodes the window is the one the
+    host maps, and Vivado is told the window at every hop."""
+    lib = library({"top": {
+        "nodes": {
+            "dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["a.S_AXI.window"],
+                "base": 0x4000_0000, "span": 0x4000_0000}},
+            "arb": {"block": "np2hw.hdl.bus:axil_arbiter"},
+            "a": {"block": f"{IP}:regs"}},
+        "connections": [["dec.m00_axi", "arb.s0_axi"],
+                        ["arb.m_axi", "a.S_AXI"]]}})
+    design = load(f"{lib}.lib:top")
+    from np2hw.bus import address_map
+    assert address_map(design) == {
+        "a": {"base": 0x4000_0000, "size": 0x1000, "port": "S_AXI"}}
+    _, s = render(design, tmp_path)
+    assert [a for a in s["addresses"] if "-offset" in a] == [
+        ["-target_address_space", "/dec/m00_axi", "-offset", "0x40000000",
+         "-range", "4K", "arb/s0_axi"],
+        ["-target_address_space", "/arb/m_axi", "-offset", "0x40000000",
+         "-range", "4K", "a/S_AXI"]]
+
+
+MASTER_GEN = '''
+def master(bits: int) -> dict:
+    """A second master into one register file -- a cable's bridge."""
+    from np2hw.design.interfaces import expand
+    from np2hw.ports import Pin, header, published
+    pins = [Pin("clk", "input")] + [
+        Pin(n, d, w, bus=("xilinx.com:interface:aximm:1.0", "M_AXI",
+                          n[6:].upper()))
+        for n, (d, w) in expand({"name": "M_AXI", "bus": "axilite"},
+                                "outputs", bits).items()]
+    return {"verilog": "\\\\n".join(header("master", pins)) + "\\\\nendmodule\\\\n",
+            "module": "master", "interface": {"ports": published(pins)},
+            "facts": {"windows": {"M_AXI": [0, 1 << bits]}}}
+
+
+master.leaf = True
+'''
+
+
+def test_a_second_masters_reach_is_its_own_and_shares_the_hop_once(
+        library, tmp_path):
+    """Two masters into one register file through an arbiter: the second
+    master's window is set where it starts, the hop behind the arbiter
+    keeps the register bus's placement, and the host's map has only the
+    register bus's windows."""
+    lib = library(lambda name: {"top": {
+        "nodes": {
+            "dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["a.S_AXI.window"],
+                "base": 0x4000_0000, "span": 0x4000_0000}},
+            "cable": {"block": f"{name}.gen:master", "build": {"bits": 12}},
+            "arb": {"block": "np2hw.hdl.bus:axil_arbiter"},
+            "a": {"block": f"{IP}:regs"}},
+        "connections": [["dec.m00_axi", "arb.s0_axi"],
+                        ["cable.M_AXI", "arb.s1_axi"],
+                        ["arb.m_axi", "a.S_AXI"]]}}, files={"gen.py": MASTER_GEN})
+    design = load(f"{lib}.lib:top")
+    from np2hw.bus import address_map
+    assert address_map(design) == {
+        "a": {"base": 0x4000_0000, "size": 0x1000, "port": "S_AXI"}}
+    _, s = render(design, tmp_path)
+    assert [a[:4] + a[-2:] for a in s["addresses"] if "-offset" in a] == [
+        ["-target_address_space", "/dec/m00_axi", "-offset", "0x40000000",
+         "4K", "arb/s0_axi"],
+        ["-target_address_space", "/arb/m_axi", "-offset", "0x40000000",
+         "4K", "a/S_AXI"],
+        ["-target_address_space", "/cable/M_AXI", "-offset", "0x00000000",
+         "4K", "arb/s1_axi"]]

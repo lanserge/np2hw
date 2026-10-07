@@ -1248,3 +1248,92 @@ def test_a_composite_input_that_does_not_exist_needs_no_driver(library):
     assert "i.a" in load(f"{lib(0)}.lib:top").instances
     with pytest.raises(CompositionError, match="aux.*driven by nothing"):
         load(f"{lib(1)}.lib:top")
+
+
+# -- a register bus: windows read from the slaves, placed by the allocator -- #
+
+SLAVE_GEN = '''
+def regs(bits: int) -> dict:
+    """A register file, generated for its address width."""
+    from np2hw.design.interfaces import expand
+    from np2hw.ports import Pin, header, published
+    pins = [Pin("aclk", "input")] + [
+        Pin(n, d, w, bus=("xilinx.com:interface:aximm:1.0", "s_axi",
+                          n[6:].upper()))
+        for n, (d, w) in expand({"name": "s_axi", "bus": "axilite"},
+                                "inputs", bits).items()]
+    text = "\\\\n".join(header("regs", pins)) + "\\\\nendmodule\\\\n"
+    return {"verilog": text, "module": "regs",
+            "interface": {"ports": published(pins)}}
+
+
+regs.leaf = True
+'''
+
+DESCRIBED = {"parameters": {"AWB": {"default": 9}},
+             "inputs": [{"name": "aclk"},
+                        {"name": "ctrl", "bus": "axilite", "width": "AWB"}],
+             "vivado": {"module": "described"}, "sources": ["d.v"]}
+
+
+def _bus(library, awb=9):
+    lib = library(lambda name: {"lib": {"described": DESCRIBED, "top": {
+        "nodes": {
+            "dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["big.ctrl.window", "gen.s_axi.window",
+                          "small.ctrl.window"],
+                "base": 0x4000_0000, "span": 0x4000_0000}},
+            "small": {"block": f"{name}.lib:described"},
+            "big": {"block": f"{name}.lib:described",
+                    "build": {"AWB": awb}},
+            "gen": {"block": f"{name}.gen:regs", "build": {"bits": 13}}},
+        "connections": [["dec.m00_axi", "big.ctrl"],
+                        ["dec.m01_axi", "gen.s_axi"],
+                        ["dec.m02_axi", "small.ctrl"]]}}},
+        python={"gen": SLAVE_GEN})
+    return load(f"{lib}.lib:top")
+
+
+def test_a_bus_places_each_slave_by_the_window_it_states(library):
+    """Sizes come from the slaves -- declared, set by a parameter, or
+    published by a generator listed after the decoder -- and the decoder
+    publishes where each one landed."""
+    design = _bus(library, awb=15)
+    windows = design.instances["dec"].leaf["facts"]["windows"]
+    # 32K (2**15), 8K (2**13), and a 512-byte file given a whole page
+    assert windows == {"m00_axi": [0x4000_0000, 0x8000],
+                       "m01_axi": [0x4000_8000, 0x2000],
+                       "m02_axi": [0x4000_A000, 0x1000]}
+
+
+def test_a_slave_without_an_address_width_cannot_be_given_a_window(library):
+    lib = library(lambda name: {"lib": {"top": {
+        "nodes": {"dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                      "sizes": ["ip.S_AXI.window"],
+                      "base": 0x4000_0000, "span": 0x4000_0000}},
+                  "ip": {"block": "toylib.ip:constant"}},
+        "connections": []}}})
+    with pytest.raises(CompositionError, match="states no AXI4-Lite slave "
+                       "port 'S_AXI'"):
+        load(f"{lib}.lib:top")
+
+
+def test_an_implementation_setting_may_hold_only_where_another_enables_it(
+        library):
+    block = {"parameters": {"implementation": {"default": "'x'"},
+                            "dual": {"default": 0}, "width2": {"default": 8}},
+             "outputs": [{"name": "q"}],
+             "implementations": {"x": {"vivado": {"ip": "v:x"}, "config": {
+                 "DUAL": "dual",
+                 "WIDTH2": {"value": "width2", "when": "dual"},
+                 "WORD": "@np2hw.toolchain.vivado:hex_word(width2)"}}}}
+
+    def config(dual):
+        lib = library(lambda name, dual=dual: {"lib": {"b": block, "top": {
+            "nodes": {"g": {"block": f"{name}.lib:b",
+                            "build": {"dual": dual}}},
+            "connections": []}}})
+        return load(f"{lib}.lib:top").instances["g"].config
+
+    assert config(0) == {"DUAL": 0, "WORD": "0x00000008"}
+    assert config(1) == {"DUAL": 1, "WIDTH2": 8, "WORD": "0x00000008"}

@@ -360,7 +360,7 @@ def load_case() -> dict:
 
 
 def run_cocotb(workdir, verilog: str, toplevel: str, test_module: str,
-               case: dict, test_dir=None) -> None:
+               case: dict, test_dir=None, parameters=None) -> None:
     """Build one design with Verilator and run a cocotb testbench over it.
 
     Args:
@@ -374,6 +374,7 @@ def run_cocotb(workdir, verilog: str, toplevel: str, test_module: str,
             itself, so the model stays the one reference.
         test_dir: a directory the testbench is imported from, if it is not
             on the import path.
+        parameters: the top module's parameters, ``{name: value}``.
 
     Raises:
         AssertionError: if any cocotb test failed.
@@ -398,6 +399,7 @@ def run_cocotb(workdir, verilog: str, toplevel: str, test_module: str,
         # accumulators intentionally; those warnings are expected and are not
         # allowed to fail the build. Genuine errors still do.
         build_args=["-Wno-fatal", "--timing"],
+        parameters=dict(parameters or {}),
         timescale=("1ns", "1ps"),
     )
     results = runner.test(

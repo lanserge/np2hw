@@ -1,0 +1,65 @@
+{
+  "blocks": {
+    "stream_cdc": {
+      "description": "An np2hw stream with its framing flags crossing between two unrelated clocks: np2hw's stream_cdc, on its dual-clock FIFO. A link reset must assert both sides; the pointer paths are constrained by np2hw's own file, scoped to the FIFO.",
+      "parameters": {
+        "DATA_BITS": {
+          "description": "The stream's data width."
+        },
+        "A": {
+          "default": 4,
+          "description": "The FIFO holds 2**A beats: it absorbs jitter, it is not a rate adapter."
+        }
+      },
+      "inputs": [
+        {
+          "name": "wclk"
+        },
+        {
+          "name": "wrst",
+          "description": "The write side's reset, active high."
+        },
+        {
+          "name": "in",
+          "stream": [
+            "sof",
+            "eol",
+            "last"
+          ],
+          "width": "DATA_BITS"
+        },
+        {
+          "name": "rclk"
+        },
+        {
+          "name": "rrst",
+          "description": "The read side's reset, active high."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "stream": [
+            "sof",
+            "eol",
+            "last"
+          ],
+          "width": "DATA_BITS"
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_stream_cdc"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_stream_cdc.v",
+        "np2hw.hdl:np2hw_cdc_fifo.v"
+      ],
+      "constraints": [
+        {
+          "file": "np2hw.hdl:np2hw_cdc_fifo.xdc",
+          "scoped_to": "np2hw_cdc_fifo"
+        }
+      ]
+    }
+  }
+}

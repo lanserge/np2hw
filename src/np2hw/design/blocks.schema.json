@@ -56,7 +56,7 @@
       "pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)+(:[a-z_][a-z0-9_]*)?$"
     },
     "value": {
-      "description": "A number or an array is a literal; a string is ALWAYS an expression, in Python syntax, over the parameters in the scope of the composite it is written in.",
+      "description": "A number is a literal and a string is ALWAYS an expression, in Python syntax, over the parameters in the scope of the composite it is written in; an array holds either, item by item.",
       "oneOf": [
         {
           "type": "integer"
@@ -68,7 +68,7 @@
         {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/literal"
+            "$ref": "#/$defs/item"
           }
         }
       ]
@@ -336,6 +336,10 @@
           "additionalProperties": {
             "$ref": "#/$defs/implementation"
           }
+        },
+        "facts": {
+          "type": "object",
+          "description": "What a module states about itself that a design or a toolchain reads: `forwards` ({its slave port: its master port}) for a bus block that passes an access on unchanged."
         }
       }
     },
@@ -627,9 +631,29 @@
         "config": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/value"
+            "oneOf": [
+              {
+                "$ref": "#/$defs/value"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "value",
+                  "when"
+                ],
+                "properties": {
+                  "value": {
+                    "$ref": "#/$defs/value"
+                  },
+                  "when": {
+                    "$ref": "#/$defs/value"
+                  }
+                }
+              }
+            ]
           },
-          "description": "The implementation's own settings, as expressions over the block's parameters."
+          "description": "The implementation's own settings, as expressions over the block's parameters; {value, when} is set only where `when` holds, for a setting the tool refuses unless another enables it."
         },
         "tie": {
           "type": "object",
@@ -646,6 +670,23 @@
           "description": "A bus port of the block -> how this implementation names its signals: a pattern with {signal} (axi_awaddr) or {SIGNAL} (AWADDR), where it is not <port>_<signal>."
         }
       }
+    },
+    "item": {
+      "oneOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/item"
+          }
+        }
+      ]
     }
   },
   "anyOf": [

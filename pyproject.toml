@@ -58,7 +58,7 @@ np2hw-fusesoc = "np2hw.fusesoc:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-np2hw = ["hdl/*.v", "hdl/*.xdc", "design/*.json"]
+np2hw = ["hdl/*.v", "hdl/*.xdc", "hdl/*.json", "design/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

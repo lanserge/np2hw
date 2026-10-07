@@ -1,0 +1,122 @@
+{
+  "blocks": {
+    "axi3_to_axil": {
+      "description": "A processor's AXI3 port (12-bit IDs, the Zynq-7000's general-purpose port) onto an AXI4-Lite bus: one transaction at a time each way, IDs echoed, a burst one access per beat.",
+      "inputs": [
+        {
+          "name": "aclk"
+        },
+        {
+          "name": "aresetn",
+          "description": "Active low, on aclk."
+        },
+        {
+          "name": "s_axi",
+          "bus": "axi3",
+          "width": 32,
+          "id_width": 12,
+          "description": "The processor's port."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "m_axi",
+          "bus": "axilite",
+          "width": 32,
+          "description": "The register bus."
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_axi3_to_axil"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_axi3_to_axil.v"
+      ]
+    },
+    "axil_arbiter": {
+      "description": "Two AXI4-Lite masters onto one slave: each direction grants one whole transaction at a time and alternates when both ask.",
+      "inputs": [
+        {
+          "name": "aclk"
+        },
+        {
+          "name": "aresetn",
+          "description": "Active low, on aclk."
+        },
+        {
+          "name": "s0_axi",
+          "bus": "axilite",
+          "width": 32
+        },
+        {
+          "name": "s1_axi",
+          "bus": "axilite",
+          "width": 32
+        }
+      ],
+      "outputs": [
+        {
+          "name": "m_axi",
+          "bus": "axilite",
+          "width": 32
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_axil_arbiter"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_axil_arbiter.v"
+      ],
+      "facts": {
+        "forwards": {
+          "s0_axi": "m_axi",
+          "s1_axi": "m_axi"
+        }
+      }
+    },
+    "reset_sync": {
+      "description": "A reset for one clock domain: asserted at once by any source, released on the domain's clock STAGES edges after the last one lets go.",
+      "parameters": {
+        "STAGES": {
+          "default": 3,
+          "description": "Flops between the release and the outputs."
+        }
+      },
+      "inputs": [
+        {
+          "name": "clk"
+        },
+        {
+          "name": "rst_n_in",
+          "description": "A reset source, active low."
+        },
+        {
+          "name": "locked",
+          "description": "A clock generator's lock, active high; tie high where there is none."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "rst_n",
+          "description": "The domain's reset, active low."
+        },
+        {
+          "name": "rst",
+          "description": "The same reset, active high."
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_reset_sync"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_reset_sync.v"
+      ],
+      "constraints": [
+        {
+          "file": "np2hw.hdl:np2hw_reset_sync.xdc",
+          "scoped_to": "np2hw_reset_sync"
+        }
+      ]
+    }
+  }
+}

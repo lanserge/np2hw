@@ -51,6 +51,24 @@ class EmitError(ValueError):
     pass
 
 
+def hex_word(value: int) -> str:
+    """A 32-bit value as Vivado's IP writes one (``0x0000002A``), for a
+    design's expression to set an IP property that takes that form:
+    ``"@np2hw.toolchain.vivado:hex_word(default)"``."""
+    return f"0x{int(value) & 0xFFFFFFFF:08X}"
+
+
+hex_word.expression = True
+
+
+def _range(size: int) -> str:
+    """A window's size as Vivado writes a range: 4K, 64K, 1M, 1G."""
+    for unit, shift in (("G", 30), ("M", 20), ("K", 10)):
+        if size >= 1 << shift and size % (1 << shift) == 0:
+            return f"{size >> shift}{unit}"
+    raise EmitError(f"a window of {size:#x} bytes is no Vivado range")
+
+
 def cell_names(design) -> dict:
     """Each leaf's cell in the block design: its node's own name, which a
     block design holds once."""
@@ -282,6 +300,38 @@ def emit(design, *, out: Path, part: str, board_part: str,
     w("")
     for inst, v in late:
         procedure(inst, v)
+
+    # Addresses. A leaf that decides where the slaves on its ports sit
+    # publishes it -- the fact `windows`, {its port: [base, size]} -- and
+    # each is set where Vivado records it: the slave's segment, in the
+    # address space of the port it hangs off. Vivado's own assignment then
+    # covers only the processor's map (its general-purpose port onto the
+    # bus, its memory port onto memory), which it knows; anything it would
+    # otherwise place on our ports at an offset of its own choosing is
+    # already placed, at the address the hardware decodes.
+    # Through a block that only forwards (np2hw.bus.hops), each hop is
+    # set in the space of the port before it, at the same window.
+    from np2hw.bus import hops
+
+    def pin(path, port):
+        return "/".join((cell[path], split(f"{path}.{port}")[1]))
+
+    placed, done = False, set()
+    for base, size, chain, _ in hops(design):
+        for space, slave in chain:
+            # a hop two masters' walks share is set once, by the first:
+            # Vivado records a segment once in an address space
+            if (space, slave) in done:
+                continue
+            done.add((space, slave))
+            w(f"assign_bd_address -target_address_space /{pin(*space)} "
+              f"-offset {base:#010x} -range {_range(size)} "
+              f"[get_bd_addr_segs -of_objects [get_bd_intf_pins "
+              f"{pin(*slave)}]]")
+            placed = True
+    w("assign_bd_address")
+    if placed:
+        w("")
 
     w("validate_bd_design")
     # The described vendor blocks' pins as the tool built them -- after

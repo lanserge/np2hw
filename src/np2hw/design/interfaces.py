@@ -167,9 +167,10 @@ def from_result(result: dict, generator) -> dict:
     The generator returns what an np2hw generator returns -- ``verilog``,
     ``module`` and an ``interface`` publishing every port -- and may add
     ``file`` (the Verilog's file name, ``<module>.v`` by default),
-    ``files`` (anything else it writes beside it, by name) and ``sources``
-    (fixed files it is built from, as ``"package:file"``). Nothing here
-    is restated: the ports are the generator's own list."""
+    ``files`` (anything else it writes beside it, by name), ``sources``
+    (fixed files it is built from, as ``"package:file"``) and ``facts``
+    (what it decided that a design or a build reads back, by name).
+    Nothing here is restated: the ports are the generator's own list."""
     iface = result.get("interface") or {}
     ports = iface.get("ports")
     if not ports:
@@ -195,6 +196,7 @@ def from_result(result: dict, generator) -> dict:
         # EDID image) is written beside it but is not a source
         "generated": sorted(f for f in files if f.endswith((".v", ".sv"))),
         "files": files,
+        "facts": dict(result.get("facts", {})),
     }
 
 

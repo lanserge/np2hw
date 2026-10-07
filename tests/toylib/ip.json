@@ -17,6 +17,25 @@
       "vivado": {
         "ip": "vendor.com:ip:concat"
       }
+    },
+    "regs": {
+      "description": "A vendor register file: an AXI4-Lite slave with a 9-bit address.",
+      "inputs": [
+        {
+          "name": "s_axi_aclk"
+        },
+        {
+          "name": "s_axi_aresetn"
+        },
+        {
+          "name": "S_AXI",
+          "bus": "axilite",
+          "width": 9
+        }
+      ],
+      "vivado": {
+        "ip": "vendor.com:ip:regs"
+      }
     }
   }
 }

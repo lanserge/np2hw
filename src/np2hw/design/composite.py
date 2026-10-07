@@ -669,7 +669,10 @@ class _Loader:
 
     def evaluate_build(self, raw, scope: str, where: str, active=()):
         """A literal, or an expression over build parameters in ``scope``,
-        as an integer."""
+        as an integer; a list, item by item."""
+        if isinstance(raw, list):
+            return [self.evaluate_build(item, scope, where, active)
+                    for item in raw]
         if not isinstance(raw, str):
             return raw
         tree = parse(raw, where)
@@ -679,6 +682,8 @@ class _Loader:
             fact = self.implementation_fact(target, where)
             if fact is None:
                 fact = self.port_fact(target, where)
+            if fact is None:
+                fact = self.window_fact(target, where)
             if fact is not None:
                 return fact
             if self.classify(target, where) != "build":
@@ -791,6 +796,47 @@ class _Loader:
         raise CompositionError(
             f"{where}: {target}: {node.found.ref} has no port {port!r} "
             f"(inputs {sorted(inputs)}, outputs {sorted(outputs)})")
+
+    #: The smallest register window a bus gives a slave: one page, so a host
+    #: maps each slave apart from its neighbours.
+    PAGE = 0x1000
+
+    def window_fact(self, target: str, where: str):
+        """``node.port.window`` -- the address window an AXI4-Lite slave
+        port needs: two to the power of its address width, at least a page;
+        or None where `target` names no such thing. The width is the
+        slave's own statement -- declared on its block, published by its
+        generator, or published by its build where it is built whole --
+        and reading it builds the slave first, whatever order the design
+        lists its nodes in."""
+        node, rest = self.split(target, where)
+        port, dot, fact = rest.partition(".")
+        if not dot or fact != "window":
+            return None
+        width = None
+        if node.kind == "composite":
+            ports = self.built_whole(node.path).leaf["ports"]
+        else:
+            if (self.generate and node.kind == "generator"
+                    and getattr(node.found.obj, "leaf", False)):
+                node.found = self.generated_leaf(node.path, node)
+            obj = node.found.obj if isinstance(node.found.obj, dict) else {}
+            ports = obj.get("ports")
+            if ports is None:
+                for p in obj.get("inputs", []):
+                    if p["name"] == port and p.get("bus") == "axilite":
+                        width = self.evaluate_build(
+                            p.get("width", 32), node.path,
+                            f"{where}: {target}")
+        if ports is not None:
+            width = next((p["width"] for p in ports
+                          if p["name"] == f"{port}_awaddr"
+                          and p["direction"] == "input"), None)
+        if not isinstance(width, int):
+            raise CompositionError(
+                f"{where}: {target}: {node.found.ref} states no AXI4-Lite "
+                f"slave port {port!r} with an address width")
+        return max(self.PAGE, 1 << width)
 
     def subdesign(self, path: str) -> Design:
         """The composite at `path` as a design of its own: the instances
@@ -951,6 +997,8 @@ class _Loader:
         # A generator that makes a leaf -- a receiver, a raster -- is called
         # now, with its build settings evaluated, and what it publishes
         # stands in for a declaration: its ports, its module, its Verilog.
+        # (A node another one read a fact of is generated already: its
+        # kind is no longer "generator".)
         for path, node in self.nodes.items():
             if (self.generate and node.kind == "generator"
                     and path not in self.inactive
@@ -1087,22 +1135,38 @@ class _Loader:
                 for port in block.get(side, [])
                 if "when" not in port or self.evaluate_build(
                     port["when"], path, f"{where}: {port['name']}: when")]
-        leaf["implementation_config"] = {
-            key: self.evaluate_build(raw, path,
-                                     f"{where}: implementation {name}: "
-                                     f"config {key}")
-            for key, raw in chosen.get("config", {}).items()}
+        config = {}
+        for key, raw in chosen.get("config", {}).items():
+            here = f"{where}: implementation {name}: config {key}"
+            if isinstance(raw, dict):
+                if not self.evaluate_build(raw["when"], path, f"{here}: when"):
+                    continue
+                raw = raw["value"]
+            config[key] = self.evaluate_build(raw, path, here)
+        leaf["implementation_config"] = config
         leaf["filled_by"] = {"implementation": name, "chosen": chosen}
         return Found(node.found.ref, "primitive", leaf, node.found.folder)
 
     def instance(self, path: str, node: _Node, aliases: dict) -> Instance:
-        build = self.build_settings(path, node)
+        # A leaf generator left uncalled (generate=False) has no arguments
+        # to evaluate: they would be spent making the module, and may read
+        # facts only the generated design has.
+        build = ({} if node.kind == "generator" and not self.generate
+                 else self.build_settings(path, node))
         if isinstance(node.found.obj, dict) and (
                 "made_by" in node.found.obj or "filled_by" in node.found.obj):
             # its settings were the generator's arguments, spent making the
             # module, or the block's, spent choosing and setting its
             # implementation; none is a parameter of the module itself
             build = {}
+        elif node.kind == "primitive" and isinstance(node.found.obj, dict):
+            # A declared default is the parameter's value where nothing sets
+            # it -- for every reader of the instance: its port widths, the
+            # facts read off it, the module the toolchain instantiates.
+            for name, spec in node.found.obj.get("parameters", {}).items():
+                if name not in build and "default" in spec:
+                    build[name] = self.build_value(
+                        _join(path, name), f"{path} ({node.found.ref})", ())
         leaf = node.found.obj
         overrides: dict = {}
         if node.kind == "block":
@@ -1147,7 +1211,24 @@ class _Loader:
 
     def register_value(self, setting: _Setting, target: str, aliases: dict):
         """A literal, a constant from build parameters, or an alias. None
-        for an alias: the register's value is its source's."""
+        for an alias: the register's value is its source's. A list holds
+        literals and constants, item by item; an alias is a whole register."""
+        if isinstance(setting.raw, list):
+            def constant(item):
+                if isinstance(item, list):
+                    return [constant(i) for i in item]
+                if not isinstance(item, str):
+                    return item
+                tree = parse(item, setting.where)
+                for name in references(tree):
+                    if self.classify(self.resolve_name(setting.scope, name),
+                                     setting.where) == "register":
+                        raise CompositionError(
+                            f"{setting.where}: {item!r} reads {name}, a "
+                            "register; an item of a list is a constant")
+                return evaluate(tree, lambda name: self.build_value(
+                    self.resolve_name(setting.scope, name), setting.where, ()))
+            return constant(setting.raw)
         if not isinstance(setting.raw, str):
             return setting.raw
         tree = parse(setting.raw, setting.where)

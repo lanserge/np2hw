@@ -313,6 +313,19 @@ backpressure on both sides), and `AxiLiteMaster`, whose handshake timing
 matches the register file np2hw emits. `axis_video_map` states the AXI4-Stream
 Video signal mapping, owned here because `axis_video_wrap` writes it.
 
+## A register bus (`np2hw.bus`, `np2hw.hdl.bus`)
+
+Fixed modules a design places by reference: `np2hw.hdl.bus:axi3_to_axil`
+(a processor's AXI3 port onto AXI4-Lite), `:axil_arbiter` (two masters onto
+one slave) and `:reset_sync` (a reset per clock domain). The decoder is
+`np2hw.bus:axil_decoder`, built with each slave's window size -- usually
+the slave's own fact, `node.port.window` -- and the region the processor
+reaches (`base`, `span`); `np2hw.bus.allocate` places the windows, and the
+decoder publishes where they landed as its fact `windows` (`{port: [base,
+size]}`; a size of 0 makes no port). The Vivado emitter sets each window as
+the slave's segment, and `np2hw.bus.address_map(design)` gives the host the
+same windows by slave.
+
 ## Simulations (`np2hw.testing`)
 
 `run_cocotb(workdir, verilog, toplevel, test_module, case, test_dir=None)`

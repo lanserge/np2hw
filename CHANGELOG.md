@@ -32,6 +32,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   (`compose.handed_on`). **`out_depth` is gone from `block`**: it declared
   a block's output depth beside the trace that already published it, and
   only the model run read it.
+- **An uncalled leaf generator's build is not evaluated** (a load with
+  `generate=False`): it would be spent making the module, and may read
+  facts only the generated design has.
+- **A primitive's declared default is its instance's value.** An instance
+  carries every parameter its block declares a default for, so the wiring
+  check, the toolchain and the facts read one value; the wiring check used
+  to refuse a width reading a defaulted parameter as never set.
 - **Geometry is read from the trace too, by both.** `compose.handed_on`
   returns the channels, depth, width and height a block hands on
   (`compose.Handed`). The composer no longer falls back to the design's
@@ -80,8 +87,60 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   `np2hw.testing` is a package now; what it exported is unchanged. CI
   installs Verilator, and the `test` extra brings cocotb (Python 3.13 at
   most; the simulations skip above it).
+- **A register bus of fixed modules** (`np2hw/hdl`), each simulated against
+  strict bus models with random stalls in `tests/`:
+  `np2hw_axi3_to_axil` (a processor's AXI3 port onto AXI4-Lite: IDs
+  echoed, a burst one access per beat, a write burst answering its worst
+  response), `np2hw_axil_decoder` (one master onto N slaves by
+  power-of-two windows, DECERR for an address in none), `np2hw_axil_arbiter`
+  (two masters onto one slave, alternating), `np2hw_reset_sync`
+  (asynchronous assertion, release on the domain's clock). Their library
+  descriptions are `np2hw.hdl.bus:axi3_to_axil`, `:axil_arbiter`,
+  `:reset_sync`.
+- **`np2hw.bus.axil_decoder(sizes, base, span)`** -- the decoder a design
+  places: a leaf giving each slave its own `mNN_axi` interface, its
+  windows placed by `np2hw.bus.allocate` (largest first, each aligned to
+  its size) and published as the leaf's fact `windows`, `{port: [base,
+  size]}`. A size of 0 is an optional slave absent from the build: its
+  port is not made, and the others keep their numbers.
+  `np2hw.bus.address_map(design)` is where every slave sits, for the host,
+  read from those windows and the design's edges.
+- **The Vivado emitter sets every published window** as the slave's
+  segment in the address space of the port it hangs off -- at every hop,
+  through a block that only forwards -- then leaves the processor's own
+  map to Vivado's assignment. A description may state `facts`; the
+  arbiter's `forwards` ({slave port: master port}) is how a window is
+  walked through it (`np2hw.bus.hops`), to the slave the host maps.
+- **A second master's reach is recorded, and kept out of the host's
+  map.** `ddc_slave` publishes its master's window (`[0, 2**AW)`); the
+  Vivado emitter sets it where it starts and sets a hop two masters' walks
+  share once, keeping the register bus's placement; `address_map` holds
+  the decoders' windows only. The block design no longer leaves the
+  bridge's address space unassigned (`[BD 41-1630]`).
+- **An implementation setting may be conditional**: `{"value", "when"}`
+  is set only where `when` holds, for a property a tool refuses unless
+  another enables it. `np2hw.toolchain.vivado.hex_word` writes a word the
+  way Vivado's IP takes one.
+- **`np2hw/hdl/np2hw_reset_sync.xdc`** -- the reset synchroniser's timing
+  intent, scoped to the module and named in its description: its
+  asynchronous clear and preset are not timing paths (assertion may land
+  at any moment; release is what the chain resynchronises). Without it a
+  link's reset into another domain's synchroniser failed recovery by
+  whatever the two clocks' phase happened to be.
+- **checkhwh knows np2hw's reset synchroniser** (its ancestry is both its
+  sources') and audits np2hw's bus modules as interconnects.
+- **`node.port.window`** -- the address window an AXI4-Lite slave port
+  needs (two to its address width, at least a page), read from what the
+  slave states or publishes; reading it builds the slave first. A leaf
+  generator may publish `facts`.
+- **A list in a design may hold expressions**, each evaluated like any
+  other.
+- **`run_cocotb(..., parameters=)`** sets the top module's parameters.
 - **`np2hw.video_out.pixel_khz(mode)`** -- a raster's pixel clock in kHz,
   callable from a design's expressions.
+- **`np2hw.hdl.stream:stream_cdc`** -- the stream crossing's library
+  description (ports, sources, its scoped constraints), shipped with the
+  module instead of in the content that places it.
 - **`stream_cdc`** -- `np2hw/hdl/np2hw_stream_cdc.v`: a stream with its
   `sof`/`eol`/`last` across two unrelated clocks, on `cdc_fifo`, so a
   crossing sits between two stream ports with nothing to pack.

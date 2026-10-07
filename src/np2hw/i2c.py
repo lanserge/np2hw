@@ -366,4 +366,7 @@ def ddc_slave(reg_addr7: int = 0x37,
             "reg_addr7": reg_addr7,
             "edid_addr7": edid_addr7 if have_edid else None,
         },
+        # where its master reaches: the whole register space a host on the
+        # cable can address, from 0 -- for a toolchain that records it
+        "facts": {"windows": {"M_AXI": [0, 1 << AW]}},
     }
