@@ -436,6 +436,10 @@
             "late"
           ],
           "description": "When a procedure runs: with the cells, in declaration order (the default), or after every connection -- where the bus automation goes."
+        },
+        "integrator": {
+          "type": "boolean",
+          "description": "An IP Vivado makes only inside a block design (an AXI interconnect): a toolchain building from Verilog puts it in the block design it builds for such leaves."
         }
       }
     },

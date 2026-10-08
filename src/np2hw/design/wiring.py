@@ -50,7 +50,8 @@ def _kind(vlnv: str) -> str:
 
 def facts(inst) -> dict | None:
     """``{"signals": {name: (direction, width)}, "bundles": {name: {kind,
-    side, width}}}`` for one leaf, at this instance's parameters, or None
+    side, width, members}}}`` for one leaf, at this instance's parameters
+    -- a bundle's members its signals, by name -- or None
     where it states no ports."""
     obj = inst.leaf if isinstance(inst.leaf, dict) else None
     if obj is None:
@@ -66,7 +67,8 @@ def facts(inst) -> dict | None:
             data = (signals.get(f"{name}_data") if kind == "stream" else
                     signals.get(f"{name}_tdata") if kind == "axis" else None)
             bundles[name] = {"kind": kind, "side": bus["side"],
-                             "width": data[1] if data else None}
+                             "width": data[1] if data else None,
+                             "members": [p["name"] for p in bus["ports"]]}
         return {"signals": signals, "bundles": bundles}
     if not ("inputs" in obj or "outputs" in obj):
         return None
@@ -90,15 +92,18 @@ def facts(inst) -> dict | None:
                     return params[name]
                 width = evaluate(parse(raw, f"{inst.path}.{port['name']}"),
                                  lookup)
-            signals.update(expand(port, side, width))
+            members = expand(port, side, width)
+            signals.update(members)
             if "stream" in port:
                 bundles[port["name"]] = {"kind": "stream", "side": side,
-                                         "width": width}
+                                         "width": width,
+                                         "members": list(members)}
             elif "bus" in port:
                 axis = port["bus"] == "axis"
                 bundles[port["name"]] = {
                     "kind": _DECLARED[port["bus"]], "side": side,
-                    "width": width if axis else None}
+                    "width": width if axis else None,
+                    "members": list(members)}
     return {"signals": signals, "bundles": bundles}
 
 

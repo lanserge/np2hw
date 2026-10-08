@@ -48,3 +48,24 @@ def test_an_np2hw_bus_module_on_the_links_reset_fails(tmp_path, reset, ok):
                          _sync("rst_bus", "ps7_FCLK_RESET0_N"),
                          _sync("rst_isp", "link_rst_pix"), bus))
     assert (audit(path) == 0) is ok
+
+
+def test_np2hw_glue_passes_its_inputs_ancestry_on():
+    d = Design(_hwh(
+        PS7, LINK,
+        _module("k", "np2hw_const", {"q": ("O", "k_q")}),
+        _module("inv", "np2hw_not", {"a": ("I", "link_rst_pix"),
+                                     "y": ("O", "inv_y")}),
+        _module("s", "np2hw_slice", {"d": ("I", "ps7_FCLK_RESET0_N"),
+                                     "q": ("O", "s_q")}),
+        _module("c", "np2hw_concat_1_1", {"in0": ("I", "k_q"),
+                                          "in1": ("I", "s_q"),
+                                          "q": ("O", "c_q")}),
+        _module("c2", "np2hw_concat_1_1", {"in0": ("I", "k_q"),
+                                           "in1": ("I", "inv_y"),
+                                           "q": ("O", "c2_q")})))
+    assert d.lineage("k_q") is BOARD
+    assert d.lineage("inv_y") is CABLE
+    assert d.lineage("s_q") is BOARD
+    assert d.lineage("c_q") is BOARD
+    assert d.lineage("c2_q") is CABLE

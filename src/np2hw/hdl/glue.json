@@ -1,0 +1,89 @@
+{
+  "blocks": {
+    "const": {
+      "description": "A constant: WIDTH bits of VALUE.",
+      "parameters": {
+        "WIDTH": {
+          "default": 1,
+          "description": "Its width."
+        },
+        "VALUE": {
+          "default": 0,
+          "description": "Its value."
+        }
+      },
+      "outputs": [
+        {
+          "name": "q",
+          "width": "WIDTH"
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_const"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_const.v"
+      ]
+    },
+    "slice": {
+      "description": "Bits HI down to LO of an IN-bit word.",
+      "parameters": {
+        "IN": {
+          "default": 32,
+          "description": "The word's width."
+        },
+        "HI": {
+          "description": "The top bit taken."
+        },
+        "LO": {
+          "description": "The bottom bit taken."
+        }
+      },
+      "inputs": [
+        {
+          "name": "d",
+          "width": "IN"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "q",
+          "width": "HI - LO + 1"
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_slice"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_slice.v"
+      ]
+    },
+    "not": {
+      "description": "Every bit of a word inverted.",
+      "parameters": {
+        "WIDTH": {
+          "default": 1,
+          "description": "Its width."
+        }
+      },
+      "inputs": [
+        {
+          "name": "a",
+          "width": "WIDTH"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "y",
+          "width": "WIDTH"
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_not"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_not.v"
+      ]
+    }
+  }
+}

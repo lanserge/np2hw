@@ -408,6 +408,13 @@ class Design:
     # top input -> the facts of the stream entering it (bits, max_width,
     # max_height, context), from every input port it passes through on its
     # way in: stated once where it enters, inherited by what wraps it.
+    hierarchy: dict = field(default_factory=dict)
+    # composite path ("" the top) -> {"ref", "inputs", "outputs", "pins",
+    # "children", "connections"}: each composite as it is written, its
+    # `when`s resolved -- children by their names in it, connections
+    # between pins ((path, port); a composite's own port is (its path,
+    # port), an external pin (its owner's path, pin)). One module per
+    # composite is written from this; `edges` is the same design flattened.
 
     @property
     def name(self) -> str:
@@ -1046,6 +1053,19 @@ class _Loader:
             constraints=self.constraints(),
         )
         design.streams = self.streams(self.forward)
+        design.hierarchy = {
+            path: {"ref": self.nodes[path].found.ref,
+                   "inputs": [p["name"] for p in
+                              self.nodes[path].found.obj.get("inputs", [])],
+                   "outputs": [p["name"] for p in
+                               self.nodes[path].found.obj.get("outputs", [])],
+                   "pins": [p["name"] for p in
+                            self.nodes[path].found.obj.get("pins", [])],
+                   "children": {name: child for name, child
+                                in self.nodes[path].children.items()
+                                if child not in self.inactive},
+                   "connections": list(self.local.get(path, []))}
+            for path in design.composites}
         if self.generate:
             # the netlist, built once; every wire against the ports of the
             # leaves it joins, read from it, for every toolchain
@@ -1340,6 +1360,10 @@ class _Loader:
         # are a leaf's and nothing inside it is joined.
         forward: dict[tuple, list] = {}
         driven: dict[tuple, str] = {}
+        # each composite's own connections, as pins, kept beside the
+        # flattening: the hierarchy a writer of one module per composite
+        # reads (Design.hierarchy)
+        self.local: dict[str, list] = {}
         for path, node in self.nodes.items():
             if (node.kind != "composite" or path in self.inactive
                     or path in opaque or not self.in_scope(path, root, opaque)):
@@ -1367,6 +1391,7 @@ class _Loader:
                                            f"driven ({driven[b]})")
                 driven[b] = where
                 forward.setdefault(a, []).append(b)
+                self.local.setdefault(path, []).append((a, b))
 
         def is_pin(pin):
             return pin[1] in _pin_names(self.nodes[pin[0]])

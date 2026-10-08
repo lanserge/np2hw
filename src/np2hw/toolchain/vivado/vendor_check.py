@@ -37,6 +37,41 @@ def vendor(leaf) -> bool:
     return "filled_by" in leaf and ("ip" in v or "tcl" in v)
 
 
+def vendor_pins(leaf, where: str = "") -> dict:
+    """``{signal: (pin, direction, width)}`` for a leaf a vendor
+    implementation fills: each signal of the block's ports -- named as the
+    design wires it -- by the implementation's name for it (its
+    ``ports`` map, its ``pin_names`` patterns), at the block's parameters.
+    The one statement of that mapping: the check here and a writer of the
+    design as Verilog both read it."""
+    params = leaf.get("block_parameters", {})
+    renamed = leaf.get("port_map", {})
+    patterns = leaf.get("filled_by", {}).get("chosen", {}).get(
+        "pin_names", {})
+    out = {}
+    for side in ("inputs", "outputs"):
+        for port in leaf.get(side, []):
+            raw = port.get("width", 1)
+            width = raw if isinstance(raw, int) else evaluate(
+                parse(raw, f"{where}: {port['name']}"), params.__getitem__)
+            for signal, (direction, w) in expand(port, side, width).items():
+                pin = renamed.get(signal)
+                suffix = signal[len(port["name"]) + 1:]
+                if pin is None and port["name"] in patterns:
+                    pin = patterns[port["name"]].format(
+                        signal=suffix, SIGNAL=suffix.upper())
+                elif pin is None and port["name"] in renamed \
+                        and signal != port["name"]:
+                    pin = f"{renamed[port['name']]}_{suffix}"
+                out[signal] = (pin or signal, direction, w)
+    return out
+
+
+def pin_name(leaf, signal: str) -> str:
+    """A vendor implementation's name for one signal of its block."""
+    return vendor_pins(leaf)[signal][0]
+
+
 def expected(design, cell: dict) -> dict:
     """``{cell: {"pins": {pin: [dir, width]}, "tie": [...]}}`` for every
     instance a vendor implementation fills, by its cell name."""
@@ -45,27 +80,8 @@ def expected(design, cell: dict) -> dict:
         leaf = inst.leaf if isinstance(inst.leaf, dict) else {}
         if not vendor(leaf):
             continue
-        params = leaf.get("block_parameters", {})
-        renamed = leaf.get("port_map", {})
-        patterns = leaf.get("filled_by", {}).get("chosen", {}).get(
-            "pin_names", {})
-        pins = {}
-        for side in ("inputs", "outputs"):
-            for port in leaf.get(side, []):
-                raw = port.get("width", 1)
-                width = raw if isinstance(raw, int) else evaluate(
-                    parse(raw, f"{path}: {port['name']}"), params.__getitem__)
-                for signal, (direction, w) in expand(port, side,
-                                                     width).items():
-                    pin = renamed.get(signal)
-                    suffix = signal[len(port["name"]) + 1:]
-                    if pin is None and port["name"] in patterns:
-                        pin = patterns[port["name"]].format(
-                            signal=suffix, SIGNAL=suffix.upper())
-                    elif pin is None and port["name"] in renamed \
-                            and signal != port["name"]:
-                        pin = f"{renamed[port['name']]}_{suffix}"
-                    pins[pin or signal] = [_DIRECTION[direction], w]
+        pins = {pin: [_DIRECTION[d], w]
+                for pin, d, w in vendor_pins(leaf, path).values()}
         out[cell[path]] = {"block": inst.ref, "pins": pins,
                            "tie": sorted(leaf.get("tie", {}))}
     return out

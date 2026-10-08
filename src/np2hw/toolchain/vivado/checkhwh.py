@@ -38,7 +38,9 @@ kinds of thing -- the PS (board), a clk_wiz (inherits its input), and a
 DVI receiver (the cable) -- and resets by the PS, proc_sys_reset
 (inherits ext_reset_in), np2hw_reset_sync (inherits both its sources),
 link_reset (the cable, by design), inverters
-(inherit), constants (board), and GPIO-driven slices (software: board).
+(inherit), constants (board), and GPIO-driven slices (software: board) --
+Vivado's glue cells and np2hw's alike (np2hw_const, np2hw_slice,
+np2hw_not, np2hw_concat_*).
 Anything this tracer does not recognise is reported as UNKNOWN and
 fails, because an audit that shrugs at what it cannot classify is an
 audit that passes the next new failure.
@@ -133,14 +135,19 @@ class Design:
             return CABLE          # it exists to relay the cable's state
         if "util_vector_logic" in typ:
             return self.lineage(self.sig_of(mod, "Op1"), seen)
-        if "xlconstant" in typ:
+        if "xlconstant" in typ or typ == "np2hw_const":
             return BOARD
         if "xlslice" in typ:
             return self.lineage(self.sig_of(mod, "Din"), seen)
-        if "xlconcat" in typ:
+        if typ == "np2hw_slice":
+            return self.lineage(self.sig_of(mod, "d"), seen)
+        if typ == "np2hw_not":
+            return self.lineage(self.sig_of(mod, "a"), seen)
+        if "xlconcat" in typ or typ.startswith("np2hw_concat"):
+            first = "In" if "xlconcat" in typ else "in"
             kids = {self.lineage(self.sig_of(mod, p), set(seen))
                     for p, (d, _s) in self.mods[mod][1].items()
-                    if d == "I" and p.startswith("In")}
+                    if d == "I" and p.startswith(first)}
             if CABLE in kids:
                 return CABLE
             return BOARD if kids == {BOARD} else UNKNOWN

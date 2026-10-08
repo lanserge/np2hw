@@ -111,6 +111,38 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   map to Vivado's assignment. A description may state `facts`; the
   arbiter's `forwards` ({slave port: master port}) is how a window is
   walked through it (`np2hw.bus.hops`), to the slave the host maps.
+- **Glue a design places** -- fixed modules `np2hw_const`, `np2hw_slice`,
+  `np2hw_not` (described as `np2hw.hdl.glue:const`, `:slice`, `:not`) and
+  the leaf generator `np2hw.glue:concat(widths)`, so a design's constants,
+  bit picks and concatenations are portable Verilog rather than a vendor's
+  cells. checkhwh traces their ancestry like the vendor's.
+  `concat(widths, interrupt=1)` marks its output as interrupt lines, level
+  high, its width stated -- Vivado sizes a processor's interrupt input
+  only from such a driver, and refuses to have it set.
+- **`np2hw.toolchain.vivado.rtl.emit_rtl`** -- a design built by Vivado
+  from its own Verilog: the composites written as modules, each vendor
+  leaf an IP by its cell's name (`create_ip`, its implementation's
+  settings), and the leaves that exist only in IP integrator (a procedure,
+  or an IP marked `integrator`) one block design, its ports to the rest
+  named as the Verilog instances them -- an AXI interface port shaped from
+  the signals it meets, any other bundle signal by signal. The described
+  vendor blocks' pins are dumped for vendor_check: a block design's from
+  it, the rest from the elaborated design.
+- **`np2hw.design.verilog.modules(design)`** -- a loaded design as Verilog,
+  one module per composite: children instanced by name, connections as
+  wires signal by signal, a composite's own ports what they meet inside (a
+  bus port a bundle named `<port>_<signal>`), external pins rising to the
+  top, every pin of an instance written (an empty one where nothing is
+  wired). A vendor leaf is a black box by its cell's name and its
+  implementation's pins (`vendor_check.vendor_pins`, the one statement of
+  that mapping). A composite instanced twice is one module where both
+  write alike. The loader keeps each composite as written
+  (`Design.hierarchy`), and a bundle's facts list its members.
+  `modules(design, groups={name: [leaves]})` folds leaves a toolchain
+  makes together (one block design) into one black box, its ports what
+  its members meet outside -- as a member states the port, or the far
+  end's mirror -- named `<cell>_<port>`; `group_ports()` gives the
+  toolchain the same list. A parameter past 32 bits is written sized.
 - **A second master's reach is recorded, and kept out of the host's
   map.** `ddc_slave` publishes its master's window (`[0, 2**AW)`); the
   Vivado emitter sets it where it starts and sets a hop two masters' walks
