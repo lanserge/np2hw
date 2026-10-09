@@ -6,6 +6,7 @@ import functools
 import numpy as np
 import pytest
 
+from np2hw import saturate
 from np2hw.blocks import StreamPort, ContextBit, block, registry, resolve
 from np2hw.blocks.params import Context, Param
 from np2hw.blocks.stream import StreamSpec
@@ -139,3 +140,99 @@ def test_a_frame_wider_than_its_stream_is_refused():
         offset.run(np.full((2, 2), 300), {}, bit_depth=8)
     with pytest.raises(ValueError, match="outside the 8-bit stream"):
         offset.run(np.full((2, 2), -1), {}, bit_depth=8)
+
+
+def test_a_multiply_is_built_as_the_device_times_it():
+    """The timing model costs a multiply as the device's hard multiplier;
+    left alone, synthesis builds a narrow one from LUTs, several times
+    slower than the stage was scheduled for. So it is written as one."""
+    from np2hw.timing import SERIES7
+    from toylib.blocks import gain
+    v = gain.generate(StreamSpec(bit_depth=8), 8, 4, "gain_core").verilog
+    muls = [line for line in v.splitlines() if " * " in line]
+    assert muls and all(line.strip().startswith(SERIES7.mul_attribute)
+                        for line in muls)
+    v = offset.generate(StreamSpec(bit_depth=8), 8, 4, "offset_core").verilog
+    assert SERIES7.mul_attribute not in v
+
+
+def test_a_device_must_say_how_its_multiplier_is_built():
+    from np2hw.timing import Series7
+
+    class Unstated(Series7):
+        mul_attribute = None
+    with pytest.raises(ValueError, match="mul_attribute"):
+        Unstated()
+
+
+from toylib.blocks import toyblock as libblock  # noqa: E402 (a runnable vocabulary)
+
+
+@libblock(version=(1, 0), description="four times the pixel, clipped",
+          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def quadruple(pixel, p, ctx, bit_depth):
+    return saturate(pixel.astype(np.int32) * 4, bit_depth)
+
+
+@libblock(version=(1, 0), description="minus four times the pixel, lifted",
+          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def negquadruple(pixel, p, ctx, bit_depth):
+    return saturate(pixel.astype(np.int32) * -4 + 1020, bit_depth)
+
+
+@libblock(version=(1, 0), description="an edge, made non-linear: 4c - |w - e|",
+          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def edge(pixel, p, ctx, bit_depth):
+    height, width = pixel.shape[:2]
+    x = np.pad(pixel.astype(np.int32), ((0, 0), (1, 1)), mode="edge")
+    c, w, e = (x[:, 1 + d:1 + d + width] for d in (0, -1, 1))
+    out = np.empty_like(c)
+    # a value per site of the 2x2 tile, as a demosaic writes one
+    est = saturate(4 * c - np.abs(w - e), bit_depth)
+    out[0::2, 0::2] = est[0::2, 0::2]
+    out[0::2, 1::2] = c[0::2, 1::2]
+    out[1::2, 0::2] = c[1::2, 0::2]
+    out[1::2, 1::2] = est[1::2, 1::2]
+    return out
+
+
+def _shifts_are_built_as_shifts(block):
+    from np2hw.design.composite import assemble
+    from np2hw.pipeline import run as runner
+    from np2hw.timing import SERIES7
+    v = block.generate(StreamSpec(bit_depth=8), 16, 4, "shift_core").verilog
+    assert SERIES7.mul_attribute not in v      # no multiplier for a 2**k
+    assert " * " not in v and "<<" in v
+    design = assemble("t", {"b": block}, [("in", "b.in"), ("b.out", "out")],
+                      stream={"bits": 8, "max_width": 16, "max_height": 4})
+    chain = runner.pixel_chain(design, "in", None)
+    frame = np.random.default_rng(3).integers(0, 256, (4, 16))
+    values = {"b": {}, "ctxblock": {}}
+    assert np.array_equal(runner.run_model(chain, frame, values, {}, 8),
+                          runner.run_rtl(chain, frame, values, {}, 8))
+
+
+@pytest.mark.skipif(__import__("shutil").which("verilator") is None,
+                    reason="verilator not on PATH")
+@pytest.mark.parametrize("block", [quadruple, negquadruple, edge],
+                         ids=lambda b: b.name)
+def test_a_multiply_by_a_power_of_two_is_a_shift(block):
+    """Pointwise (the compiler's lowering) and in a window (the shift the
+    scheduler and the emitter both ask timing.as_shift about): no
+    multiplier, and the RTL still the model's, word for word."""
+    _shifts_are_built_as_shifts(block)
+
+
+def test_the_schedule_times_a_shift_as_the_emitters_build_it():
+    """A multiply by 2**k costs a wire, by -2**k a subtraction, by
+    anything else the device's multiplier: what the emitters write."""
+    from np2hw.ir import PExpr
+    from np2hw.timing import SERIES7 as dev, _bits, node_cost
+    x = PExpr("tap", (0, 0, 0, None), 0, 255)
+
+    def times(k):
+        return PExpr("mul", (x, PExpr("const", (k,), k, k)),
+                     min(0, 255 * k), max(0, 255 * k))
+    assert node_cost(times(4), dev) == dev.wire()
+    assert node_cost(times(-4), dev) == dev.add(_bits(times(-4)))
+    assert node_cost(times(3), dev) == dev.mul()

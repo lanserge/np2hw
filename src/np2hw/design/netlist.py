@@ -43,6 +43,11 @@ def _implementation(leaf) -> dict:
     return out
 
 
+# A bus's addresses: each end uses the bits it decodes, so the two may
+# differ in width -- the narrower takes the low bits.
+RANGED = frozenset({"awaddr", "araddr"})
+
+
 def build(design) -> dict:
     """The design as a netlist: ``{"design", "parameters", "instances",
     "bundles", "nets", "pins"}``."""
@@ -62,7 +67,7 @@ def build(design) -> dict:
             "bundles": (dict(f["bundles"]) if f else None),
         }
 
-    bundles, nets, member = [], [], {}
+    bundles, nets, member, ranged = [], [], {}, set()
 
     def pin(path, port):
         return f"{path}.{port}" if path is not None else f"pin:{port}"
@@ -87,8 +92,29 @@ def build(design) -> dict:
     for source, sink in design.edges:
         (sp, sport), (dp, dport) = _split(source), _split(sink)
         fs, fd = known.get(sp), known.get(dp)
-        if ((fs and sport in fs["bundles"]) or (fd and dport in fd["bundles"])):
-            bundles.append({"from": pin(sp, sport), "to": pin(dp, dport)})
+        bs = fs["bundles"].get(sport) if fs else None
+        bd = fd["bundles"].get(dport) if fd else None
+        if bs or bd:
+            record = {"from": pin(sp, sport), "to": pin(dp, dport)}
+            bundles.append(record)
+            if bs and bd:
+                # member to member, by each one's part in the bus: the
+                # bundle's nets are the netlist's like any other, and a
+                # member with no partner is named, never dropped
+                ra = {r: m for m, r in bs["roles"].items()}
+                rb = {r: m for m, r in bd["roles"].items()}
+                for r in ra.keys() & rb.keys():
+                    join(pin(sp, ra[r]), pin(dp, rb[r]))
+                    if r in RANGED:
+                        ranged.add(pin(sp, ra[r]))
+                # a member only one side has: an output nobody reads is
+                # information let go; an input nothing drives is a hole
+                for end, f, path, mine, other in (
+                        ("from", fs, sp, ra, rb), ("to", fd, dp, rb, ra)):
+                    holes = sorted(r for r in mine.keys() - other.keys()
+                                   if f["signals"][mine[r]][0] != "output")
+                    if holes:
+                        record.setdefault("unpaired", {})[end] = holes
             continue
         join(pin(sp, sport), pin(dp, dport))
 
@@ -106,8 +132,10 @@ def build(design) -> dict:
             widths[p] = width
             if direction == "output":
                 drivers.append(p)
-        out_nets.append({"pins": members, "widths": widths,
-                         "drivers": drivers})
+        net = {"pins": members, "widths": widths, "drivers": drivers}
+        if ranged & set(members):
+            net["ranged"] = True
+        out_nets.append(net)
     return {"design": design.ref, "parameters": dict(design.parameters),
             "instances": instances, "bundles": bundles, "nets": out_nets,
             "pins": dict(design.pins)}

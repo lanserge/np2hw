@@ -903,6 +903,81 @@ def test_an_axi_stream_whose_data_widths_differ_is_refused(library):
         load(_wide(library, 24, 8, ("a.m_axis", "b.s_axis")))
 
 
+
+# -- a bundle is its members: paired by their part in the bus ---------------- #
+
+RASTER_GEN = '''
+def raster(bits: int) -> dict:
+    """Video out on a bundle whose members do not carry its name."""
+    from np2hw.ports import Pin, header, published
+    vid = "xilinx.com:interface:vid_io:1.0"
+    pins = [Pin("clk", "input")] + [
+        Pin(f"vid_{s}", "output", w, bus=(vid, "vid_io", s.upper()))
+        for s, w in (("active_video", 1), ("data", bits), ("hsync", 1),
+                     ("vsync", 1))]
+    text = "\\n".join(header("raster", pins)) + "\\nendmodule\\n"
+    return {"verilog": text, "module": "raster",
+            "interface": {"ports": published(pins)}}
+
+
+raster.leaf = True
+'''
+
+TX = {"inputs": [{"name": "rgb", "bus": "video", "width": 24}],
+      "vivado": {"module": "tx"}, "sources": ["tx.v"]}
+VIDEO_FEED = {"outputs": [{"name": "vid", "bus": "video", "width": 24,
+                       "omit": ["hsync"]},
+                      {"name": "m_axis", "width": 32, "bus": "axis",
+                       "signals": ["tlast", "tkeep"]},
+                      {"name": "m_axi", "width": 32, "bus": "axilite"}],
+          "vivado": {"module": "feed"}, "sources": ["feed.v"]}
+
+
+def _video(library, *connections):
+    lib = library(lambda name: {
+        "leaves": {"tx": TX, "feed": VIDEO_FEED, "wide": WIDE},
+        "top": {"top": {
+            "nodes": {"r": {"block": f"{name}.gen:raster",
+                            "build": {"bits": 24}},
+                      "s": {"block": f"{name}.leaves:feed"},
+                      "t": {"block": f"{name}.leaves:tx"},
+                      "w": {"block": f"{name}.leaves:wide",
+                            "build": {"W": 8}}},
+            "connections": [list(c) for c in connections]}}},
+        python={"gen": RASTER_GEN})
+    return load(f"{lib}.top:top")
+
+
+def test_bundles_named_apart_are_wired_member_to_member(library):
+    """The raster's members are vid_*, in a bundle called vid_io; the
+    transmitter's are rgb_*: each meets the other by its signal."""
+    design = _video(library, ("r.vid_io", "t.rgb"))
+    nets = [set(n["pins"]) for n in design.netlist["nets"]]
+    for signal in ("active_video", "data", "hsync", "vsync"):
+        assert {f"r.vid_{signal}", f"t.rgb_{signal}"} in nets, signal
+
+
+def test_an_input_no_member_drives_is_refused(library):
+    with pytest.raises(CompositionError, match=r"s.vid -> t.rgb: inputs "
+                       r"nothing drives -- hsync at t.rgb"):
+        _video(library, ("s.vid", "t.rgb"))
+
+
+def test_an_output_nothing_reads_is_let_go(library):
+    """The source's tkeep has no partner at a sink that takes none."""
+    design = _video(library, ("s.m_axis", "w.s_axis"))
+    assert not any("unpaired" in b for b in design.netlist["bundles"])
+
+
+def test_an_address_meets_one_of_another_width(library):
+    """A 32-bit master into a slave decoding 8 bits: each end uses the
+    bits it decodes. Its data still has to agree."""
+    design = _video(library, ("s.m_axi", "w.s_axi"))
+    net = next(n for n in design.netlist["nets"] if "w.s_axi_awaddr" in
+               n["pins"])
+    assert net["widths"] == {"s.m_axi_awaddr": 32, "w.s_axi_awaddr": 8}
+    assert net["ranged"]
+
 # -- which block fills a node: a parameter, set like any other -------------- #
 
 CCM = "toylib.blocks:offset"
@@ -1310,3 +1385,49 @@ def test_an_implementation_setting_may_hold_only_where_another_enables_it(
 
     assert config(0) == {"DUAL": 0, "WORD": "0x00000008"}
     assert config(1) == {"DUAL": 1, "WIDTH2": 8, "WORD": "0x00000008"}
+
+
+# -- a setting that follows the wiring: {value, wired} ---------------------- #
+
+DMA = {"inputs": [{"name": "a_clk"}, {"name": "b_clk"}],
+       "parameters": {"implementation": {"default": "'ip'"}},
+       "implementations": {"ip": {
+           "vivado": {"ip": "vendor.com:ip:dma"},
+           "config": {"ASYNC": {"value": "0 if same_net('a_clk', 'b_clk') "
+                                         "else 1", "wired": True}}}}}
+CLOCKS = {"outputs": [{"name": "one"}, {"name": "two"}],
+          "vivado": {"module": "clocks"}, "sources": ["clocks.v"]}
+
+
+def _clocked(library, *connections):
+    lib = library(lambda name: {"lib": {"dma": DMA, "clocks": CLOCKS, "top": {
+        "nodes": {"dma": {"block": f"{name}.lib:dma"},
+                  "clk": {"block": f"{name}.lib:clocks"}},
+        "connections": [list(c) for c in connections]}}})
+    return load(f"{lib}.lib:top")
+
+
+def test_a_setting_follows_what_the_node_is_wired_to(library):
+    """One clock on both ports, or two: the setting a tool would have
+    derived from the connections, derived from the design's own."""
+    same = _clocked(library, ("clk.one", "dma.a_clk"), ("clk.one", "dma.b_clk"))
+    assert same.instances["dma"].config["ASYNC"] == 0
+    apart = _clocked(library, ("clk.one", "dma.a_clk"),
+                     ("clk.two", "dma.b_clk"))
+    assert apart.instances["dma"].config["ASYNC"] == 1
+
+
+def test_a_wired_setting_reads_only_ports_that_are_wired(library):
+    with pytest.raises(CompositionError, match="b_clk, which is on no net"):
+        _clocked(library, ("clk.one", "dma.a_clk"))
+
+
+def test_the_wiring_cannot_be_read_before_it_is_known(library):
+    unwired = {**DMA, "implementations": {"ip": {
+        "vivado": {"ip": "vendor.com:ip:dma"},
+        "config": {"ASYNC": "same_net('a_clk', 'b_clk')"}}}}
+    lib = library(lambda name: {"lib": {"dma": unwired, "top": {
+        "nodes": {"dma": {"block": f"{name}.lib:dma"}}}}})
+    with pytest.raises(CompositionError, match=r"reads the design's wiring.*"
+                       r"\{value, wired\}"):
+        load(f"{lib}.lib:top")

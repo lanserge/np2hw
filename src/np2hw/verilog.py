@@ -36,6 +36,7 @@ import numpy as np
 from .ir import (SourceLine, HProcLine, VProcLine, Image2D, Const, Param,
                  ExprLine, PExpr, PhaseRef)
 from .regmap import AddrMap, Reg
+from .timing import as_shift, power_of_two
 
 
 # Video geometry is 16 bits wherever it is stated -- the protocol
@@ -108,6 +109,21 @@ def _tap_params(weighted, already):
                         coeff.description))
             seen.add(coeff.name)
     return out
+
+
+def _shape(node) -> str:
+    """The op a node is BUILT as: a multiply by +-2**k is a shift."""
+    return "shl" if as_shift(node) is not None else node.op
+
+
+def _mul_hint(op, dev) -> str:
+    """What a wire computing `op` carries so it is built as the model
+    timed it: a multiply, the device's hard multiplier (its
+    mul_attribute); anything else, nothing."""
+    if op != "mul":
+        return ""
+    from .timing import device
+    return device(dev).mul_attribute + " "
 
 
 def _tap_term(px, coeff, signed, in_signed):
@@ -373,7 +389,11 @@ def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
             k = op[1]
             cur_signed = cur_signed or k < 0
             cur_bits = _bitlen(abs(k) * ((1 << cur_bits) - 1)) + (1 if cur_signed else 0)
-            rhs = f"{prev} * {k}"
+            shift = power_of_two(k)
+            if shift is not None:            # 2**k: a shift (timing.as_shift)
+                rhs = f"{prev} {'<<<' if cur_signed else '<<'} {shift}"
+            else:
+                rhs = f"{prev} * {k}"
         elif op[0] == "trunc":
             if op[1] >= cur_bits:                        # widening declaration: no-op
                 continue
@@ -401,7 +421,11 @@ def _emit_post(emit, post, acc_bits, acc_signed, prefix="", signal=None,
             prevx = (f"$signed({{1'b0, {prev}}})" if res_signed and not cur_signed else prev)
             cur_bits, cur_signed = cur_bits + pbits, res_signed
             rhs = f"{prevx} * {pexpr}"
-        emit(f"    wire {'signed ' if cur_signed else ''}[{cur_bits-1}:0] {prefix}stage{i} = {rhs};")
+        multiplies = op[0] == "mulp" or (op[0] == "mulc"
+                                         and power_of_two(op[1]) is None)
+        hint = _mul_hint("mul" if multiplies else op[0], dev)
+        emit(f"    {hint}wire {'signed ' if cur_signed else ''}"
+             f"[{cur_bits-1}:0] {prefix}stage{i} = {rhs};")
         prev = f"{prefix}stage{i}"
     return prev, cur_bits, cur_signed
 
@@ -681,6 +705,10 @@ def _emit_expr_dag(a, roots, image, plan=None):
             reads.append((name, w, table.name, f"{addr}[{kb-1}:0]"))
             emitted[key] = (name, s, w)
             return
+        elif as_shift(node) is not None:
+            x, k, negated = as_shift(node)
+            expr = f"{ref(x, s)} <<< {k}" if k else ref(x, s)
+            expr = f"-({expr})" if negated else expr
         elif node.op in ("add", "sub", "mul"):
             op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
             expr = f"{ref(node.args[0], s)} {op} {ref(node.args[1], s)}"
@@ -698,7 +726,8 @@ def _emit_expr_dag(a, roots, image, plan=None):
             raise NotImplementedError(f"expression op {node.op!r}")
         name = f"e{counter[0]}"
         counter[0] += 1
-        bucket[s].append(f"    wire signed [{w-1}:0] {name} = {expr};")
+        bucket[s].append(f"    {_mul_hint(_shape(node), dev)}wire signed "
+                         f"[{w-1}:0] {name} = {expr};")
         emitted[key] = (name, None if floating else s, w)
 
     for root in roots:
@@ -1416,14 +1445,14 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         fits = clk_ns is None or stage_ns(out_line, dev) <= clk_ns
         if framing == "height" and max_width is None and fits:
             return _stamp_stream_geometry(
-                emit.generate(out_line.unit, module_name), out_line)
+                emit.generate(out_line.unit, module_name, dev), out_line)
         # an option the new compiler does not honour yet: the reference
         # lowers this model instead, rather than the option being ignored --
         # but only where the two agree. The new compiler computes in NumPy's
         # dtypes; the reference computes an expression exactly, so a model
         # whose arithmetic overflows a dtype comes out of them differently,
         # and an option must not change what a model computes.
-        core_facts = emit.generate(out_line.unit, module_name)
+        core_facts = emit.generate(out_line.unit, module_name, dev)
         from .trace import reference, trace as trace_graph
         fn, image, params, channels = out_line.recipe
         _, out_line = reference(trace_graph(fn, image, *params,
@@ -2364,6 +2393,10 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             leaf = node.args[0]
             expr = (f"$signed(param_{leaf.name})" if leaf.signed
                     else f"$signed({{1'b0, param_{leaf.name}}})")
+        elif as_shift(node) is not None:
+            x, k, negated = as_shift(node)
+            expr = f"{warg(x, ns)} <<< {k}" if k else warg(x, ns)
+            expr = f"-({expr})" if negated else expr
         elif node.op in ("add", "sub", "mul"):
             op = {"add": "+", "sub": "-", "mul": "*"}[node.op]
             expr = f"{warg(node.args[0], ns)} {op} {warg(node.args[1], ns)}"
@@ -2397,7 +2430,8 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
                 f"expression op {node.op!r} in a windowed plane")
         name = f"x{wcounter[0]}"
         wcounter[0] += 1
-        a(f"    wire signed [{w-1}:0] {name} = {expr};")
+        a(f"    {_mul_hint(_shape(node), dev)}wire signed [{w-1}:0] {name} = "
+          f"{expr};")
         wemitted[key] = name
         return name
 
@@ -3774,6 +3808,11 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
             "dynamic": dyn, "eof": eof}
 
 
+# The register port's clock and reset, named once: its attributes and its
+# facts both read them.
+AXIL_CLOCK, AXIL_RESET = "s_axil_aclk", "s_axil_aresetn"
+
+
 def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                  frame_sync=True, commit=None, header=(), notes=(),
                  passthrough=(), bus_clock=False, arm=None) -> dict:
@@ -3888,8 +3927,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                  "read-only identity word, is behind this port.")
     if bus_clock:
         pins += [
-            Pin("s_axil_aclk", "input", attribute=clock_attribute(
-                "s_axil_aclk", "s_axil", "s_axil_aresetn"), before=axil_note + (
+            Pin(AXIL_CLOCK, "input", attribute=clock_attribute(
+                AXIL_CLOCK, "s_axil", AXIL_RESET), before=axil_note + (
                 "ON ITS OWN CLOCK, and that is the whole point. `clk` above",
                 "is the datapath's, and a datapath clock can STOP -- one",
                 "recovered from an input link has no edges whenever the",
@@ -3899,8 +3938,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                 "forever. That hung a board here and needed the power",
                 "pulled. A control interface may never depend on a clock",
                 "that can stop.")),
-            Pin("s_axil_aresetn", "input", attribute=reset_attribute(
-                "s_axil_aresetn", active_low=True)),
+            Pin(AXIL_RESET, "input", attribute=reset_attribute(
+                AXIL_RESET, active_low=True)),
         ]
     axil = axil_slave_pins(A)
     if not bus_clock:
@@ -3944,7 +3983,7 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         a("")
     a(f"    {reg['module']} u_csr (")
     if bus_clock:
-        a("        .aclk(s_axil_aclk), .aresetn(s_axil_aresetn),")
+        a(f"        .aclk({AXIL_CLOCK}), .aresetn({AXIL_RESET}),")
     else:
         a("        .aclk(clk), .aresetn(!rst),")
     if arm:
@@ -4001,7 +4040,10 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
             "frame_sync": frame_sync, "commit": commit,
             "interface": {"clock": "clk", "reset": "rst",
                           "ports": published(pins),
-                          "streams": [dict(st) for st in streams]}}
+                          "streams": [dict(st) for st in streams]},
+            # what its register port is timed and reset by, as its clock
+            # attribute says it (np2hw.design.ancestry)
+            "facts": {"clocks": {"s_axil": [AXIL_CLOCK, AXIL_RESET]}}}
 
 
 def testbench_ctrl(core, reg, W, H, n_out, param_values, ctrl="axil",

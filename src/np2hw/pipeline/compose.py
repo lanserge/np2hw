@@ -807,6 +807,7 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
                            "commit": wrapper["commit"],
                            "regfile": wrapper["reg"]["module"]}
         meta["ports"] = wrapper["interface"]["ports"]
+        meta["facts"] = wrapper["facts"]
 
     return Generated(
         top=name,

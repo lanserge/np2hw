@@ -403,6 +403,22 @@
           },
           "description": {
             "type": "string"
+          },
+          "clock": {
+            "type": "object",
+            "required": [
+              "khz"
+            ],
+            "additionalProperties": false,
+            "description": "The clock this pin carries, which the toolchain constrains: its frequency in kHz (an expression over the composite's parameters), and the signal of an interface pin that carries it (its role, 'clk_p'). A pin's rate is the design's to state, not a constraints file's.",
+            "properties": {
+              "signal": {
+                "type": "string"
+              },
+              "khz": {
+                "$ref": "#/$defs/value"
+              }
+            }
           }
         }
       }
@@ -643,8 +659,19 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "value",
-                  "when"
+                  "value"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "when"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "wired"
+                    ]
+                  }
                 ],
                 "properties": {
                   "value": {
@@ -652,12 +679,16 @@
                   },
                   "when": {
                     "$ref": "#/$defs/value"
+                  },
+                  "wired": {
+                    "const": true,
+                    "description": "Evaluated once the design is wired, where same_net('port', ...) asks whether ports of this node are on one net -- for a setting a tool would otherwise derive from what the IP is connected to."
                   }
                 }
               }
             ]
           },
-          "description": "The implementation's own settings, as expressions over the block's parameters; {value, when} is set only where `when` holds, for a setting the tool refuses unless another enables it."
+          "description": "The implementation's own settings, as expressions over the block's parameters; {value, when} is set only where `when` holds, for a setting the tool refuses unless another enables it; {value, wired} is evaluated once the design is wired, for a setting that follows what the node is connected to."
         },
         "tie": {
           "type": "object",

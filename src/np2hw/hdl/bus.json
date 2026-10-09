@@ -31,7 +31,19 @@
       },
       "sources": [
         "np2hw.hdl:np2hw_axi3_to_axil.v"
-      ]
+      ],
+      "facts": {
+        "clocks": {
+          "s_axi": [
+            "aclk",
+            "aresetn"
+          ],
+          "m_axi": [
+            "aclk",
+            "aresetn"
+          ]
+        }
+      }
     },
     "axil_arbiter": {
       "description": "Two AXI4-Lite masters onto one slave: each direction grants one whole transaction at a time and alternates when both ask.",
@@ -71,6 +83,20 @@
         "forwards": {
           "s0_axi": "m_axi",
           "s1_axi": "m_axi"
+        },
+        "clocks": {
+          "s0_axi": [
+            "aclk",
+            "aresetn"
+          ],
+          "s1_axi": [
+            "aclk",
+            "aresetn"
+          ],
+          "m_axi": [
+            "aclk",
+            "aresetn"
+          ]
         }
       }
     },
@@ -116,7 +142,65 @@
           "file": "np2hw.hdl:np2hw_reset_sync.xdc",
           "scoped_to": "np2hw_reset_sync"
         }
-      ]
+      ],
+      "facts": {
+        "ancestry": {
+          "rst_n": [
+            "rst_n_in",
+            "locked"
+          ],
+          "rst": [
+            "rst_n_in",
+            "locked"
+          ]
+        }
+      }
+    },
+    "axil_slice": {
+      "description": "An AXI4-Lite register slice: every channel through a skid buffer, so both buses' ports are registered. Ends a combinational register-bus path where it is placed, at a cycle each way and no throughput.",
+      "inputs": [
+        {
+          "name": "aclk"
+        },
+        {
+          "name": "aresetn",
+          "description": "Active low, on aclk."
+        },
+        {
+          "name": "s_axi",
+          "bus": "axilite",
+          "width": 32
+        }
+      ],
+      "outputs": [
+        {
+          "name": "m_axi",
+          "bus": "axilite",
+          "width": 32
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_axil_slice"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_axil_slice.v",
+        "np2hw.hdl:np2hw_skid.v"
+      ],
+      "facts": {
+        "forwards": {
+          "s_axi": "m_axi"
+        },
+        "clocks": {
+          "s_axi": [
+            "aclk",
+            "aresetn"
+          ],
+          "m_axi": [
+            "aclk",
+            "aresetn"
+          ]
+        }
+      }
     }
   }
 }

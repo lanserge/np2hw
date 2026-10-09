@@ -141,7 +141,9 @@ def axil_decoder(sizes, base, span) -> dict:
             "requires": ("np2hw_axil_decoder",),
             "interface": {"ports": published(pins)},
             "facts": {"windows": {f"m{i:02d}_axi": [placed[i], sizes[i]]
-                                  for i in present}}}
+                                  for i in present},
+                      "clocks": {bus: ["aclk", "aresetn"]
+                                 for bus in ["s_axi"] + slaves}}}
 
 
 axil_decoder.leaf = True

@@ -45,6 +45,12 @@ def test_the_arbiter_serves_both_masters(tmp_path):
 
 
 @simulated
+def test_the_slice_passes_every_transaction_through(tmp_path):
+    _run(tmp_path, hdl.text("np2hw_axil_slice") + hdl.text("np2hw_skid"),
+         "np2hw_axil_slice", {"dut": "slice", "count": 120})
+
+
+@simulated
 def test_the_bridge_turns_bursts_into_beats(tmp_path):
     _run(tmp_path, hdl.text("np2hw_axi3_to_axil"), "np2hw_axi3_to_axil",
          {"dut": "bridge"})

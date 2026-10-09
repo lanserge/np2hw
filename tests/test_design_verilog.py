@@ -206,3 +206,42 @@ def test_a_bidirectional_pin_rises_as_inout(library):
                 "vivado": {"module": "phy"}, "sources": ["phy.v"]}}})
     text = dict(modules(load(f"{lib}.lib:top")))["top"]
     assert "inout  wire sda" in text and ".io(sda)" in text
+
+
+RASTER_GEN = '''
+def raster(bits: int) -> dict:
+    """Video out on a bundle whose members do not carry its name."""
+    from np2hw.ports import Pin, header, published
+    vid = "xilinx.com:interface:vid_io:1.0"
+    pins = [Pin(f"vid_{s}", "output", w, bus=(vid, "vid_io", s.upper()))
+            for s, w in (("active_video", 1), ("data", bits), ("hsync", 1),
+                         ("vsync", 1))]
+    text = "\\n".join(header("raster", pins)) + "\\nendmodule\\n"
+    return {"verilog": text, "module": "raster",
+            "interface": {"ports": published(pins)}}
+
+
+raster.leaf = True
+'''
+
+
+def test_bundles_named_apart_meet_member_to_member(library):
+    """A raster's vid_* members, in a bundle called vid_io, through a
+    composite to a transmitter's rgb_*: every member wired, by its part in
+    the bus -- and the composite's port named by those parts."""
+    lib = library(lambda name: {"lib": {
+        "tx": {"inputs": [{"name": "rgb", "bus": "video", "width": 24}],
+               "vivado": {"module": "tx"}, "sources": ["tx.v"]},
+        "src": {"outputs": [{"name": "raster"}],
+                "nodes": {"r": {"block": f"{name}.gen:raster",
+                                "build": {"bits": 24}}},
+                "connections": [["r.vid_io", "raster"]]},
+        "top": {"nodes": {"s": {"block": f"{name}.lib:src"},
+                          "t": {"block": f"{name}.lib:tx"}},
+                "connections": [["s.raster", "t.rgb"]]}}},
+        python={"gen": RASTER_GEN})
+    text = dict(modules(load(f"{lib}.lib:top")))
+    for signal in ("active_video", "data", "hsync", "vsync"):
+        assert f".vid_{signal}(raster_{signal})" in text["src"], signal
+        assert f".raster_{signal}(s_raster_{signal})" in text["top"], signal
+        assert f".rgb_{signal}(s_raster_{signal})" in text["top"], signal

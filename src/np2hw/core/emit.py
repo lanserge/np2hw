@@ -35,7 +35,8 @@ _CMP = {"hw.lt": "<", "hw.gt": ">", "hw.le": "<=", "hw.ge": ">=",
 
 
 class _Printer:
-    def __init__(self):
+    def __init__(self, dev=None):
+        self.dev = dev
         self.names: dict[int, str] = {}
         self.lines: list[str] = []
         self.k = 0
@@ -47,10 +48,10 @@ class _Printer:
         n = self.name(v)
         return f"$signed({{1'b0, {n}}})" if signed and not _signed(v) else n
 
-    def wire(self, v: Value, expr: str, hint="n") -> str:
+    def wire(self, v: Value, expr: str, hint="n", attribute="") -> str:
         name = f"{hint}{self.k}"
         self.k += 1
-        self.lines.append(f"    wire {_decl(v)}{name} = {expr};")
+        self.lines.append(f"    {attribute}wire {_decl(v)}{name} = {expr};")
         return name
 
     def literal(self, value: int, signed: bool) -> str:
@@ -79,7 +80,10 @@ class _Printer:
         dom = _signed(v) or any(_signed(o) for o in ops)
         if k in _BIN:
             a, b = (self.ref(o, dom) for o in ops)
-            return self.wire(v, f"{a} {_BIN[k]} {b}")
+            # a multiply, built as the shape the device timed it as
+            from ..verilog import _mul_hint
+            return self.wire(v, f"{a} {_BIN[k]} {b}", attribute=_mul_hint(
+                "mul" if k == "hw.mul" else k, self.dev))
         if k in _CMP:
             dom = any(_signed(o) for o in ops)
             a, b = (self.ref(o, dom) for o in ops)
@@ -88,6 +92,10 @@ class _Printer:
             return self.wire(v, f"!{self.name(ops[0])}")
         if k == "hw.neg":
             return self.wire(v, f"-{self.ref(ops[0], True)}")
+        if k == "hw.shl":
+            op = "<<<" if dom else "<<"
+            return self.wire(v, f"{self.ref(ops[0], dom)} {op} "
+                                f"{n.attr('amount')}")
         if k == "hw.shr":
             op = ">>>" if dom else ">>"
             return self.wire(v, f"{self.ref(ops[0], dom)} {op} "
@@ -127,12 +135,14 @@ class _Printer:
         raise NotImplementedError(f"no printing for {k}")
 
 
-def generate(unit: Unit, module_name: str) -> dict:
-    """Print the unit; return its Core, as every generated module does."""
+def generate(unit: Unit, module_name: str, dev=None) -> dict:
+    """Print the unit; return its Core, as every generated module does.
+    `dev` is the device family it is timed against (the default when
+    None), whose shapes the printing honours."""
     from ..verilog import Core, _interface
     f = unit.facts
     img = f["image"]
-    p = _Printer()
+    p = _Printer(dev)
     for n in walk(unit.all_roots()):
         p.names[id(n)] = p.node(n)
     params = f["params"]

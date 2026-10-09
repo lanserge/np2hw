@@ -215,6 +215,9 @@ _COMPARE = {ast.Lt: lambda a, b: a < b, ast.LtE: lambda a, b: a <= b,
             ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b,
             ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b}
 _CALLS = {"min": min, "max": max, "abs": abs}
+# Calls that read the design's wiring, bound per node once it is wired: an
+# expression using one is evaluated then ({value, wired}), never at load.
+_WIRED_CALLS = ("same_net",)
 
 
 # `@package.module:block` in an expression is a reference to a block. It is
@@ -264,7 +267,8 @@ def parse(text: str, where: str) -> ast.expr:
                                                  for op in node.ops):
             continue
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in _CALLS and not node.keywords):
+                and node.func.id in (*_CALLS, *_WIRED_CALLS)
+                and not node.keywords):
             continue
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Constant)
                 and isinstance(node.func.value, str) and not node.keywords):
@@ -287,7 +291,8 @@ def _dotted(node: ast.expr) -> str | None:
         attr = node.attr
         parts.append(attr[len(_KW):] if attr.startswith(_KW) else attr)
         node = node.value
-    if isinstance(node, ast.Name) and node.id not in _CALLS:
+    if isinstance(node, ast.Name) and node.id not in (*_CALLS,
+                                                      *_WIRED_CALLS):
         return ".".join([node.id, *reversed(parts)])
     return None
 
@@ -324,9 +329,10 @@ def expression_function(ref: str):
     return fn
 
 
-def evaluate(tree: ast.expr, lookup) -> int:
+def evaluate(tree: ast.expr, lookup, wired=None) -> int:
     """The one walker. ``lookup(path)`` binds each parameter path; with ints
-    bound the result is an int, exactly as the model would compute it."""
+    bound the result is an int, exactly as the model would compute it.
+    ``wired`` binds the calls that read the wiring, where it is known."""
     def walk(node):
         path = _dotted(node)
         if path is not None:
@@ -355,6 +361,12 @@ def evaluate(tree: ast.expr, lookup) -> int:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Constant):
             return expression_function(node.func.value)(
                 *(walk(a) for a in node.args))
+        if isinstance(node, ast.Call) and node.func.id in _WIRED_CALLS:
+            if wired is None:
+                raise CompositionError(
+                    f"{node.func.id}() reads the design's wiring, which is "
+                    "not known yet: the setting is {value, wired}")
+            return wired[node.func.id](*(walk(a) for a in node.args))
         if isinstance(node, ast.Call):
             return _CALLS[node.func.id](*(walk(a) for a in node.args))
         if isinstance(node, ast.Subscript):
@@ -944,6 +956,7 @@ class _Loader:
                   "vivado": {"module": generated.top},
                   "ports": ports, "module_parameters": {},
                   "generated": [f"{sub.name}.v"], "files": files,
+                  "facts": dict(generated.meta.get("facts", {})),
                   "made_by": {"composite": node.found.ref}},
             folder=node.found.folder,
             domain=node.entry.get("domain"),
@@ -1073,7 +1086,38 @@ class _Loader:
             from np2hw.design.wiring import check
             design.netlist = build(design)
             check(design)
+            self.wire(design)
         return design
+
+    def wire(self, design) -> None:
+        """The settings that follow what a node is connected to ({value,
+        wired}), evaluated against the netlist: ``same_net('a', 'b', ...)``
+        is whether those ports of the node are all on one net."""
+        net_of = {pin: i for i, net in enumerate(design.netlist["nets"])
+                  for pin in net["pins"]}
+        for path, inst in design.instances.items():
+            leaf = inst.leaf if isinstance(inst.leaf, dict) else {}
+            for key, (raw, where) in leaf.get(
+                    "implementation_wired", {}).items():
+                def same_net(*ports, path=path, where=where):
+                    nets = set()
+                    for port in ports:
+                        if f"{path}.{port}" not in net_of:
+                            raise CompositionError(
+                                f"{where}: same_net reads {port}, which is "
+                                "on no net here")
+                        nets.add(net_of[f"{path}.{port}"])
+                    return int(len(nets) == 1)
+                if key in inst.config or key in inst.build:
+                    raise CompositionError(f"{path}: {key} is set on the "
+                                           "node and follows its wiring; a "
+                                           "property has one value")
+                tree = parse(raw, where)
+                inst.config[key] = evaluate(
+                    tree, lambda name, path=path, where=where:
+                    self.build_value(self.resolve_name(path, name), where,
+                                     ()),
+                    wired={"same_net": same_net})
 
     def build_settings(self, path: str, node: _Node) -> dict:
         """The build settings made on one node, evaluated, by their names
@@ -1155,15 +1199,22 @@ class _Loader:
                 for port in block.get(side, [])
                 if "when" not in port or self.evaluate_build(
                     port["when"], path, f"{where}: {port['name']}: when")]
-        config = {}
+        config, wired = {}, {}
         for key, raw in chosen.get("config", {}).items():
             here = f"{where}: implementation {name}: config {key}"
             if isinstance(raw, dict):
-                if not self.evaluate_build(raw["when"], path, f"{here}: when"):
+                if "when" in raw and not self.evaluate_build(
+                        raw["when"], path, f"{here}: when"):
+                    continue
+                if raw.get("wired"):
+                    # follows what the node is connected to: evaluated
+                    # once the design is wired (Loader.wire)
+                    wired[key] = (raw["value"], here)
                     continue
                 raw = raw["value"]
             config[key] = self.evaluate_build(raw, path, here)
         leaf["implementation_config"] = config
+        leaf["implementation_wired"] = wired
         leaf["filled_by"] = {"implementation": name, "chosen": chosen}
         return Found(node.found.ref, "primitive", leaf, node.found.folder)
 
@@ -1347,6 +1398,17 @@ class _Loader:
                         f"{node.found.ref}: pin {name} is also "
                         f"{owner[name]}'s; the FPGA has one port by a name")
                 found[name] = {k: v for k, v in pin.items() if k != "name"}
+                if "clock" in pin:
+                    # its rate, read in the owning composite's scope
+                    clock = dict(pin["clock"])
+                    clock["khz"] = int(self.evaluate_build(
+                        clock["khz"], path,
+                        f"{node.found.ref}: pin {name}: clock"))
+                    if clock["khz"] <= 0:
+                        raise CompositionError(
+                            f"{node.found.ref}: pin {name} states a clock "
+                            f"of {clock['khz']} kHz")
+                    found[name]["clock"] = clock
                 owner[name] = node.found.ref
         return found
 

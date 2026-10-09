@@ -39,7 +39,10 @@ def concat(widths, interrupt: int = 0) -> dict:
         f"in{i}" for i in reversed(range(len(widths)))) + "};")
     L.append("endmodule")
     return {"verilog": "\n".join(L) + "\n", "module": module,
-            "interface": {"ports": published(pins)}}
+            "interface": {"ports": published(pins)},
+            # a word of its inputs' bits: a reset or a clock in it is theirs
+            "facts": {"ancestry": {"q": [f"in{i}"
+                                         for i in range(len(widths))]}}}
 
 
 concat.leaf = True

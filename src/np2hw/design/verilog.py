@@ -58,9 +58,10 @@ def _leaf(design, path) -> dict:
             "bundles": dict(net["bundles"] or {}), "pin": pins, "tie": tie}
 
 
-def _suffix(bundle: str, member: str) -> str:
-    return member[len(bundle) + 1:] if member.startswith(bundle + "_") \
-        else member
+def _role(bundle: dict, member: str) -> str:
+    """A member's part in its bus, as the netlist pairs it: two bundles
+    meet member to member by this."""
+    return bundle["roles"][member]
 
 
 class _Writer:
@@ -95,7 +96,7 @@ class _Writer:
         bundles = net["bundles"] or {}
         if port in bundles:
             return ("bundle", bundles[port]["side"],
-                    {_suffix(port, m): tuple(net["ports"][m])
+                    {_role(bundles[port], m): tuple(net["ports"][m])
                      for m in bundles[port]["members"]})
         if port in net["ports"]:
             return ("signal",) + tuple(net["ports"][port])
@@ -150,11 +151,12 @@ class _Writer:
                 if spec[0] == "signal":
                     signals[port] = (spec[1], spec[2])
                 else:
-                    names = []
+                    roles = {}
                     for sfx, (d, w) in spec[2].items():
                         signals[f"{port}_{sfx}"] = (d, w)
-                        names.append(f"{port}_{sfx}")
-                    bundles[port] = {"side": spec[1], "members": names}
+                        roles[f"{port}_{sfx}"] = sfx
+                    bundles[port] = {"side": spec[1], "members": list(roles),
+                                     "roles": roles}
             self.leaves[f"@{name}"] = {
                 "module": name, "parameters": {}, "signals": signals,
                 "bundles": bundles, "pin": {s: s for s in signals},
@@ -175,7 +177,7 @@ class _Writer:
             if port in leaf["bundles"]:
                 b = leaf["bundles"][port]
                 return ("bundle", b["side"],
-                        {_suffix(port, m): leaf["signals"][m]
+                        {_role(b, m): leaf["signals"][m]
                          for m in b["members"]})
             if port not in leaf["signals"]:
                 raise VerilogError(f"{owner} has no port {port!r}")
@@ -190,7 +192,7 @@ class _Writer:
             return {"": (port, s[1], s[2])}
         if owner in self.leaves:
             b = self.leaves[owner]["bundles"][port]
-            return {_suffix(port, m): (m,) + self.leaves[owner]["signals"][m]
+            return {_role(b, m): (m,) + self.leaves[owner]["signals"][m]
                     for m in b["members"]}
         return {sfx: (f"{port}_{sfx}",) + dw for sfx, dw in s[2].items()}
 

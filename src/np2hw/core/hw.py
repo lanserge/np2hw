@@ -133,6 +133,8 @@ for _k in (
         min(x.lo * y.lo, x.lo * y.hi, x.hi * y.lo, x.hi * y.hi),
         max(x.lo * y.lo, x.lo * y.hi, x.hi * y.lo, x.hi * y.hi)))),
     Kind("hw.neg", _P, 1, _un(lambda x, a: (-x.hi, -x.lo))),
+    Kind("hw.shl", _P, 1, _un(lambda x, a: (x.lo << a["amount"],
+                                           x.hi << a["amount"]))),
     Kind("hw.shr", _P, 1, _un(lambda x, a: (x.lo >> a["amount"],
                                            x.hi >> a["amount"]))),
     Kind("hw.clip", _P, 1, _un(_clip)),

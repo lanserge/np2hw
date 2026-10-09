@@ -90,6 +90,21 @@ def rewrite(c: Canonical):
                                            p.default, p.description))
                 return g.op("hw.param", name=p.name, bits=p.bits,
                             signed=bool(p.signed))
+            if k == "model.mul":
+                # by a constant +-2**k: a left shift, negated for the
+                # second, and no multiplier (timing.as_shift's question,
+                # answered once here for this compiler)
+                for i in (0, 1):
+                    c = n.operands[i].node
+                    if c.kind != "model.const":
+                        continue
+                    value = c.attr("value")
+                    e = _pow2(abs(value))
+                    if e is None:
+                        continue
+                    out = g.op("hw.shl", ops[1 - i], amount=e) if e \
+                        else ops[1 - i]
+                    return g.op("hw.neg", out) if value < 0 else out
             if k in _BINARY:
                 return g.op(_BINARY[k], ops[0], ops[1])
             if k in ("model.neg", "model.abs"):

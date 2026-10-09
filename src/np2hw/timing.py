@@ -96,13 +96,20 @@ class Device:
     level_ns = None            # one LUT level, including its routed net
     carry_ns_per_bit = None    # a carry chain, per bit
     dsp_ns = None              # a hard multiplier, in to out
+    # The attribute that makes synthesis build a multiply as that hard
+    # multiplier. The model times every multiply at dsp_ns; left to its
+    # own heuristics a tool builds a narrow one from LUTs and carry
+    # chains, several times slower -- a stage scheduled for one shape and
+    # built as another. So the emitter writes what the model assumed.
+    mul_attribute = None
     overhead_ns = None         # clock-to-out + setup + the first/last nets
     mem_ns = None              # a memory's clock-to-out (registered read)
     carry_chain_ns = None      # starting one carry chain, and leaving it
     lut_inputs = None          # how many inputs one lookup table has
 
     _REQUIRED = ("name", "level_ns", "carry_ns_per_bit", "dsp_ns",
-                 "overhead_ns", "mem_ns", "carry_chain_ns", "lut_inputs")
+                 "mul_attribute", "overhead_ns", "mem_ns", "carry_chain_ns",
+                 "lut_inputs")
 
     def __init__(self):
         missing = [f for f in self._REQUIRED if getattr(self, f) is None]
@@ -297,6 +304,7 @@ class Series7(Device):
     level_ns = 0.62
     carry_ns_per_bit = 0.03
     dsp_ns = 3.2
+    mul_attribute = '(* use_dsp = "yes" *)'
     overhead_ns = 1.6
     mem_ns = 2.1
     # MEASURED, on the path that exposed the need for the term: a
@@ -336,6 +344,30 @@ def device(spec) -> Device:
 # These carry NO numbers. They translate an op name into a request the
 # device answers, so every hardware shape has exactly one owner.
 
+def power_of_two(value) -> int | None:
+    """k where `value` is the integer 2**k (k >= 0), else None."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value.bit_length() - 1 if value & (value - 1) == 0 else None
+
+
+def as_shift(node):
+    """``(operand, k, negated)`` where `node` multiplies by the constant
+    2**k or -2**k -- a left shift, negated for the second: a wire, or a
+    subtraction from zero, and no multiplier either way -- else None.
+    The one question the scheduler and every emitter ask of a multiply, so
+    a shift can never be timed as one shape and built as another."""
+    if node.op != "mul":
+        return None
+    a, b = node.args
+    for x, c in ((a, b), (b, a)):
+        if isinstance(c, PExpr) and c.op == "const" and c.lo == c.hi:
+            k = power_of_two(abs(c.lo))
+            if k is not None:
+                return x, k, c.lo < 0
+    return None
+
+
 def node_cost(node, dev: Device) -> Depth:
     """The hardware shape of ONE PExpr node: what it adds to any path
     through it. Leaves cost nothing -- they are registers, constants, or
@@ -359,7 +391,10 @@ def node_cost(node, dev: Device) -> Depth:
     if op in ("add", "sub"):
         return dev.add(_bits(node))
     if op == "mul":
-        return dev.mul()
+        shift = as_shift(node)
+        if shift is None:
+            return dev.mul()
+        return dev.add(_bits(node)) if shift[2] else dev.wire()
     if op == "clip":
         return dev.clip(_bits(node))
     if op == "lt":
@@ -384,6 +419,8 @@ def post_op_cost(op, bits: int, dev: Device) -> Depth:
         return dev.clip(bits)
     if kind == "addp":
         return dev.add(bits)
+    if kind == "mulc" and power_of_two(op[1]) is not None:
+        return dev.wire()                # a shift: see as_shift
     if kind in ("mulc", "mulp"):
         return dev.mul()
     raise ValueError(f"no depth rule for post op {kind!r} -- a new op "

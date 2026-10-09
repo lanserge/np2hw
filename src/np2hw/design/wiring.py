@@ -48,10 +48,19 @@ def _kind(vlnv: str) -> str:
     return vlnv
 
 
+def role(bundle: str, member: str) -> str:
+    """A declared bundle member's part in its bus: its signal, as the bus's
+    tables and a published port's logical name both say it, in lower case.
+    Two bundles are wired member to member by this, never by name."""
+    return (member[len(bundle) + 1:] if member.startswith(bundle + "_")
+            else member).lower()
+
+
 def facts(inst) -> dict | None:
     """``{"signals": {name: (direction, width)}, "bundles": {name: {kind,
-    side, width, members}}}`` for one leaf, at this instance's parameters
-    -- a bundle's members its signals, by name -- or None
+    side, width, members, roles}}}`` for one leaf, at this instance's
+    parameters -- a bundle's members its signals, by name, and each one's
+    part in the bus (:func:`role`) -- or None
     where it states no ports."""
     obj = inst.leaf if isinstance(inst.leaf, dict) else None
     if obj is None:
@@ -68,7 +77,9 @@ def facts(inst) -> dict | None:
                     signals.get(f"{name}_tdata") if kind == "axis" else None)
             bundles[name] = {"kind": kind, "side": bus["side"],
                              "width": data[1] if data else None,
-                             "members": [p["name"] for p in bus["ports"]]}
+                             "members": [p["name"] for p in bus["ports"]],
+                             "roles": {p["name"]: p["bus"]["logical"].lower()
+                                       for p in bus["ports"]}}
         return {"signals": signals, "bundles": bundles}
     if not ("inputs" in obj or "outputs" in obj):
         return None
@@ -94,24 +105,27 @@ def facts(inst) -> dict | None:
                                  lookup)
             members = expand(port, side, width)
             signals.update(members)
+            roles = {m: role(port["name"], m) for m in members}
             if "stream" in port:
                 bundles[port["name"]] = {"kind": "stream", "side": side,
                                          "width": width,
-                                         "members": list(members)}
+                                         "members": list(members),
+                                         "roles": roles}
             elif "bus" in port:
                 axis = port["bus"] == "axis"
                 bundles[port["name"]] = {
                     "kind": _DECLARED[port["bus"]], "side": side,
                     "width": width if axis else None,
-                    "members": list(members)}
+                    "members": list(members), "roles": roles}
     return {"signals": signals, "bundles": bundles}
 
 
 def check(design) -> None:
     """Refuse a design whose wires disagree with the ports they join, read
     from its netlist (np2hw.design.netlist): a bundle wired to one of
-    another kind or width, a net whose pins differ in width, a net two
-    leaves drive."""
+    another kind or width, or with an input the other has no partner to
+    drive; a net whose pins differ in width (an address excepted: each end
+    uses the bits it decodes); a net two leaves drive."""
     netlist = getattr(design, "netlist", None)
     if netlist is None:
         from np2hw.design.netlist import build
@@ -136,9 +150,15 @@ def check(design) -> None:
                 problems.append(f"{b['from']} ({bs['width']} bits) -> "
                                 f"{b['to']} ({bd['width']} bits): WIDTH "
                                 "MISMATCH")
+            elif "unpaired" in b:
+                problems.append(
+                    f"{b['from']} -> {b['to']}: inputs nothing drives -- "
+                    + "; ".join(f"{', '.join(roles)} at {b[end]}"
+                                for end, roles in b["unpaired"].items()
+                                if roles))
     for net in netlist["nets"]:
         widths = net["widths"]
-        if len(set(widths.values())) > 1:
+        if len(set(widths.values())) > 1 and not net.get("ranged"):
             problems.append("WIDTH MISMATCH on one net: " + ", ".join(
                 f"{p} ({w} bits)" for p, w in sorted(widths.items())))
         if len(net["drivers"]) > 1:

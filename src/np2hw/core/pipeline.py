@@ -50,7 +50,7 @@ def stage_ns(mod: CoreModule, dev) -> float:
 def _cost(n, dev):
     k = n.kind
     if k in ("hw.port", "hw.parameter", "hw.const", "hw.param", "hw.regread",
-             "hw.shr", "hw.wrap", "hw.bits", "hw.not"):
+             "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.not"):
         return dev.wire()
     if k in ("hw.add", "hw.sub", "hw.neg"):
         return dev.add(n.value.type.bits)

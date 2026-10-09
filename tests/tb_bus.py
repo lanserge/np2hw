@@ -136,6 +136,39 @@ async def arbiter_serves_both_masters(dut):
 
 
 @cocotb.test(timeout_time=2, timeout_unit="ms")
+async def slice_passes_every_transaction_through(dut):
+    """Through the slice, with both ends stalling at random: every write
+    lands, every read returns what was written, a slave's error comes back
+    as it was, and transactions overlap -- the slice holds one in reserve
+    rather than taking turns."""
+    case = load_case()
+    if case["dut"] != "slice":
+        return
+    rnd = random.Random(case["seed"])
+    memory = LiteMemory(dut, "m_axi", dut.aclk, rnd, errors=[0x40])
+    master = LiteMaster(dut, "s_axi", dut.aclk, rnd)
+    master.idle()
+    await _start(dut)
+    memory.start()
+    expect = {}
+    for n in range(case["count"]):
+        address = 4 * rnd.randrange(32)
+        word = rnd.getrandbits(32)
+        resp = await master.write(address, word)
+        if address == 0x40:
+            assert resp == SLVERR
+            data, resp = await master.read(address)
+            assert resp == SLVERR
+            continue
+        assert resp == OKAY
+        expect[address] = word
+        check = rnd.choice(sorted(expect))
+        data, resp = await master.read(check)
+        assert (data, resp) == (expect[check], OKAY), hex(check)
+    assert memory.writes and memory.reads
+
+
+@cocotb.test(timeout_time=2, timeout_unit="ms")
 async def bridge_turns_bursts_into_beats(dut):
     """AXI3 in, AXI4-Lite out: IDs echoed, a burst one access per beat
     (INCR advancing, FIXED staying), the last read beat marked, and the

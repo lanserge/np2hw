@@ -23,7 +23,12 @@
       },
       "sources": [
         "np2hw.hdl:np2hw_const.v"
-      ]
+      ],
+      "facts": {
+        "ancestry": {
+          "q": "board"
+        }
+      }
     },
     "slice": {
       "description": "Bits HI down to LO of an IN-bit word.",
@@ -56,7 +61,14 @@
       },
       "sources": [
         "np2hw.hdl:np2hw_slice.v"
-      ]
+      ],
+      "facts": {
+        "ancestry": {
+          "q": [
+            "d"
+          ]
+        }
+      }
     },
     "not": {
       "description": "Every bit of a word inverted.",
@@ -83,7 +95,14 @@
       },
       "sources": [
         "np2hw.hdl:np2hw_not.v"
-      ]
+      ],
+      "facts": {
+        "ancestry": {
+          "y": [
+            "a"
+          ]
+        }
+      }
     }
   }
 }
