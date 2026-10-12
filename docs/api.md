@@ -101,7 +101,7 @@ and `np2hw.hdl.closure(result)` is the text with everything it requires.
 Generated Verilog is for what genuinely varies: a traced model, a
 composition.
 
-They, the generators -- `scanout`, `ddc_slave`, `framebuffer_read`,
+They, the generators -- `ddc_slave`, `framebuffer_read`,
 `frame_history`, `axil_regfile` -- and `compose()`, `control_wrap()`
 publish `interface["ports"]`: EVERY port, video pins and status words and
 bus ports as much as streams, as `{"name", "direction", "width"}`, plus
@@ -186,8 +186,7 @@ block design. Two checks hold Vivado to the design:
 `python -m np2hw.toolchain.vivado.vendor_check OUT` compares every described
 vendor cell's pins, dumped once the block design validates, with its
 description, and `python -m np2hw.toolchain.vivado.checkhwh HWH` audits the
-hardware handoff as built. `np2hw.video_out.pixel_khz(mode)` is a raster's
-pixel clock, callable from a design's expressions.
+hardware handoff as built.
 
 ## Compose: `compose`
 

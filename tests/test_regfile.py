@@ -370,3 +370,27 @@ def test_the_map_states_every_register_presentation():
 
     commit = blocks["ctxblock"]["commit"]
     assert commit["widget"] == "checkbox"
+
+
+def test_the_crossing_constraint_names_what_the_verilog_declares():
+    """A wrapper on two clocks bounds its crossing by the names its two
+    halves declare: every cell the constraint reaches for exists."""
+    import re
+    from np2hw.design.composite import assemble
+    from np2hw.pipeline import compose
+    from toylib.blocks import gain
+    design = assemble("x", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
+                      stream={"bits": 8, "max_width": 16, "max_height": 4})
+    generated = compose.generate(design, control=True)
+    (crossing,) = generated.meta["constraints"]
+    assert crossing["apart"] == ["clk", "s_axil_aclk"]
+    assert crossing["scoped_to"] == generated.top
+    text = generated.verilog
+    cells = re.findall(r"get_cells (?:-filter \{[^}]*\} )?\{([^}]+)\}",
+                       crossing["text"])
+    assert len(set(cells)) == 4, cells
+    for cell in cells:
+        instance, name = cell.split("/")
+        assert re.search(rf"\b{instance} \(", text), instance
+        flop = name.removesuffix("_reg").rstrip("*")
+        assert re.search(rf"\breg\b[^;]*\b{re.escape(flop)}", text), cell

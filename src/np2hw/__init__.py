@@ -17,7 +17,6 @@ from . import ipxact
 from .i2c import ddc_slave
 from .video_mem import framebuffer_read
 from .frame_history import frame_history
-from .video_out import MODES, mode_timing, scanout
 
 __all__ = [
     "Param", "Params", "Const", "Image2D", "Indexer", "PhaseRef",
@@ -58,9 +57,6 @@ __all__ = [
     # pixel is the same pixel k frames ago -- the time axis a traced model
     # reads as pixel[..., k] and a trace cannot hold itself.
     "frame_history",
-    # Transmitters: an elastic stream becomes a timed raster. The mode
-    # table is the one owner of raster geometry -- read it, do not copy.
-    "scanout", "mode_timing", "MODES",
     # Control plane: a register map the caller allocated -- block types,
     # instances at bases -- with the regfile emitters and renderings over it.
     "Reg", "RegBlock", "RegInstance", "AddrMap", "systemrdl",

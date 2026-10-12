@@ -241,8 +241,8 @@ def combinational_outputs(interface) -> tuple:
     read the same thing is two places for them to disagree.
 
     Takes either a generator's whole result or its `interface`: not every
-    generator has an interface to put it in (`scanout` describes a video
-    sink, which is not an np2hw stream), and a caller should not have to
+    generator has an interface to put it in (a video sink is not an np2hw
+    stream), and a caller should not have to
     know which kind it is holding to ask a question about boundaries.
     """
     if interface is None:

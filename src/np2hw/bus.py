@@ -192,18 +192,64 @@ def hops(design) -> list:
     return out
 
 
-def address_map(design) -> dict:
-    """Where every slave on a register bus sits, as the host reads it:
-    ``{slave path: {"base", "size", "port"}}`` -- the slave that decodes
-    the window (through any block that only forwards), its window, and its
-    port. Read from the windows the design's decoders published and the
-    design's own edges; it states nothing of its own. A second master's
-    reach (a cable's bridge into one register file, from 0) is its own
-    address space, not the host's, and is not in it."""
-    out = {}
+def _master_of(design, path: str):
+    """The master port a decoder's ``s_axi`` answers, walked back through
+    any block that only forwards: ``"path.port"``, or None where nothing
+    drives it."""
+    def driver(endpoint):
+        ends = [b if a == endpoint else a for a, b in design.edges
+                if endpoint in (a, b)]
+        return ends[0] if len(ends) == 1 else None
+
+    end = driver(f"{path}.s_axi")
+    while end is not None:
+        block, _, port = end.rpartition(".")
+        leaf = design.instances[block].leaf if block in design.instances \
+            else None
+        forwards = (leaf.get("facts", {}).get("forwards", {})
+                    if isinstance(leaf, dict) else {})
+        upstream = [s for s, m in forwards.items() if m == port]
+        if len(upstream) != 1:
+            return end
+        end = driver(f"{block}.{upstream[0]}")
+    return None
+
+
+def address_maps(design) -> dict:
+    """Every master's address space, as that master reads it:
+    ``{master: {slave path: {"base", "size", "port"}}}``, the master
+    being the port that drives a decoder (``"ps7.M_AXI_GP0"``, a cable's
+    bridge), or None for a decoder nothing drives yet. Read from the
+    windows the design's decoders published and the design's own edges;
+    it states nothing of its own. A master's reach that no decoder
+    places (a cable's bridge straight into one register file, from 0) is
+    not a space here."""
+    out: dict = {}
     for base, size, chain, decoded in hops(design):
         if not decoded:
             continue
+        master = _master_of(design, chain[0][0][0])
         slave, port = chain[-1][1]
-        out[slave] = {"base": base, "size": size, "port": port}
-    return dict(sorted(out.items(), key=lambda item: item[1]["base"]))
+        out.setdefault(master, {})[slave] = {"base": base, "size": size,
+                                             "port": port}
+    return {m: dict(sorted(v.items(), key=lambda item: item[1]["base"]))
+            for m, v in out.items()}
+
+
+def address_map(design, master: str | None = None) -> dict:
+    """Where every slave sits in one master's space, as it reads it:
+    ``{slave path: {"base", "size", "port"}}`` -- see :func:`address_maps`.
+    With one space in the design, that one; with several, `master` names
+    which, since two spaces read as one would place slaves the master
+    cannot reach."""
+    spaces = address_maps(design)
+    if master is not None:
+        if master not in spaces:
+            raise ValueError(f"no decoder answers {master}; the spaces are "
+                             f"{sorted(map(str, spaces))}")
+        return spaces[master]
+    if len(spaces) > 1:
+        raise ValueError(f"{len(spaces)} address spaces "
+                         f"({', '.join(sorted(map(str, spaces)))}): name "
+                         "the master whose map is wanted")
+    return next(iter(spaces.values()), {})

@@ -21,15 +21,12 @@ from np2hw.i2c import ddc_slave
 from np2hw.ports import elaborated_ports, resolve
 from np2hw.stream import cdc_fifo, skid, stream_cdc, tee
 from np2hw.video_mem import framebuffer_read
-from np2hw.video_out import scanout
 
 CASES = {
     "skid": lambda: skid(10),
     "cdc_fifo": lambda: cdc_fifo(26, 5),
     "tee": lambda: tee(27),
     "stream_cdc": lambda: stream_cdc(12),
-    "scanout": lambda: scanout("1080p30"),
-    "scanout_genlock": lambda: scanout("1080p30", genlock=True),
     "ddc_slave": lambda: ddc_slave(),
     "framebuffer_read": lambda: framebuffer_read(),
     "frame_history": lambda: frame_history(3, 13, 16, 8, loop=4),

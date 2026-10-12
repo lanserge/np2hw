@@ -313,3 +313,46 @@ def test_a_second_masters_reach_is_its_own_and_shares_the_hop_once(
          "4K", "a/S_AXI"],
         ["-target_address_space", "/cable/M_AXI", "-offset", "0x00000000",
          "4K", "arb/s1_axi"]]
+
+
+def test_each_master_reads_its_own_space(library):
+    """A second master with a decoder of its own -- a cable's bridge
+    behind a register slice -- is a space of its own: both maps are
+    published by master, and asked for one map with no master named, the
+    design says there are two rather than reading them as one."""
+    lib = library(lambda name: {"top": {
+        "nodes": {
+            "dec": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["a.S_AXI.window"],
+                "base": 0x4000_0000, "span": 0x4000_0000}},
+            "cable": {"block": f"{name}.gen:master", "build": {"bits": 16}},
+            "slice": {"block": "np2hw.hdl.bus:axil_slice"},
+            "far": {"block": "np2hw.bus:axil_decoder", "build": {
+                "sizes": ["b.S_AXI.window", "c.S_AXI.window"],
+                "base": 0, "span": 0x10000}},
+            "a": {"block": f"{IP}:regs"},
+            "b": {"block": f"{IP}:regs"},
+            "c": {"block": f"{IP}:regs"}},
+        "connections": [["dec.m00_axi", "a.S_AXI"],
+                        ["cable.M_AXI", "slice.s_axi"],
+                        ["slice.m_axi", "far.s_axi"],
+                        ["far.m00_axi", "b.S_AXI"],
+                        ["far.m01_axi", "c.S_AXI"]]}},
+        files={"gen.py": MASTER_GEN})
+    design = load(f"{lib}.lib:top")
+    from np2hw.bus import address_map, address_maps
+    window = {"size": 0x1000, "port": "S_AXI"}
+    assert address_maps(design) == {
+        None: {"a": {"base": 0x4000_0000, **window}},
+        "cable.M_AXI": {"b": {"base": 0, **window},
+                        "c": {"base": 0x1000, **window}}}
+    assert address_map(design, "cable.M_AXI") == address_maps(design)[
+        "cable.M_AXI"]
+    with pytest.raises(ValueError, match="2 address spaces"):
+        address_map(design)
+
+
+def test_a_frequency_is_spelled_as_vivado_spells_one():
+    assert vivado.mhz(148500) == "148.500"
+    assert vivado.mhz(74250) == "74.250"
+    assert vivado.mhz.expression

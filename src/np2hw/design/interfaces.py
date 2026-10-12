@@ -168,8 +168,10 @@ def from_result(result: dict, generator) -> dict:
     ``module`` and an ``interface`` publishing every port -- and may add
     ``file`` (the Verilog's file name, ``<module>.v`` by default),
     ``files`` (anything else it writes beside it, by name), ``sources``
-    (fixed files it is built from, as ``"package:file"``) and ``facts``
-    (what it decided that a design or a build reads back, by name).
+    (fixed files it is built from, as ``"package:file"``), ``facts``
+    (what it decided that a design or a build reads back, by name) and
+    ``constraints`` (constraint files it made for its own module, each
+    saying where it applies -- :func:`np2hw.verilog.arm_crossing`).
     Nothing here is restated: the ports are the generator's own list."""
     iface = result.get("interface") or {}
     ports = iface.get("ports")
@@ -180,6 +182,7 @@ def from_result(result: dict, generator) -> dict:
     files = {result.get("file", f"{module}.v"):
              text if text.endswith("\n") else text + "\n"}
     files.update(result.get("files", {}))
+    constraints = generated_constraints(result.get("constraints", ()), files)
     buses(ports)                    # refuses a stream without its valid
     doc = (generator.__doc__ or "").strip().splitlines()
     return {
@@ -197,7 +200,20 @@ def from_result(result: dict, generator) -> dict:
         "generated": sorted(f for f in files if f.endswith((".v", ".sv"))),
         "files": files,
         "facts": dict(result.get("facts", {})),
+        "generated_constraints": constraints,
     }
+
+
+def generated_constraints(constraints, files: dict) -> list:
+    """A build's own constraints for its module: each file's text joins
+    the files written beside the Verilog, and what is kept is where it
+    applies (``file``, ``scoped_to``, ``apart``) -- a toolchain's to read."""
+    kept = []
+    for c in constraints:
+        files[c["file"]] = c["text"]
+        kept.append({k: c[k] for k in ("file", "scoped_to", "apart")
+                     if k in c})
+    return kept
 
 
 def wiring(obj) -> tuple[dict, set]:

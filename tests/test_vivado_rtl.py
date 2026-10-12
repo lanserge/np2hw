@@ -144,3 +144,26 @@ def test_a_pin_clock_of_no_rate_is_refused(library, tmp_path):
     import pytest
     with pytest.raises(CompositionError, match="refclk states a clock of 0"):
         _clocked(library, tmp_path, "rate - 50000")
+
+
+def test_a_crossing_constraint_applies_only_where_its_clocks_are_apart(
+        library, tmp_path):
+    """A generated leaf's constraint that bounds a crossing between two of
+    its ports is added where the design wires them to different nets, and
+    left out where they are one net: on one clock nothing crosses."""
+    design = _design(library, tmp_path)
+    mem = design.instances["mem"].leaf
+    emit = dict(out=tmp_path / "out", part="xc7z020clg400-1",
+                board_part="tul.com.tw:pynq-z2:part0:1.0",
+                board_files=tmp_path, ip_repos=[tmp_path])
+    # aclk and aresetn: two nets
+    mem["generated_constraints"] = [{"file": "mem_crossing.xdc",
+                                     "scoped_to": "mem",
+                                     "apart": ["aclk", "aresetn"]}]
+    tcl, _, _ = emit_rtl(design, **emit)
+    assert "mem_crossing.xdc" in tcl
+    assert "set_property SCOPED_TO_REF mem" in tcl
+    # aclk with itself: one net
+    mem["generated_constraints"][0]["apart"] = ["aclk", "aclk"]
+    tcl, _, _ = emit_rtl(design, **emit)
+    assert "mem_crossing.xdc" not in tcl

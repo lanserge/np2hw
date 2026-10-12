@@ -44,6 +44,19 @@ import textwrap
 from dataclasses import dataclass, field
 
 
+def arm_capture(req: str) -> str:
+    """The datapath's first synchroniser flop on the arm request: the
+    one register the request crosses into, named here once -- the
+    emitter declares it, and the crossing's constraint names it."""
+    return f"{req}_s0"
+
+
+def arm_answer(ack: str) -> str:
+    """The datapath's register that raises the acknowledgement: where
+    the answer leaves its clock, named here once."""
+    return f"{ack}_r"
+
+
 @dataclass(frozen=True)
 class StreamType:
     """What a net carries. Checked where a source meets a sink.
@@ -406,19 +419,21 @@ def compose(module_name: str, instances, connections, ports,
             a("    // late commit lands at the next frame, never in a wrong")
             a("    // pixel. Timing decides WHEN an update takes effect --")
             a("    // never whether the result is right.")
-            a(f"    (* ASYNC_REG = \"TRUE\" *) reg {req}_s0, {req}_s1;")
-            a(f"    reg {ack}_r;")
+            a(f"    (* ASYNC_REG = \"TRUE\" *) reg {arm_capture(req)}, "
+              f"{req}_s1;")
+            a(f"    reg {arm_answer(ack)};")
             a("    // Latched at the wave's head, so a commit that arrives")
             a("    // mid-wave waits for the next frame instead of splitting")
             a("    // the chain between two parameter sets.")
             a("    reg wave_armed;")
-            a(f"    assign {ack} = {ack}_r;")
+            a(f"    assign {ack} = {arm_answer(ack)};")
             a("    always @(posedge clk) begin")
             a("        if (rst) begin")
-            a(f"            {req}_s0 <= 1'b0; {req}_s1 <= 1'b0;")
-            a(f"            {ack}_r <= 1'b0; wave_armed <= 1'b0;")
+            a(f"            {arm_capture(req)} <= 1'b0; {req}_s1 <= 1'b0;")
+            a(f"            {arm_answer(ack)} <= 1'b0; wave_armed <= 1'b0;")
             a("        end else begin")
-            a(f"            {req}_s0 <= {req}; {req}_s1 <= {req}_s0;")
+            a(f"            {arm_capture(req)} <= {req}; "
+              f"{req}_s1 <= {arm_capture(req)};")
             if head:
                 a(f"            if ({head}) wave_armed <= {req}_s1;")
             out = next((pt.name for pt in ports if pt.stream is not None
@@ -428,8 +443,9 @@ def compose(module_name: str, instances, connections, ports,
                     if out else (head or "1'b0"))
             a("            // Acknowledged when the wave has passed the whole")
             a("            // chain: the frame that carried it leaves the pipe.")
-            a(f"            if ({done} && wave_armed && !{ack}_r) {ack}_r <= 1'b1;")
-            a(f"            else if (!{req}_s1) {ack}_r <= 1'b0;")
+            a(f"            if ({done} && wave_armed && !{arm_answer(ack)}) "
+              f"{arm_answer(ack)} <= 1'b1;")
+            a(f"            else if (!{req}_s1) {arm_answer(ack)} <= 1'b0;")
             a("        end")
             a("    end")
 

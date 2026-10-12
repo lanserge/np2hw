@@ -949,6 +949,11 @@ class _Loader:
                      json.dumps(compose.register_map(sub), indent=2) + "\n"}
         ports = generated.meta["ports"]
         buses(ports)                     # its streams are whole
+        # constraints the build made for its own module, written beside its
+        # Verilog; each says when it applies (np2hw.toolchain reads it)
+        from np2hw.design.interfaces import generated_constraints
+        crossing = generated_constraints(
+            generated.meta.get("constraints", ()), files)
         node = self.nodes[path]
         self.whole[path] = Instance(
             path=path, ref=node.found.ref, kind="primitive",
@@ -957,6 +962,7 @@ class _Loader:
                   "ports": ports, "module_parameters": {},
                   "generated": [f"{sub.name}.v"], "files": files,
                   "facts": dict(generated.meta.get("facts", {})),
+                  "generated_constraints": crossing,
                   "made_by": {"composite": node.found.ref}},
             folder=node.found.folder,
             domain=node.entry.get("domain"),

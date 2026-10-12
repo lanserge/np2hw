@@ -61,6 +61,17 @@ def hex_word(value: int) -> str:
 hex_word.expression = True
 
 
+def mhz(khz: int) -> str:
+    """A frequency in kHz as Vivado's IP properties spell one, in MHz to
+    three places (``148.500``): for a design's expression to set a
+    requested clock from the rate it derives --
+    ``"@np2hw.toolchain.vivado:mhz(out_khz)"``."""
+    return f"{int(khz) / 1000:.3f}"
+
+
+mhz.expression = True
+
+
 def _range(size: int) -> str:
     """A window's size as Vivado writes a range: 4K, 64K, 1M, 1G."""
     for unit, shift in (("G", 30), ("M", 20), ("K", 10)):

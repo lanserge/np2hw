@@ -46,7 +46,7 @@ import numpy as np  # noqa: E402
 
 from np2hw import (Image2D, Param, boundary_report,
                    combinational_outputs, framebuffer_read, generate,
-                   saturate, scanout, skid, to_ir)  # noqa: E402
+                   saturate, skid, to_ir)  # noqa: E402
 from np2hw.hdl import closure  # noqa: E402
 
 
@@ -163,12 +163,6 @@ def main():
           "prefetch FIFO's head, read combinationally, exactly the shape "
           "the receiver had before")
 
-    sc = scanout()
-    check("the raster hands back its ready",
-          combinational_outputs(sc) == ("s_axis_tready",),
-          "the video side leaves flops; the stream side does not, so "
-          "this lands in the producer's path")
-
     # The composition, which is where the cost actually appears. A chain
     # of traced cores is the interesting case: each is individually
     # unremarkable and together they are a wire from the sink to the
@@ -195,14 +189,13 @@ def main():
     CHAIN = ["bl", "wb", "hg", "hr", "cc", "gm", "lg"]
     traced = core["interface"]
     design = ([("slice", sk["interface"])]
-              + [(n, traced) for n in CHAIN]
-              + [("scanout", sc)])
+              + [(n, traced) for n in CHAIN])
     report = boundary_report(design)
     names = [n for n, _ in report]
 
     check("the report names every core that hands depth on, and no other,"
           " in pipeline order",
-          names == CHAIN + ["scanout"],
+          names == CHAIN,
           f"{len(report)} of {len(design)} modules, and the order is the "
           f"path: {' -> '.join(names)}")
     check("and it clears the ones that do not",
@@ -215,8 +208,8 @@ def main():
     depth = sum(1 for n, p in report if "in_ready" in p)
     check("a seven-block chain passes ready through all seven",
           depth == len(CHAIN),
-          f"{depth} cores deep, plus the raster's own tready at the "
-          f"end -- and one deeper for every block the pipeline gains")
+          f"{depth} cores deep -- and one deeper for every block the "
+          "pipeline gains")
 
     print("\n" + ("BOUNDARIES PASS" if all(ok) else "SOME FAILED"))
     return 0 if all(ok) else 1

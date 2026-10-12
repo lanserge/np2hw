@@ -48,6 +48,12 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **One address map per master** (`np2hw.bus.address_maps`): each
+  decoder's windows under the master that drives it, walked back through
+  blocks that only forward, so a cable's bus beside a processor's is two
+  spaces, not one. `address_map(design, master)` names which; with
+  several spaces and none named it refuses rather than mixing them.
+
 - **`np2hw.blocks`** -- the block framework, moved from revela and
   relicensed MIT by its author: `block` (the decorator), `Block`,
   `StreamPort`, `ContextBit`, `configblock`, discovery (`registry`,
@@ -198,6 +204,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   cross. A 16-deep crossing now costs one 18 Kb block RAM.
 
 ### Removed
+
+- **`scanout`, `mode_timing` and `MODES`** (`np2hw.video_out`), and the
+  scanout example. **Breaking** for anyone importing them. np2hw compiles
+  NumPy to Verilog; a raster is a fixed design, not a NumPy model, and a
+  table of display modes is a fact of the links that carry them. The
+  raster is a Verilog file in the design that drives a display, and the
+  rasters are `bayerlink.rasters`.
 
 - **The bayerlink receiver moved to bayerlink-fpga.** `bayerlink_in` and
   `np2hw.video_in` are gone, with the `bayerlink` extra: the receiver is

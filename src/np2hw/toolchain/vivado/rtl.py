@@ -134,7 +134,21 @@ def emit_rtl(design, *, out: Path, part: str, board_part: str,
                       "for them -- do not edit.\n"
                       + "\n".join(pin_clocks) + "\n")
         w(f"add_files -fileset constrs_1 {tcl(str(out / 'hdl' / xdc))}")
-    for c in design.constraints:
+    # A generated leaf's own constraints, written beside its Verilog, each
+    # where it applies: one that bounds a crossing between two of the
+    # leaf's clocks only where the design wires them to different nets.
+    net_of = {pin: i for i, net in enumerate(design.netlist["nets"])
+              for pin in net["pins"]}
+    made = []
+    for path, inst in leaves.items():
+        leaf = inst.leaf if isinstance(inst.leaf, dict) else {}
+        for c in leaf.get("generated_constraints", []):
+            apart = c.get("apart")
+            if apart and len({net_of.get(f"{path}.{p}") for p in apart}) < 2:
+                continue                       # one clock: nothing crosses
+            made.append({"file": out / "hdl" / c["file"],
+                         "scoped_to": c["scoped_to"]})
+    for c in [*design.constraints, *made]:
         w(f"add_files -fileset constrs_1 {tcl(str(c['file']))}")
         if c["scoped_to"]:
             w(f"set_property SCOPED_TO_REF {c['scoped_to']} "
