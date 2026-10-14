@@ -11,6 +11,26 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed
 
+- **A composed pipeline follows the frame it is given.** Where a design's
+  context vocabulary has a signal following `width` and one following
+  `height` that a frame can bring (not a register-only choice), every core
+  is built with `frame="runtime"` and bound to them: one core processes
+  any frame up to the design's `max_width` x `max_height`, the frame's
+  size latched as each frame enters. It used to count to the build's size
+  whatever arrived, so a smaller frame ran its lines together and never
+  ended -- and a batch committed at a frame end was never taken. A stage
+  sees the frame less what the stages before it took off (a valid
+  window's span). A register that follows `width` or `height` now resets
+  to the design's size, not the vocabulary's default.
+- **`generate(..., frame="runtime")`**, on both compilers and every
+  generator: the core takes `frame_width` and `frame_height` parameter
+  ports (defaulting to the traced size, so a testbench driving each port
+  its default runs the traced frame) and keeps `WIDTH`/`HEIGHT` as the
+  most a line buffer holds. A window cropped to a stated extent refuses
+  it; it does not combine with `max_width` or `framing="eof"`, which
+  follow the frame by other means. `frame="build"` (the default) emits
+  what it always did.
+
 - **Fixed modules are Verilog files.** `skid`, `tee` and `cdc_fifo` were
   Verilog printed by Python, the same structure every time. They are
   files in the package now -- `np2hw/hdl/np2hw_skid.v`, `np2hw_tee.v`,

@@ -214,8 +214,9 @@ def _interface(in_bits, out_bits, out_signed, params, in_flags=("sof",),
     parameter ports are called. That knowledge belongs to whoever wrote the
     ports, and anywhere else it is a copy waiting to disagree.
 
-    A core self-frames from its WIDTH/HEIGHT parameters, so it takes only `sof`
-    to re-anchor and regenerates the rest. `sink` marks a module that consumes a
+    A core self-frames from its frame size -- the WIDTH/HEIGHT parameters,
+    or at run time its frame_width/frame_height ports (FRAMES) -- so it
+    takes only `sof` to re-anchor and regenerates the rest. `sink` marks a module that consumes a
     stream and produces none: it never stalls its source, so a composer may fan
     any number of them off one output for free.
     """
@@ -268,6 +269,59 @@ def _param_port(name, bits, signed, description, indent="    "):
     lines.append(f"{indent}input  wire {'signed ' if signed else ''}"
                  f"[{bits-1}:0] param_{name},")
     return lines
+
+
+#: How a core knows its frame. "build": the WIDTH and HEIGHT parameters,
+#: one size fixed when the core is built. "runtime": two parameter ports,
+#: frame_width and frame_height, latched as each frame enters -- one core,
+#: any frame up to WIDTH x HEIGHT, which stay as the most a line buffer
+#: holds. The ports are ordinary parameter ports so a composer binds them
+#: as it binds every other, and their defaults are the traced size, so a
+#: testbench that drives each port its default runs the frame it traced.
+FRAMES = ("build", "runtime")
+
+
+def _frame_params(image, frame) -> list:
+    """The frame-size parameter ports a core declares: none at build size."""
+    if frame not in FRAMES:
+        raise ValueError(f"frame {frame!r} is not one of {FRAMES}")
+    if frame == "build":
+        return []
+    return [("frame_width", POS, False, image.width,
+             "The frame's width in pixels, at most WIDTH (what a line "
+             "buffer holds); latched as each frame enters"),
+            ("frame_height", POS, False, image.height,
+             "The frame's height in lines, at most HEIGHT; latched as each "
+             "frame enters")]
+
+
+def _fdim(d: str, k: int) -> str:
+    """The frame constant for dimension `d` ("w" or "h") less k."""
+    return f"f{d}" if k == 0 else f"f{d}_m{k}"
+
+
+def _emit_frame_dims(a, frame, minus=(1,), take="in_valid && in_sof && !stall"):
+    """Declare the frame constants a core's framing compares against: fw and
+    fh, and fw_m<k>/fh_m<k> = the size less k for each k in `minus`. At
+    build size they are local parameters on WIDTH and HEIGHT -- the same
+    numbers the logic always compared against. At run time they are
+    registers, loaded at reset and as a frame enters (`take`), so a size
+    that changes mid-stream lands at a frame's start, never inside one; and
+    worked out there once, so no subtractor sits in front of a compare."""
+    names = [("fw", "W", 0), ("fh", "H", 0)]
+    names += [(f"f{d}_m{k}", d.upper(), k) for k in minus for d in ("w", "h")]
+    if frame == "build":
+        for name, d, k in names:
+            src = "WIDTH" if d == "W" else "HEIGHT"
+            a(f"    localparam [{POS-1}:0] {name} = {src}{f' - {k}' if k else ''};")
+        return
+    regs = ", ".join(f"{n} = 0" for n, _, _ in names)
+    a(f"    reg [{POS-1}:0] {regs};")
+    a(f"    always @(posedge clk) if (rst || ({take})) begin")
+    for name, d, k in names:
+        src = "param_frame_width" if d == "W" else "param_frame_height"
+        a(f"        {name} <= {src}{f' - {k}' if k else ''};")
+    a("    end")
 
 
 def _range_bits_as(lo, hi, signed):
@@ -795,13 +849,13 @@ def _emit_expr_framing(a, gate, plan, data_line):
         a("            if (in_valid) begin")
         a(f"                out_valid <= {gate};")
         a(f"                out_sof <= ({gate}) && (erow == 0) && (ecol == 0);")
-        a(f"                out_eol <= ({gate}) && (ecol == WIDTH-1);")
-        a(f"                out_last <= ({gate}) && (erow == HEIGHT-1) && "
-          f"(ecol == WIDTH-1);")
+        a(f"                out_eol <= ({gate}) && (ecol == fw_m1);")
+        a(f"                out_last <= ({gate}) && (erow == fh_m1) && "
+          f"(ecol == fw_m1);")
         a(f"                {data_line}")
         a("                if (in_sof) begin col <= 1; row <= 0; end")
-        a("                else if (col == WIDTH-1) begin")
-        a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+        a("                else if (col == fw_m1) begin")
+        a("                    col <= 0; row <= (row == fh_m1) ? 0 : row + 1;")
         a("                end else col <= col + 1;")
         a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")
         a("                out_eol <= 1'b0; out_last <= 1'b0; end")
@@ -820,9 +874,9 @@ def _emit_expr_framing(a, gate, plan, data_line):
     a(f"            vld_q1 <= in_valid && ({gate});")
     a(f"            sof_q1 <= in_valid && ({gate}) && (erow == 0) && "
       f"(ecol == 0);")
-    a(f"            eol_q1 <= in_valid && ({gate}) && (ecol == WIDTH-1);")
-    a(f"            lst_q1 <= in_valid && ({gate}) && (erow == HEIGHT-1) && "
-      f"(ecol == WIDTH-1);")
+    a(f"            eol_q1 <= in_valid && ({gate}) && (ecol == fw_m1);")
+    a(f"            lst_q1 <= in_valid && ({gate}) && (erow == fh_m1) && "
+      f"(ecol == fw_m1);")
     for k in range(2, stages + 1):
         a(f"            vld_q{k} <= vld_q{k-1}; sof_q{k} <= sof_q{k-1}; "
           f"eol_q{k} <= eol_q{k-1}; lst_q{k} <= lst_q{k-1};")
@@ -832,8 +886,8 @@ def _emit_expr_framing(a, gate, plan, data_line):
     a("        if (rst) begin col <= 0; row <= 0; end")
     a("        else if (!stall && in_valid) begin")
     a("            if (in_sof) begin col <= 1; row <= 0; end")
-    a("            else if (col == WIDTH-1) begin")
-    a("                col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+    a("            else if (col == fw_m1) begin")
+    a("                col <= 0; row <= (row == fh_m1) ? 0 : row + 1;")
     a("            end else col <= col + 1;")
     a("        end")
     a("    end")
@@ -849,7 +903,7 @@ def _emit_expr_framing(a, gate, plan, data_line):
     a("    end")
 
 
-def _generate_expr(line, module_name, plan=None) -> dict:
+def _generate_expr(line, module_name, plan=None, frame="build") -> dict:
     """Emit a pointwise expression-DAG model: LUTs, forks, recombination.
 
     One full-rate datapath with the standard registered framing, like
@@ -876,6 +930,7 @@ def _generate_expr(line, module_name, plan=None) -> dict:
         else:                                   # scalar register leaf
             params.append((declared.name, declared.bits, declared.signed,
                            declared.default, declared.description))
+    params += _frame_params(image, frame)
 
     L = []
     a = L.append
@@ -913,6 +968,7 @@ def _generate_expr(line, module_name, plan=None) -> dict:
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
+    _emit_frame_dims(a, frame)
     a("")
 
     for parent in arrays:
@@ -929,7 +985,7 @@ def _generate_expr(line, module_name, plan=None) -> dict:
     magnitude = max(root.hi, -root.lo - 1 if root.lo < 0 else 0)
     out_bits = max(1, magnitude.bit_length() + (1 if out_signed else 0))
     a("")
-    gate = "(erow < HEIGHT) && (ecol < WIDTH)"
+    gate = "(erow < fh) && (ecol < fw)"
     _emit_expr_framing(a, gate, plan,
                        f"out_data <= {result}[OUT_BITS-1:0];")
     a("endmodule")
@@ -1019,7 +1075,8 @@ def _wexpr_taps(root):
     return taps
 
 
-def _generate_expr_stack(stack, module_name, plan=None) -> Core:
+def _generate_expr_stack(stack, module_name, plan=None,
+                         frame="build") -> Core:
     """Emit np.stack of pointwise expression lanes: C datapaths, one word.
 
     The matrix-mix case (a colour matrix: unpacked channels in, three dot
@@ -1063,6 +1120,7 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
         else:
             params.append((declared.name, declared.bits, declared.signed,
                            declared.default, declared.description))
+    params += _frame_params(image, frame)
 
     L = []
     a = L.append
@@ -1098,6 +1156,7 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
+    _emit_frame_dims(a, frame)
     a("")
     for parent in arrays:
         size = parent.shape[0]
@@ -1118,7 +1177,7 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
             parts.append(f"{{{field - have}'b0, {name}}}")
     a("")
     a(f"    wire [{out_bits-1}:0] word = {{{', '.join(parts)}}};")
-    gate = "(erow < HEIGHT) && (ecol < WIDTH)"
+    gate = "(erow < fh) && (ecol < fw)"
     _emit_expr_framing(a, gate, plan, "out_data <= word;")
     a("endmodule")
 
@@ -1150,7 +1209,7 @@ def _generate_expr_stack(stack, module_name, plan=None) -> Core:
 
 
 def _generate_phase(canvas, module_name, clk_ns=None, label=None,
-                    dev=None) -> dict:
+                    dev=None, frame="build") -> dict:
     """Emit a phase-sliced model: one datapath, coefficients muxed by position.
 
     The model wrote four interleaved planes and they partition the image, so at
@@ -1206,6 +1265,7 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     for _, bits, signed, names, defaults, docs in muxed:
         params += [(name, bits, signed, default, doc)
                    for name, default, doc in zip(names, defaults, docs)]
+    params += _frame_params(image, frame)
 
     acc_lo, acc_hi = _acc_range(template.taps, in_lo, in_hi)
     range_signed = _range_bits(acc_lo, acc_hi)[1]
@@ -1245,6 +1305,7 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
+    _emit_frame_dims(a, frame)
     a("")
     a("    // Which plane this pixel belongs to. A plane taken at `p::2` holds the")
     a("    // positions where (position & 1) == p, so XOR against the phase")
@@ -1306,7 +1367,7 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
         label=label or module_name, dev=dev)
     plan = (None, len(staging) + 1) if staging else None
 
-    gate = "(erow < HEIGHT) && (ecol < WIDTH)"
+    gate = "(erow < fh) && (ecol < fw)"
     _emit_expr_framing(a, gate, plan, f"out_data <= {result};")
     a("endmodule")
 
@@ -1422,7 +1483,7 @@ def _stamp_stream_geometry(meta, out_line):
 
 def generate(out_line, module_name="np2hw_top", framing="height",
              max_width=None, clk_ns=None, label=None, dev=None,
-             sync_memory=False) -> dict:
+             sync_memory=False, frame="build") -> dict:
     """Emit a core, with the traced geometry stated in its interface.
 
     Thin: every decision belongs to the emitter this dispatches to. The one
@@ -1437,6 +1498,9 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     distributed RAM on an FPGA and flip-flops on silicon, and under this
     flag they refuse rather than emit it. Every core publishes what it
     inferred as `memories`, whichever way the flag is set.
+
+    frame="runtime" builds a core for any frame up to the traced size: it
+    takes the frame's width and height as parameter ports (see FRAMES).
     """
     from .core.pipeline import CoreModule
     if isinstance(out_line, CoreModule):
@@ -1445,7 +1509,8 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         fits = clk_ns is None or stage_ns(out_line, dev) <= clk_ns
         if framing == "height" and max_width is None and fits:
             return _stamp_stream_geometry(
-                emit.generate(out_line.unit, module_name, dev), out_line)
+                emit.generate(out_line.unit, module_name, dev, frame=frame),
+                out_line)
         # an option the new compiler does not honour yet: the reference
         # lowers this model instead, rather than the option being ignored --
         # but only where the two agree. The new compiler computes in NumPy's
@@ -1459,7 +1524,8 @@ def generate(out_line, module_name="np2hw_top", framing="height",
                                             channels=channels),
                                 channels=channels)
         meta = _generate_core(out_line, module_name, framing, max_width,
-                              clk_ns, label, dev, sync_memory=sync_memory)
+                              clk_ns, label, dev, sync_memory=sync_memory,
+                              frame=frame)
         want = (core_facts["out_bits"], bool(core_facts["signed"]))
         got = (meta["out_bits"], bool(meta.get("signed", meta.get("out_signed", False))))
         if want != got:
@@ -1473,13 +1539,13 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         return _stamp_stream_geometry(meta, out_line)
     return _stamp_stream_geometry(
         _generate_core(out_line, module_name, framing, max_width, clk_ns,
-                       label, dev, sync_memory=sync_memory),
+                       label, dev, sync_memory=sync_memory, frame=frame),
         out_line)
 
 
 def _generate_core(out_line, module_name="np2hw_top", framing="height",
                    max_width=None, clk_ns=None, label=None, dev=None,
-                   sync_memory=False) -> dict:
+                   sync_memory=False, frame="build") -> dict:
     """framing='height' (default): the core self-frames by counting to HEIGHT.
     framing='eof': height-agnostic -- an `in_eof` input (the sensor's frame-end /
     VSYNC, pulsed on the last input pixel) triggers the bottom flush, and output
@@ -1508,28 +1574,32 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
         if n_stages > 1:
             plan = (stage_of, n_stages, dev_used)
     if type(out_line).__name__ == "Mux":                 # np.where(enable, A, B)
-        return _generate_mux(out_line, module_name, sync_memory=sync_memory)
+        return _generate_mux(out_line, module_name, sync_memory=sync_memory,
+                             frame=frame)
     if isinstance(out_line, ExprLine):                   # pointwise DAG / LUTs
-        return _generate_expr(out_line, module_name, plan=plan)
+        return _generate_expr(out_line, module_name, plan=plan, frame=frame)
     if type(out_line).__name__ == "ChannelStack":        # np.stack([...], axis=-1)
         if out_line.kind == "expr":
-            return _generate_expr_stack(out_line, module_name, plan=plan)
+            return _generate_expr_stack(out_line, module_name, plan=plan,
+                                        frame=frame)
         return _generate_phase_stencil(out_line, module_name,
-                                       clk_ns=clk_ns, label=label, dev=dev)
+                                       clk_ns=clk_ns, label=label, dev=dev,
+                                       frame=frame)
     if type(out_line).__name__ == "PhaseCanvas":         # out[py::2, px::2] = ...
         if any(value.taps != {(0, 0): 1} or value.mode != "none"
                for _, _, value in out_line.branches):
             return _generate_phase_stencil(out_line, module_name,
                                            clk_ns=clk_ns, label=label,
-                                           dev=dev)
+                                           dev=dev, frame=frame)
         return _generate_phase(out_line, module_name,
-                               clk_ns=clk_ns, label=label, dev=dev)
+                               clk_ns=clk_ns, label=label, dev=dev,
+                               frame=frame)
     image = find_image(out_line)
     if image is None:
         raise ValueError("no image source found in pipeline")
     if getattr(out_line, "edge", None) is not None:
         return _generate_edge(out_line, image, module_name, framing=framing,
-                              max_width=max_width)
+                              max_width=max_width, frame=frame)
     if framing == "eof" or max_width is not None:
         raise NotImplementedError("framing='eof' / max_width need a vertical edge "
                                   "(bottom flush); use an edge-padded model")
@@ -1553,6 +1623,13 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
               for op in post if op[0] in ("mulp", "addp")]
     params += _tap_params(weighted, params)              # programmable kernel coeffs
     signed = _datapath_signed(spatial_line, range_signed, params)
+    if frame != "build" and getattr(out_line, "declared_extent", False):
+        raise NotImplementedError(
+            f"{module_name}: this window crops to a stated extent, so its "
+            "output does not follow its input's size; frame="
+            f"{frame!r} needs a window whose output is its input less the "
+            "kernel")
+    params += _frame_params(image, frame)
     acc_bits = _range_bits_as(acc_lo, acc_hi, signed)
     sgn = "signed " if signed else ""
     rows_used = sorted({r for r, _ in weighted})
@@ -1599,6 +1676,7 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
     # SOF too -- no separate output counter to drift on re-anchor.
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
+    _emit_frame_dims(a, frame)
 
     # line buffers: chain0 = in_data; chainK = input delayed K rows
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
@@ -1636,10 +1714,10 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
         eol = f"({gate}) && (ecol == {hi_c - 1})"
         last = f"({gate}) && (erow == {hi_r - 1}) && (ecol == {hi_c - 1})"
     else:
-        gate = f"(erow >= {M}) && (ecol >= {N}) && (erow < HEIGHT) && (ecol < WIDTH)"
+        gate = f"(erow >= {M}) && (ecol >= {N}) && (erow < fh) && (ecol < fw)"
         sof = f"({gate}) && (erow == {M}) && (ecol == {N})"
-        eol = f"({gate}) && (ecol == WIDTH-1)"
-        last = f"({gate}) && (erow == HEIGHT-1) && (ecol == WIDTH-1)"
+        eol = f"({gate}) && (ecol == fw_m1)"
+        last = f"({gate}) && (erow == fh_m1) && (ecol == fw_m1)"
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
     a("            col <= 0; row <= 0; out_valid <= 1'b0;")
@@ -1657,8 +1735,8 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
             src = f"row{r}" if d == 1 else f"row{r}_d{d-1}"
             a(f"                row{r}_d{d} <= {src};")
     a("                if (in_sof) begin col <= 1; row <= 0; end")  # anchor to frame start
-    a("                else if (col == WIDTH-1) begin")    # row wraps -> continuous frames
-    a("                    col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+    a("                else if (col == fw_m1) begin")      # row wraps -> continuous frames
+    a("                    col <= 0; row <= (row == fh_m1) ? 0 : row + 1;")
     a("                end else col <= col + 1;")
     a("            end else begin out_valid <= 1'b0; out_sof <= 1'b0;")  # bubble
     a("                out_eol <= 1'b0; out_last <= 1'b0; end")
@@ -1708,7 +1786,8 @@ def _extend(name, frm, to, signed):
     return f"{{{pad}'b0, {name}}}"
 
 
-def _generate_mux(mux, module_name, sync_memory=False) -> Core:
+def _generate_mux(mux, module_name, sync_memory=False,
+                  frame="build") -> Core:
     image = mux.image
     A, B = mux.a, mux.b
     in_bits = image.bits
@@ -1743,7 +1822,7 @@ def _generate_mux(mux, module_name, sync_memory=False) -> Core:
     for p in params:
         if p[0] not in seen:
             uniq.append(p); seen.add(p[0])
-    params = uniq
+    params = uniq + _frame_params(image, frame)
     # Declared dtype of either branch first (both share one datapath), then the
     # value ranges, then any signed coefficient register.
     signed = (A.spatial_signed or B.spatial_signed or sgA or sgB
@@ -1772,6 +1851,7 @@ def _generate_mux(mux, module_name, sync_memory=False) -> Core:
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")          # SOF anchors to (0,0)
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
+    _emit_frame_dims(a, frame)
     # shared window
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     for k in range(1, M + 1):
@@ -1804,8 +1884,8 @@ def _generate_mux(mux, module_name, sync_memory=False) -> Core:
 
     gate = f"(erow >= {M}) && (ecol >= {N})"
     sof = f"({gate}) && (erow == {M}) && (ecol == {N})"
-    eol = f"({gate}) && (ecol == WIDTH-1)"
-    last = f"({gate}) && (erow == HEIGHT-1) && (ecol == WIDTH-1)"
+    eol = f"({gate}) && (ecol == fw_m1)"
+    last = f"({gate}) && (erow == fh_m1) && (ecol == fw_m1)"
     a("    always @(posedge clk) begin")
     a("        if (rst) begin col<=0; row<=0; out_valid<=1'b0;")
     a("            out_sof<=1'b0; out_eol<=1'b0; out_last<=1'b0;")
@@ -1822,8 +1902,8 @@ def _generate_mux(mux, module_name, sync_memory=False) -> Core:
             src = f"row{r}" if d == 1 else f"row{r}_d{d-1}"
             a(f"                    row{r}_d{d} <= {src};")
     a("                    if (in_sof) begin col <= 1; row <= 0; end")
-    a("                    else if (col == WIDTH-1) begin")
-    a("                        col <= 0; row <= (row == HEIGHT-1) ? 0 : row + 1;")
+    a("                    else if (col == fw_m1) begin")
+    a("                        col <= 0; row <= (row == fh_m1) ? 0 : row + 1;")
     a("                    end else col <= col + 1;")
     a("                end else begin out_valid<=1'b0; out_sof<=1'b0;")
     a("                    out_eol<=1'b0; out_last<=1'b0; end")
@@ -1976,7 +2056,7 @@ def _refuse_async_memory(module_name, M):
 
 
 def _generate_phase_stencil(stack, module_name, clk_ns=None,
-                            label=None, dev=None) -> Core:
+                            label=None, dev=None, frame="build") -> Core:
     channels = (stack.channels if type(stack).__name__ == "ChannelStack"
                 else [stack])
     image = channels[0].image
@@ -2072,8 +2152,14 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         if declared.name not in {n for n, *_ in params}:
             params.append((declared.name, declared.bits, declared.signed,
                            declared.default, declared.description))
+    params += _frame_params(image, frame)
 
     vrow_lo = pb if v_edge else M
+    # The frame constants the framing compares against, the size less k:
+    # the line's and frame's last (1), where the edge flush resumes (pr,
+    # pb), and an unpadded stencil's last output (N+1, M+1).
+    fdim = _fdim
+    minus = sorted({1, pr, pb, N + 1, M + 1} - {0})
     hcol_lo = pr if h_edge else N
 
     # Timing as a traced property, stencil flavour. The module has two
@@ -2182,6 +2268,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     a("    assign in_ready = !stall && (in_active || in_sof);")
     a("    wire en = !stall && !done && ((in_active && in_valid) || hf || vf"
       " || (in_sof && in_valid));")
+    # a frame's bottom flush ends before the next frame's start is taken,
+    # so the size the flush counts to is its own frame's
+    _emit_frame_dims(a, frame, minus=minus, take="en && in_sof")
     vbc = "in_sof || ((!vf) && (row == 0))" if (v_edge and rep) else "1'b0"
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
     a(f"    wire vbc = {vbc};")
@@ -2207,7 +2296,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
         a("    // the column this block will read NEXT, from the counter's")
         a("    // own next-state: the address a cycle early, data on time")
         a(f"    wire [{POS-1}:0] rd_col = in_sof ? {POS}\'d1")
-        a(f"                       : (!hf ? ((col == WIDTH-1) ? {end_of_line}"
+        a(f"                       : (!hf ? ((col == fw_m1) ? {end_of_line}"
           f" : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1, 0)}) ? 0 : col));")
     # The arrays themselves live behind the memory seam, instantiated at
@@ -2271,11 +2360,13 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     # The output pixel's position drives the plane select: during an edge
     # flush the input counters sit on replicated columns, but the pixel
     # being EMITTED is the one whose CFA site must choose the taps.
-    ORv = "HEIGHT" if v_edge else f"(HEIGHT - {M})"
-    OCv = "WIDTH" if h_edge else f"(WIDTH - {N})"
-    orow = (f"(vf ? (({ORv} - {pb}) + frow) : (erow - {vrow_lo}))" if v_edge
+    # The output frame is the input's (padded) or less the span: its last
+    # row and column, and where an edge flush's rows and columns sit.
+    o_last_r = fdim("h", 1 if v_edge else M + 1)
+    o_last_c = fdim("w", 1 if h_edge else N + 1)
+    orow = (f"(vf ? ({fdim('h', pb)} + frow) : (erow - {vrow_lo}))" if v_edge
             else f"(erow - {vrow_lo})")
-    ocolp = (f"(hf ? (({OCv} - {pr}) + fcol) : (ecol - {hcol_lo}))" if h_edge
+    ocolp = (f"(hf ? ({fdim('w', pr)} + fcol) : (ecol - {hcol_lo}))" if h_edge
              else f"(ecol - {hcol_lo})")
     a(f"    wire [{POS-1}:0] o_row = {orow};")
     a(f"    wire [{POS-1}:0] o_col = {ocolp};")
@@ -2287,9 +2378,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     rowok = f"(vf || (erow >= {vrow_lo}))"
     colok = f"(hf || (ecol >= {hcol_lo}))"
     okv = f"({rowok} && {colok})"
-    eol = f"{okv} && (o_col == ({OCv} - 1))"
+    eol = f"{okv} && (o_col == {o_last_c})"
     sof = f"{okv} && (o_row == 0) && (o_col == 0)"
-    last = f"{okv} && (o_row == ({ORv} - 1)) && (o_col == ({OCv} - 1))"
+    last = f"{okv} && (o_row == {o_last_r}) && (o_col == {o_last_c})"
 
     if stages == 2:
         qpairs = sorted({(r, N - c) for (r, c) in keys})
@@ -2585,21 +2676,21 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
             a(f"                row{r}_d{d} <= hbc ? cur{r} : {src};")
     if h_edge and rep:
         for r in rows_used:
-            a(f"                if (!hf && col == WIDTH-1) vlast{r} <= row{r};")
+            a(f"                if (!hf && col == fw_m1) vlast{r} <= row{r};")
     a("                if (in_sof) begin")
     a("                    col <= 1; row <= 0; hf <= 1'b0; vf <= 1'b0; fcol <= 0; frow <= 0;")
     a("                end else if (!hf) begin")
-    a("                    if (col == WIDTH-1) begin")
+    a("                    if (col == fw_m1) begin")
     if h_edge:
         a("                        hf <= 1'b1; fcol <= 0;")
     else:
         a("                        col <= 0;")
-        _emit_row_advance(a, pb, v_edge, 24)
+        _emit_row_advance(a, pb, v_edge, 24, end_cond="row == fh_m1")
     a("                    end else col <= col + 1;")
     a("                end else begin")
     a(f"                    if (fcol == {max(pr-1, 0)}) begin")
     a("                        hf <= 1'b0; col <= 0;")
-    _emit_row_advance(a, pb, v_edge, 24)
+    _emit_row_advance(a, pb, v_edge, 24, end_cond="row == fh_m1")
     a("                    end else fcol <= fcol + 1;")
     a("                end")
     if stages == 1:
@@ -2672,7 +2763,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
 # --------------------------------------------------------------------------- #
 
 def _generate_edge(out_line, image, module_name, framing="height",
-                   max_width=None) -> dict:
+                   max_width=None, frame="build") -> dict:
     """Same-size output by extending borders (idea.txt: copy first/last line).
 
     Vertical: top = broadcast first row into all line buffers (replicate); bottom
@@ -2696,6 +2787,11 @@ def _generate_edge(out_line, image, module_name, framing="height",
         raise NotImplementedError("framing='eof' needs a bottom edge (vertical "
                                   "flush to drain the line buffers)")
     dyn = max_width is not None             # runtime width: MAX_WIDTH buffers, active_width rows
+    rt = frame == "runtime"                 # both extents latched per frame
+    if rt and (dyn or eof):
+        raise NotImplementedError(
+            f"{module_name}: frame='runtime' already follows the frame's width "
+            "and height; it does not combine with max_width or framing='eof'")
     wparam = "MAX_WIDTH" if dyn else "WIDTH"   # line-buffer depth (fixed at synth)
     aw = "active_width" if dyn else "WIDTH"    # where the row ends (runtime if dyn)
 
@@ -2712,6 +2808,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
     params = [(op[1], op[2], op[3], op[4], op[5])
               for op in post if op[0] in ("mulp", "addp")]
     signed = _datapath_signed(spatial_line, range_signed, params)
+    params += _frame_params(image, frame)
     acc_bits = _range_bits_as(acc_lo, acc_hi, signed)
     sgn = "signed " if signed else ""
 
@@ -2755,6 +2852,10 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a("    assign in_ready = !stall && (in_active || in_sof);")  # SOF accepted even mid-flush
     # advance: consume a pixel, or run a flush cycle -- never while output is held
     a("    wire en = !stall && !done && ((in_active && in_valid) || hf || vf || (in_sof && in_valid));")
+    if rt:
+        _emit_frame_dims(a, frame, minus=sorted({1, pr, pb, N + 1, M + 1} - {0}),
+                         take="en && in_sof")
+    w1 = "fw_m1" if rt else f"{aw}-1"       # the line's last column
     vbc = "in_sof || ((!vf) && (row == 0))" if (v_edge and rep) else "1'b0"
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
     a(f"    wire vbc = {vbc};")               # top broadcast (replicate / SOF)
@@ -2767,7 +2868,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
     if M:
         eol = "col" if h_edge else "0"   # h_edge holds col and enters hflush
         a(f"    wire [{POS-1}:0] rd_col = in_sof ? {POS}\'d1")
-        a(f"                       : (!hf ? ((col == {aw}-1) ? {eol} : (col + 1))")
+        a(f"                       : (!hf ? ((col == {w1}) ? {eol} : (col + 1))")
         a(f"                              : ((fcol == {max(pr-1,0)}) ? 0 : col));")
     # the arrays live behind the memory seam, instantiated at the end of
     # the module (_linebuf_instances); these are its registered read ports
@@ -2829,19 +2930,24 @@ def _generate_edge(out_line, image, module_name, framing="height",
     OCv = aw if h_edge else f"({aw} - {N})"
     # output frame position, derived from input position + flush phase (so it
     # tracks SOF re-anchoring without a separate output counter)
-    orow = (f"(vf ? (({ORv} - {pb}) + frow) : (erow - {vrow_lo}))" if v_edge
+    # at run time each is a frame constant: the size less a kernel span
+    R_pb = _fdim("h", pb) if rt else f"({ORv} - {pb})"
+    C_pr = _fdim("w", pr) if rt else f"({OCv} - {pr})"
+    R_last = _fdim("h", 1 if v_edge else M + 1) if rt else f"({ORv} - 1)"
+    C_last = _fdim("w", 1 if h_edge else N + 1) if rt else f"({OCv} - 1)"
+    orow = (f"(vf ? ({R_pb} + frow) : (erow - {vrow_lo}))" if v_edge
             else f"(erow - {vrow_lo})")
-    ocolp = (f"(hf ? (({OCv} - {pr}) + fcol) : (ecol - {hcol_lo}))" if h_edge
+    ocolp = (f"(hf ? ({C_pr} + fcol) : (ecol - {hcol_lo}))" if h_edge
              else f"(ecol - {hcol_lo})")
-    eol = f"{okv} && ({ocolp} == ({OCv} - 1))"
+    eol = f"{okv} && ({ocolp} == {C_last})"
     if eof:
         # height-free framing: SOF = first streaming output; EOF = last flush row's
         # last pixel (the flush has drained the line buffers). No HEIGHT anywhere.
         sof = f"{okv} && !vf && !hf && (erow == {vrow_lo}) && (ecol == {hcol_lo})"
-        last = f"{okv} && vf && (frow == {pb - 1}) && ({ocolp} == ({OCv} - 1))"
+        last = f"{okv} && vf && (frow == {pb - 1}) && ({ocolp} == {C_last})"
     else:
         sof = f"{okv} && ({orow} == 0) && ({ocolp} == 0)"
-        last = f"{okv} && ({orow} == ({ORv} - 1)) && ({ocolp} == ({OCv} - 1))"
+        last = f"{okv} && ({orow} == {R_last}) && ({ocolp} == {C_last})"
     a("    always @(posedge clk) begin")
     a("        if (rst) begin")
     a("            col<=0; row<=0; fcol<=0; frow<=0;")
@@ -2867,14 +2973,15 @@ def _generate_edge(out_line, image, module_name, framing="height",
             a(f"                row{r}_d{d} <= hbc ? cur{r} : {src};")
     if h_edge and rep:                                   # latch last real column
         for r in rows_used:
-            a(f"                if (!hf && col == {aw}-1) vlast{r} <= row{r};")
+            a(f"                if (!hf && col == {w1}) vlast{r} <= row{r};")
     # control: SOF re-anchors to frame start; else columns / hflush / row advance
-    end_cond = "eof_l" if eof else "row == HEIGHT-1"
+    end_cond = ("eof_l" if eof else "row == fh_m1" if rt
+                else "row == HEIGHT-1")
     a("                if (in_sof) begin")
     a("                    col <= 1; row <= 0; hf <= 1'b0; vf <= 1'b0; fcol <= 0; frow <= 0;"
       + (" eof_l <= 1'b0;" if eof else ""))
     a("                end else if (!hf) begin")
-    a(f"                    if (col == {aw}-1) begin")
+    a(f"                    if (col == {w1}) begin")
     if h_edge:
         a("                        hf <= 1'b1; fcol <= 0;")
     else:
@@ -2991,8 +3098,11 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a("    initial begin")
     a("        $readmemh(\"in.hex\", img);")
     a("        f = $fopen(\"out.txt\", \"w\");")
+    # a run-time frame is the frame this bench streams, unless told otherwise
+    frame = {"frame_width": W, "frame_height": H}
     for name, _ in meta["params"]:
-        a(f"        param_{name} = {int(param_values.get(name, 0))};")
+        a(f"        param_{name} = "
+          f"{int(param_values.get(name, frame.get(name, 0)))};")
     a("        @(negedge clk); rst = 0;")
     if meta.get("edge"):
         # stream row by row with HBLANK between rows; VBLANK drain at the end so

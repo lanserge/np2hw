@@ -465,12 +465,18 @@ class Block:
 
     def generate(self, spec, width: int, height: int, module_name: str,
                  clk_ns: float | None = None,
-                 sync_memory: bool = False) -> "Generated":
+                 sync_memory: bool = False,
+                 frame: tuple | None = None) -> "Generated":
         """Trace the model into Verilog. Generic: every block uses this one.
 
         There is no per-block generator and no hand-written Verilog anywhere in
         this package. A block is its model plus its declarations, and this turns
         the pair into a module.
+
+        ``frame``, where given, is the pair of expressions that drive the
+        core's run-time frame size -- its width and height as they arrive
+        at this block -- and builds a core for any frame up to ``width`` x
+        ``height``; without it the core is built for that one size.
         """
         from np2hw import Image2D, to_ir, generate as np2hw_generate
 
@@ -515,7 +521,8 @@ class Block:
                           channels=spec.channels)
         core = np2hw_generate(result, module_name=module_name,
                               clk_ns=clk_ns, label=self.name,
-                              sync_memory=sync_memory)
+                              sync_memory=sync_memory,
+                              frame="runtime" if frame else "build")
 
         header = model_header(
             self.model, f"{self.name} -- {self.params.description} "
@@ -526,7 +533,9 @@ class Block:
             modules=((module_name, verilog),),
             params=tuple((r.name, r.param.bits) for r in self.params.registers),
             consumes=self.params.consumes,
-            context_map={bit.name: bit.expression for bit in self.context},
+            context_map={**{bit.name: bit.expression for bit in self.context},
+                         **({"frame_width": frame[0], "frame_height": frame[1]}
+                            if frame else {})},
             core=core,
             latency=1,
             meta={"line_buffers": core.line_buffers,

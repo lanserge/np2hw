@@ -309,6 +309,31 @@ def contexts(design) -> tuple:
                  if c.origin != "stream" or c.name in carried)
 
 
+def frame_signals(design):
+    """The context signals that ARE the frame's width and height -- the one
+    signal following each that can arrive with a frame -- or None where the
+    design has no such pair. With them, every core is built for any frame up
+    to the design's size and told the frame's size at run time; the build's
+    size stays what a line buffer holds."""
+    have = {c.name for c in contexts(design)}
+    pair = []
+    for dim in ("width", "height"):
+        found = [c.name for c in vocabulary(design).signals
+                 if c.follows == dim and c.origin != "register"
+                 and c.name in have]
+        if len(found) != 1:
+            return None
+        pair.append(found[0])
+    return tuple(pair)
+
+
+def _frame_at(signal: str, less: int) -> str:
+    """A context signal less what the stages before took off it."""
+    return (f"ctx_{signal}" if less == 0 else
+            f"(ctx_{signal} - 16'd{less})" if less > 0 else
+            f"(ctx_{signal} + 16'd{-less})")
+
+
 def stages(design) -> list[Stage]:
     """Every block instance with its base address: the context block first,
     at base 0, then the design's instances in DECLARATION order -- the order
@@ -321,11 +346,20 @@ def stages(design) -> list[Stage]:
     cached = design.__dict__.get("_stages")
     if cached is not None:
         return cached
-    carried = shape(design).context
+    form = shape(design)
+    carried = form.context
     allocator = AddressAllocator(config_base=0x0000, stats_base=0x8000)
     out = []
     vocab = vocabulary(design)
-    for path, block in [(vocab.block.name, vocab.block)] + [
+    # A register that follows the frame's width or height resets to THIS
+    # design's: a bitstream nobody configures processes the frame it was
+    # built for, whatever default the vocabulary was written with.
+    sizes = {"width": form.width, "height": form.height}
+    declared = {p.name for p in vocab.block.params.params}
+    frame_resets = {c.name: sizes[c.follows] for c in vocab.signals
+                    if c.follows in sizes and c.name in declared}
+    context_block = vocab.block.configure(resets=frame_resets)
+    for path, block in [(vocab.block.name, context_block)] + [
             (i.path, i.leaf) for i in design.instances.values()]:
         for signal in block.params.consumes:
             context = vocab.resolve(signal)    # raises with the names
@@ -710,6 +744,7 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
     form = shape(design)
     netlist(design)                      # np2hw's laws, before anything is made
     shared = _shared_subsystems(design)
+    signals = frame_signals(design)
 
     modules: list[tuple[str, str]] = []
     built: dict[str, Generated] = {}
@@ -738,10 +773,18 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         # block's input. The only declared stream fact in a whole design is
         # the input's own.
         given = _incoming(design, s, built)
+        # The frame as it reaches this block: the design's, less what the
+        # blocks before it took off. Every core that follows a run-time
+        # frame keeps its input's size or loses a constant span (a valid
+        # window's), so the traced difference holds at every size.
+        frame = None
+        if signals:
+            frame = (_frame_at(signals[0], form.width - given.width),
+                     _frame_at(signals[1], form.height - given.height))
         result = s.block.generate(
             form.spec.with_stream(given.channels, given.bit_depth),
             given.width, given.height, module_name=name, clk_ns=clk_ns,
-            sync_memory=sync_memory)
+            sync_memory=sync_memory, frame=frame)
         modules.extend(result.modules)
         built[s.path] = seen[name] = result
 
