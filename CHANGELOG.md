@@ -11,6 +11,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed
 
+- **A context register exists only where something reads it.** A
+  register-backed context signal is made -- in the decode, the published
+  map, the ports and the binding -- only where a block consumes it, or the
+  cores' run-time frame reads it as the frame's width or height; stream-
+  carried signals keep their ports as before. A vocabulary may declare a
+  signal nothing in a design reads, and that design no longer carries a
+  register for it; the first block that consumes it brings it back. No
+  remaining register moves: the allocation is unchanged.
+
 - **A composed pipeline follows the frame it is given.** Where a design's
   context vocabulary has a signal following `width` and one following
   `height` that a frame can bring (not a register-only choice), every core

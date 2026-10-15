@@ -300,13 +300,39 @@ def module_prefix(design) -> str:
     return roots.pop() if len(roots) == 1 else "np2hw"
 
 
-def contexts(design) -> tuple:
-    """The context signals a design HAS: every register-backed one, and a
-    stream-only one where the stream delivers it. One answer, read by the
-    ports, the binding and the pass-through alike."""
+def _available(design) -> tuple:
+    """The context signals a design COULD have: a register-backed one, and
+    a stream-only one where the stream delivers it."""
     carried = shape(design).context
     return tuple(c for c in vocabulary(design).signals
                  if c.origin != "stream" or c.name in carried)
+
+
+def contexts(design) -> tuple:
+    """The context signals a design HAS: every one its stream delivers, and
+    a register-backed one only where something reads it -- a block that
+    consumes it, or the cores' run-time frame, which reads the frame's
+    width and height. A register nothing reads is not made: the vocabulary
+    may declare it, and the first block that consumes it brings it back.
+    One answer, read by the ports, the binding, the pass-through and the
+    register map alike."""
+    carried = shape(design).context
+    read = {name for i in design.instances.values()
+            if isinstance(i.leaf, Block) for name in i.leaf.params.consumes}
+    if any(isinstance(i.leaf, Block) and i.leaf.traceable
+           for i in design.instances.values()):
+        read.update(frame_signals(design) or ())
+    return tuple(c for c in _available(design)
+                 if c.name in carried or c.name in read)
+
+
+def _unmade(design) -> set:
+    """The context block's registers the hardware does not have: a signal
+    the stream owns, or one nothing reads. The decode and the map both
+    leave them out -- the map must say what the decode does, or it is
+    documentation of a design that was not built."""
+    have = {c.name for c in contexts(design)} - set(shape(design).context)
+    return {c.name for c in vocabulary(design).signals} - have
 
 
 def frame_signals(design):
@@ -315,7 +341,7 @@ def frame_signals(design):
     design has no such pair. With them, every core is built for any frame up
     to the design's size and told the frame's size at run time; the build's
     size stays what a line buffer holds."""
-    have = {c.name for c in contexts(design)}
+    have = {c.name for c in _available(design)}
     pair = []
     for dim in ("width", "height"):
         found = [c.name for c in vocabulary(design).signals
@@ -438,17 +464,15 @@ def register_map(design) -> dict:
     alloc = allocator(design)
     owner = vocabulary(design).block.name
     commit = f"{owner}.{vocabulary(design).commit}"
+    unmade = _unmade(design)
     blocks = []
     for s in stages(design):
         paramset, inst = s.paramset, s.instance
         registers = []
         for reg in paramset.registers:
             param = reg.param
-            if s.path == owner and param.name in form.context:
-                # The stream owns this one, so the hardware has no register
-                # for it. The map must say the same thing the decode does,
-                # or it is documentation of a design that was not built.
-                continue
+            if s.path == owner and param.name in unmade:
+                continue        # no register for it; see _unmade
             low, high = param.limits
             registers.append({
                 "name": param.name,
@@ -613,8 +637,8 @@ def address_map(design):
     """
     from np2hw import AddrMap, Reg, RegBlock, RegInstance
 
-    carried = shape(design).context
     owner = vocabulary(design).block.name
+    unmade = _unmade(design)
     types: dict[tuple, RegBlock] = {}
     instances = []
     for s in stages(design):
@@ -645,8 +669,8 @@ def address_map(design):
                             "the bitstream is the one it was built against.")]
             for register in paramset.registers:
                 param = register.param
-                if s.path == owner and param.name in carried:
-                    continue        # the stream owns it; see Shape
+                if s.path == owner and param.name in unmade:
+                    continue        # the stream owns it, or nothing reads it
                 regs.append(Reg(
                     name=param.name, bits=param.bits, offset=register.offset,
                     signed=param.signed, reset=param.default,

@@ -89,8 +89,27 @@ def test_stream_context_becomes_ports_not_registers():
     names = {r["name"] for r in owner["registers"]}
     assert not names & set(carried), \
         f"{sorted(names & set(carried))} kept registers"
-    assert "limit" in names
     assert "ctx_width" in compose.generate(pipeline, control=True).verilog
+    # and what stays a register is what something reads: `limit` is
+    # software's choice, but no block here reads it, so none is made
+    assert "limit" not in names
+
+
+def test_a_register_context_exists_where_a_block_reads_it():
+    """A register-backed context is made where a block consumes it, and
+    not where none does: the vocabulary declares, the reader brings it."""
+    read = build(_netlist("ctx_read", {"b": "bias"},
+                          [("in", "b.in"), ("b.out", "out")]))
+    unread = build(_netlist("ctx_unread", {"g": "gain"},
+                            [("in", "g.in"), ("g.out", "out")]))
+
+    def owner(p):
+        return {r["name"] for b in compose.register_map(p)["blocks"]
+                if b["path"] == "ctxblock" for r in b["registers"]}
+    assert "phase" in owner(read) and "phase" not in owner(unread)
+    assert "limit" not in owner(read) | owner(unread)
+    assert "param_ctxblock_phase" in compose.generate(
+        read, control=True).verilog
 
 
 def test_an_unknown_context_name_is_refused():
