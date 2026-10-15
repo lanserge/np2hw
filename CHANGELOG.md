@@ -72,10 +72,37 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   returns the channels, depth, width and height a block hands on
   (`compose.Handed`). The composer no longer falls back to the design's
   geometry for a block that states none -- it refuses -- and a model run
-  builds each block at the traced geometry and refuses a model whose frame
-  comes out other than its trace says.
+  builds each block at the frame it is given and refuses a model whose
+  frame comes out other than its trace says. A window's trace is a bound
+  (`compose.keeps_window`): its model may hand on any frame inside it.
+- **The RTL twin ends a frame where the hardware does**, at `last`, and
+  reads its size from the `<output>_frame_width`/`_height` the top
+  publishes, so a chain that keeps a window is proven against its model's
+  window. It used to wait for as many words as went in.
+- **`np2hw.testing.block` checks the framing of the model's frame**, not
+  the frame it drove, so a block that keeps a window is testable.
 
 ### Added
+
+- **A frame's size travels with it.** A core built for a run-time frame
+  publishes `out_frame_width`/`out_frame_height`: the frame it hands on --
+  the one it was given, less a valid window's or an unpadded stencil's
+  margin, or the part of a window the frame holds. The composer binds each
+  block's `frame_width`/`frame_height` to its driver's, the first block's
+  to the context, and the top publishes `<output>_frame_width`/`_height`
+  beside each output stream.
+- **A window that registers place**, on the one-graph compiler:
+  `img[p.y0:, p.x0:][:p.h, :p.w]`, NumPy's own slice with register bounds.
+  The source streams through and only the beats inside the window go on,
+  its lines and frame ending at its edges or the frame's, whichever comes
+  first -- as the slice has it -- and a packed word passes whole. The
+  reference compiler refuses it.
+- **`np2hw_frame_cdc`** (`np2hw.hdl.stream:frame_cdc`): `stream_cdc` for a
+  stream that carries its frame's size. Each frame's width and height
+  cross beside its samples, published from the moment its first beat is
+  presented until the next frame's is, so a consumer that places a frame
+  has its size before it takes a pixel, and a frame still draining keeps
+  its own.
 
 - **One address map per master** (`np2hw.bus.address_maps`): each
   decoder's windows under the master that drives it, walked back through
@@ -231,6 +258,8 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   clock's stores -- a path from one domain into the other that a timer
   sees. A block RAM's read port is the reader's, so only the two pointers
   cross. A 16-deep crossing now costs one 18 Kb block RAM.
+- **`frame_cdc` is two crossings**, the samples' and the sizes', and so
+  costs one more 18 Kb block RAM than `stream_cdc`.
 
 ### Removed
 

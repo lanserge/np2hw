@@ -123,6 +123,10 @@ class Instance:
     # streams. np2hw never interprets it; it only refuses to wire two streams
     # the caller called different things. Widths cannot catch that.
     domains: dict = field(default_factory=dict)
+    # {port_name: (wire, bits)} -- scalar outputs of the module beyond its
+    # stream, each driving a wire of that name the composer declares, for
+    # another instance's binding or a top-level assign to read
+    outputs: dict = field(default_factory=dict)
     comment: str = ""
 
     @property
@@ -174,7 +178,7 @@ def _net(endpoint: str) -> str:
 
 def compose(module_name: str, instances, connections, ports,
             header=(), notes=(), commit=None, commit_ports=(),
-            arm=None) -> dict:
+            arm=None, assigns=None) -> dict:
     """Emit a module that instantiates `instances` and wires `connections`.
 
     Args:
@@ -185,6 +189,8 @@ def compose(module_name: str, instances, connections, ports,
         ports: :class:`Port` values, in declaration order. Stream ports carry a
             :class:`StreamType`; everything else is a plain scalar or vector.
         header: comment lines emitted before the module (licence, provenance).
+        assigns: `{output_port: expression}` for scalar top-level outputs
+            driven from inside -- an instance's output wire, say.
         notes: comment lines emitted after the header (an address map, say).
         commit: `True`, or a Verilog expression. Either way, every
             binding listed in `commit_ports` gets a per-instance copy,
@@ -290,6 +296,12 @@ def compose(module_name: str, instances, connections, ports,
         for flag in stream.flags:
             a(f"    wire        {net}_{flag};")
     a("")
+    scalars = [(w, b) for inst in instances for w, b in inst.outputs.values()]
+    if scalars:
+        a("    // Scalar nets an instance drives beside its stream.")
+        for wire, bits in scalars:
+            a(f"    wire {f'[{bits - 1}:0] ' if bits > 1 else ''}{wire};")
+        a("")
 
     for key, stream in sources.items():
         if "." in key:
@@ -522,6 +534,8 @@ def compose(module_name: str, instances, connections, ports,
             for flag in spec["flags"]:
                 a(f"        .{spec['prefix']}_{flag:<6} ({net}_{flag}),")
 
+        for port, (wire, _bits) in inst.outputs.items():
+            a(f"        .{port:<20} ({wire}),")
         spec = interface["output"]
         if spec is None:
             L[-1] = L[-1].rstrip(",")
@@ -537,6 +551,8 @@ def compose(module_name: str, instances, connections, ports,
         a("    );")
         a("")
 
+    for port, expr in (assigns or {}).items():
+        a(f"    assign {port} = {expr};")
     for key, stream in sources.items():
         net = _net(key)
         stalls = blocking(key)

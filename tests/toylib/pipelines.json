@@ -134,6 +134,102 @@
           "out"
         ]
       ]
+    },
+    "long": {
+      "description": "Six blocks in a line, longer than a short reset: each takes its frame size from the one before.",
+      "parameters": {
+        "bits": {
+          "default": 8,
+          "description": "depth into the pipeline"
+        }
+      },
+      "inputs": [
+        {
+          "name": "in",
+          "bits": "bits",
+          "max_width": 64,
+          "max_height": 48,
+          "context": [
+            "width",
+            "height"
+          ],
+          "description": "samples"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "description": "samples, offset six times"
+        }
+      ],
+      "nodes": {
+        "s0": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        },
+        "s1": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        },
+        "s2": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        },
+        "s3": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        },
+        "s4": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        },
+        "s5": {
+          "block": "toylib.blocks:offset",
+          "values": {
+            "offset": 1
+          }
+        }
+      },
+      "connections": [
+        [
+          "in",
+          "s0.in"
+        ],
+        [
+          "s0.out",
+          "s1.in"
+        ],
+        [
+          "s1.out",
+          "s2.in"
+        ],
+        [
+          "s2.out",
+          "s3.in"
+        ],
+        [
+          "s3.out",
+          "s4.in"
+        ],
+        [
+          "s4.out",
+          "s5.in"
+        ],
+        [
+          "s5.out",
+          "out"
+        ]
+      ]
     }
   }
 }

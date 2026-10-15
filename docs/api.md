@@ -91,8 +91,9 @@ regenerates. `output` is `None` for a SINK — a module that consumes a stream a
 produces none, and therefore never stalls its source.
 
 The fixed modules -- `skid`, `cdc_fifo`, `stream_cdc` (a stream with its
-flags across clocks, on `cdc_fifo`), `tee` -- are Verilog files,
-`np2hw/hdl/np2hw_skid.v`, `np2hw_cdc_fifo.v`, `np2hw_stream_cdc.v`,
+flags across clocks, on `cdc_fifo`), `frame_cdc` (the same, with each
+frame's size), `tee` -- are Verilog files, `np2hw/hdl/np2hw_skid.v`,
+`np2hw_cdc_fifo.v`, `np2hw_stream_cdc.v`, `np2hw_frame_cdc.v`,
 `np2hw_tee.v`, read and reviewed as files: their structure never varies, only a width and a depth,
 which are module parameters set where they are instantiated. The
 Python functions return the file with the values a use sets (`"parameters"`)

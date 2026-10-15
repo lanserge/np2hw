@@ -319,8 +319,15 @@ def _access(g, ts, a):
     return (Type(tuple(axes), buf.container, buf.lo, buf.hi),)
 
 
+def _window(g, ts, a):
+    """The source, kept inside a window its registers place: the same axes
+    and values -- the frame it keeps is the window, the rest is dropped."""
+    return (ts[0],)
+
+
 _P = frozenset({PURE})
 for _k in (
+    Kind("model.window", frozenset({PURE, READS_REGISTER}), 5, _window),
     Kind("model.var", _P, 0, _var),
     Kind("model.source", _P, 0, _source),
     Kind("model.const", frozenset({PURE, CONSTANT}), 0, _const),

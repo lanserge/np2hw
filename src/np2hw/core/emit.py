@@ -146,7 +146,7 @@ def generate(unit: Unit, module_name: str, dev=None,
     the frame_width and frame_height ports load as each frame enters, where
     "build" reads the WIDTH and HEIGHT parameters: the same nodes, printed
     against a run-time number instead of a constant."""
-    from ..verilog import Core, _interface, _frame_params
+    from ..verilog import Core, _interface, _frame_params, _frame_out_ports
     f = unit.facts
     img = f["image"]
     p = _Printer(dev)
@@ -174,7 +174,8 @@ def generate(unit: Unit, module_name: str, dev=None,
         head.append(f"    input  wire {'signed ' if signed else ''}"
                     f"[{bits - 1}:0] param_{name},")
     sgn = "signed " if f["out_signed"] else ""
-    head += ["    output wire out_valid,",
+    head += [*_frame_out_ports(frame),
+             "    output wire out_valid,",
              "    input  wire out_ready,",
              "    output wire out_sof,",
              "    output wire out_eol,",
@@ -188,7 +189,21 @@ def generate(unit: Unit, module_name: str, dev=None,
                  "    always @(posedge clk)",
                  "        if (rst || (in_valid && in_sof && in_ready)) begin",
                  "            fw <= param_frame_width; fh <= param_frame_height;",
-                 "        end"]
+                 "        end",
+                 ]
+        # what this core hands on: its frame, or the part of the window
+        # the frame holds -- a window running past the frame's edge ends
+        # there, and one starting past it holds nothing
+        win = f.get("window")
+
+        def kept(extent, start, length):
+            s, n = (f"param_{v.node.attr('name')}" for v in (start, length))
+            return (f"({s} >= {extent}) ? 16'd0 : "
+                    f"(({extent} - {s} < {n}) ? {extent} - {s} : {n})")
+        ow, oh = (("fw", "fh") if win is None else
+                  (kept("fw", win[1], win[3]), kept("fh", win[0], win[2])))
+        head += [f"    assign out_frame_width = {ow};",
+                 f"    assign out_frame_height = {oh};"]
     decls, body = [], []
     for r in unit.regs:
         name = r.attr("name")
@@ -224,10 +239,19 @@ def generate(unit: Unit, module_name: str, dev=None,
                for port, v in unit.roots.items()]
     verilog = "\n".join(head + decls + p.lines + body + assigns +
                         ["endmodule"])
+    interface = _interface(img.bits, f["out_bits"], f["out_signed"], params)
+    if f.get("window") is not None:
+        # the frame it hands on is the window's, set at run time: the traced
+        # size bounds it, and is not it
+        interface["output"]["window"] = True
+    if f.get("channels", 1) > 1:
+        # a window passes the packed word through: its channels as they came
+        interface["output"]["channels"] = f["channels"]
+        interface["output"]["field_bits"] = img.bits // f["channels"]
     return Core({
         "verilog": verilog,
-        "interface": _interface(img.bits, f["out_bits"], f["out_signed"],
-                                params),
+        "interface": interface,
+        "channels": f.get("channels", 1),
         "weighted": {(0, 0): 1},
         "in_bits": img.bits,
         "out_bits": f["out_bits"],

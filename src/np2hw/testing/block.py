@@ -130,7 +130,9 @@ async def bit_exact_against_model(dut):
                 raise AssertionError(
                     f"{label}: " + _diagnose(block, case, trial, i,
                                              beat.data, int(flat[i]), frame))
-        check_framing(collected, width, height)
+        # framed as the model's output is: a block that keeps a window
+        # frames the window, not the frame it was given
+        check_framing(collected, expected.shape[1], expected.shape[0])
 
         dut._log.info(f"{label}: {expected.size} pixels bit-exact, "
                       "framing exact")

@@ -119,6 +119,20 @@ def test_a_profile_for_another_design_is_refused(tmp_path, samples, capsys):
 
 @pytest.mark.skipif(__import__("shutil").which("verilator") is None,
                     reason="verilator not on PATH")
+@pytest.mark.parametrize("compiler", ["default", "reference"])
+def test_a_long_chain_takes_each_frame_from_the_block_before(
+        tmp_path, samples, capsys, monkeypatch, compiler):
+    """Six blocks, each handed its frame size by the one before: the twin
+    holds reset for four clocks, so a size register that started anywhere
+    but the traced size would still be rippling when the frame arrives.
+    On both compilers: each starts its registers in its own code."""
+    if compiler == "reference":
+        monkeypatch.setenv("NP2HW_CORE", "off")
+    assert _run("toylib.pipelines:long", "--rtl", samples,
+                tmp_path / "rtl.npy") == 0
+    assert "bit-exact" in capsys.readouterr().out
+
+
 def test_the_rtl_twin_is_bit_exact(tmp_path, samples, capsys):
     assert _run(RGB, "--rtl", samples, tmp_path / "rtl.npy") == 0
     assert "bit-exact" in capsys.readouterr().out

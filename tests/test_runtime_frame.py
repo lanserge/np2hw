@@ -89,6 +89,11 @@ def pick(img, enable):
                     ).astype(np.uint16)
 
 
+def crop(img, y0, x0, h, w):
+    """A window registers place and size: in NumPy an ordinary crop."""
+    return img[y0:, x0:][:h, :w]
+
+
 def cross(img, py, px):
     """A same-size 5x5 stencil, edge-padded, the CFA phase choosing between
     the centre and a cross two pixels out: a demosaic's shape."""
@@ -107,7 +112,8 @@ def _sim(tmp_path, core, frames, values):
     """Drive `frames` through one elaboration of `core`, each frame with its
     own frame_width/frame_height, honouring the handshake, with a vertical
     blank between frames long enough for a stencil's bottom flush. Returns
-    each output beat as (data, eol, last)."""
+    each output beat as (data, eol, last), and the frame size the core
+    publishes at each frame's last beat."""
     in_bits, out_bits = core["in_bits"], core["out_bits"]
     names = [n for n, _ in core["params"]]
     ports = "".join(f"    reg [{b-1}:0] param_{n};\n" for n, b in core["params"])
@@ -130,6 +136,7 @@ module tb;
 {ports}    wire in_ready, out_valid, out_sof, out_eol, out_last;
     reg out_ready = 1;
     wire [{out_bits-1}:0] out_data;
+    wire [15:0] out_frame_width, out_frame_height;
     reg [{in_bits-1}:0] img [0:{len(words)-1}];
     integer f, i;
     always #5 clk = ~clk;
@@ -137,9 +144,12 @@ module tb;
         .clk(clk), .rst(rst), .in_valid(in_valid), .in_ready(in_ready),
         .in_sof(in_sof), .in_data(in_data),
 {conns}        .out_valid(out_valid), .out_ready(out_ready), .out_sof(out_sof),
-        .out_eol(out_eol), .out_last(out_last), .out_data(out_data));
+        .out_eol(out_eol), .out_last(out_last), .out_data(out_data),
+        .out_frame_width(out_frame_width),
+        .out_frame_height(out_frame_height));
     always @(posedge clk) if (out_valid && out_ready)
-        $fdisplay(f, "%0d %0d %0d", out_data, out_eol, out_last);
+        $fdisplay(f, "%0d %0d %0d %0d %0d", out_data, out_eol, out_last,
+                  out_frame_width, out_frame_height);
     task send(input integer at, input integer n);
         begin
             for (i = 0; i < n; i = i + 1) begin
@@ -168,7 +178,8 @@ endmodule
     subprocess.run(["vvp", "sim.vvp"], cwd=tmp_path, check=True,
                    capture_output=True, text=True, timeout=300)
     rows = (tmp_path / "out.txt").read_text().split("\n")
-    return [tuple(map(int, r.split())) for r in rows if r.strip()]
+    rows = [tuple(map(int, r.split())) for r in rows if r.strip()]
+    return [r[:3] for r in rows], [r[3:] for r in rows if r[2]]
 
 
 def _check(tmp_path, fn, params, values, model_args, name, channels=1):
@@ -181,8 +192,8 @@ def _check(tmp_path, fn, params, values, model_args, name, channels=1):
     top = FULL if channels == 1 else (1 << bits) - 1
     frames = [rng.integers(0, top + 1, (h, w)).astype(np.int64)
               for w, h in SIZES]
-    beats = _sim(tmp_path, core, frames, values)
-    want = []
+    beats, sizes = _sim(tmp_path, core, frames, values)
+    want, shapes = [], []
     for frame in frames:
         if channels == 1:
             out = fn(frame.astype(np.uint16), *model_args).astype(np.int64)
@@ -195,12 +206,16 @@ def _check(tmp_path, fn, params, values, model_args, name, channels=1):
             field = core["interface"]["output"]["field_bits"]
             out = sum(res[..., k] << (field * k) for k in range(res.shape[-1]))
         cols = out.shape[1]
+        if out.size:
+            shapes.append((cols, out.shape[0]))
         out = out.ravel()
         want += [(int(v), int(i % cols == cols - 1), int(i == out.size - 1))
                  for i, v in enumerate(out)]
     assert len(beats) == len(want), (len(beats), len(want))
     for i, (got, exp) in enumerate(zip(beats, want)):
         assert got == exp, f"beat {i}: core {got}, model {exp}"
+    # the size handed to the next block is the frame this one put out
+    assert sizes == shapes, (sizes, shapes)
 
 
 def test_a_phase_core_follows_the_frame_it_is_given(tmp_path):
@@ -251,3 +266,28 @@ def test_a_window_cropped_to_a_stated_extent_refuses(compiler):
     _, line = to_ir(crop, Image2D("img", MAX_W, MAX_H, bits=8))
     with pytest.raises(NotImplementedError, match="stated extent"):
         generate(line, module_name="rt_crop", frame="runtime")
+
+
+WINDOW = {"y0": 3, "x0": 5, "h": 9, "w": 14}
+
+
+def _window_params():
+    return [Param(n, bits=16) for n in ("y0", "x0", "h", "w")]
+
+
+def test_a_window_keeps_what_its_registers_place(tmp_path, compiler):
+    """The source streams through and the window is kept: each frame's
+    window, ends and all, as NumPy's own slicing has it -- a frame smaller
+    than the window ending at its own edges."""
+    if compiler == "reference":
+        pytest.skip("a window is the new compiler's; the reference refuses")
+    args = tuple(WINDOW[n] for n in ("y0", "x0", "h", "w"))
+    _check(tmp_path, crop, _window_params(), WINDOW, args, "rt_crop")
+
+
+def test_a_window_passes_a_packed_word_whole(tmp_path, compiler):
+    if compiler == "reference":
+        pytest.skip("a window is the new compiler's; the reference refuses")
+    args = tuple(WINDOW[n] for n in ("y0", "x0", "h", "w"))
+    _check(tmp_path, crop, _window_params(), WINDOW, args, "rt_crop3",
+           channels=3)

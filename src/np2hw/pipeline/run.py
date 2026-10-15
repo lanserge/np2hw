@@ -368,13 +368,18 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
         handed = compose.handed_on(built)
         got = (frame.shape[:2], 1 if frame.ndim == 2 else frame.shape[-1])
         traced = ((handed.height, handed.width), handed.channels)
-        if got != traced:
+        # a window's frame is its registers', anything up to the trace's
+        inside = (compose.keeps_window(built) and got[1] == traced[1]
+                  and all(g <= t for g, t in zip(got[0], traced[0])))
+        if got != traced and not inside:
             raise ValueError(
                 f"{stage.path}: the model hands on a {got[0][1]}x{got[0][0]} "
                 f"frame of {got[1]} channel(s); its trace says "
                 f"{handed.width}x{handed.height} of {handed.channels}")
         spec = spec.with_stream(handed.channels, handed.bit_depth)
-        width, height = handed.width, handed.height
+        # the next block is traced at the frame it is given: the trace's,
+        # or the part of it a window kept
+        height, width = got[0]
     return frame
 
 
@@ -556,8 +561,10 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
             f"the chain's output port is {port_bits} bits but its traced "
             f"boundary says {out_bits}; the generator and its own report "
             "disagree about the same word")
+    sized = "chain_out_frame_width" in ports
     binary = _twin_binary(verilog, generated.top, scraped,
-                          in_bits=in_channels * bit_depth, out_bits=out_bits)
+                          in_bits=in_channels * bit_depth, out_bits=out_bits,
+                          sized=sized)
     words = _pack(frame, in_channels, bit_depth)
 
     with tempfile.TemporaryDirectory() as scratch:
@@ -576,6 +583,14 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
                 f" {done.stderr.strip()}")
         got = np.array([int(line, 16) for line in
                         (scratch / "out.txt").read_text().split()], dtype=object)
+    # the frame the hardware says it put out: a window's is its registers'
+    if sized:
+        _, w, h = done.stdout.split()
+        width, height = int(w), int(h)
+    if got.size != width * height:
+        raise RuntimeError(
+            f"the RTL twin put out {got.size} words for the {width}x{height} "
+            "frame it published")
     return _unpack(got, height, width, out_channels, out_lane)
 
 
@@ -662,11 +677,16 @@ def _port_code(port: str, bits: int, direction: str) -> str:
 
 
 def _twin_binary(verilog: str, top: str, scraped: list[str],
-                 in_bits: int, out_bits: int) -> Path:
-    """Compile the twin, or reuse the cached build for this exact structure."""
+                 in_bits: int, out_bits: int, sized: bool) -> Path:
+    """Compile the twin, or reuse the cached build for this exact structure.
+    A `sized` twin reports the frame size its top publishes at the last
+    word."""
     assign = "\n".join(f'    top->{port} = take("{port}");'
                        for port in scraped)
+    size = ('std::printf("size %d %d\\n", (int)top->chain_out_frame_width, '
+            '(int)top->chain_out_frame_height);' if sized else "")
     harness = (_HARNESS.replace("@TOP@", top).replace("@ASSIGN@", assign)
+               .replace("@SIZE@", size)
                .replace("@IN_WORDS@", str(-(-in_bits // 32)))
                .replace("@OUT_WORDS@", str(-(-out_bits // 32)))
                .replace("@SET_IN@", _port_code("chain_in_data", in_bits, "in"))
@@ -758,7 +778,7 @@ int main(int argc, char** argv) {
 
     FILE* fo = std::fopen(argv[2], "w");
     long idx = 0, got = 0;
-    int sending = 0;
+    int sending = 0, ended = 0;
     top->rst = 1; top->chain_in_valid = 0;
     top->chain_in_eol = 0; top->chain_in_last = 0; top->chain_out_ready = 1;
     set_in(top, &mem[0]); top->chain_in_sof = 1;
@@ -768,6 +788,7 @@ int main(int argc, char** argv) {
     for (long guard = 0; guard < 4 * total + 4096; guard++) {
         top->clk = 0; top->eval();
         int ready = top->chain_in_ready, valid = top->chain_out_valid;
+        int last = top->chain_out_last;
         uint32_t data[OW];
         get_out(top, data);
         top->clk = 1; top->eval();
@@ -779,15 +800,19 @@ int main(int argc, char** argv) {
             std::fprintf(fo, "%x", data[OW - 1]);
             for (int w = OW - 2; w >= 0; w--) std::fprintf(fo, "%08x", data[w]);
             std::fprintf(fo, "\n");
-            if (++got == total) break;
+            got++;
+            // the frame ends where the hardware says it does, and is the
+            // size it publishes beside it
+            if (last) { ended = 1; @SIZE@ break; }
         }
         set_in(top, &mem[(size_t)idx * IW]);
         top->chain_in_sof = (idx == 0);
     }
     std::fclose(fo);
-    if (got != total)
-        std::fprintf(stderr, "frame incomplete: %ld of %ld words\n", got, total);
+    if (!ended)
+        std::fprintf(stderr, "frame incomplete: %ld words and no last, "
+                     "of %ld in\n", got, total);
     delete top;
-    return got == total ? 0 : 2;
+    return ended ? 0 : 2;
 }
 """

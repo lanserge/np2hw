@@ -300,7 +300,8 @@ def _fdim(d: str, k: int) -> str:
     return f"f{d}" if k == 0 else f"f{d}_m{k}"
 
 
-def _emit_frame_dims(a, frame, minus=(1,), take="in_valid && in_sof && !stall"):
+def _emit_frame_dims(a, frame, minus=(1,), take="in_valid && in_sof && !stall",
+                     size=(0, 0)):
     """Declare the frame constants a core's framing compares against: fw and
     fh, and fw_m<k>/fh_m<k> = the size less k for each k in `minus`. At
     build size they are local parameters on WIDTH and HEIGHT -- the same
@@ -315,7 +316,11 @@ def _emit_frame_dims(a, frame, minus=(1,), take="in_valid && in_sof && !stall"):
             src = "WIDTH" if d == "W" else "HEIGHT"
             a(f"    localparam [{POS-1}:0] {name} = {src}{f' - {k}' if k else ''};")
         return
-    regs = ", ".join(f"{n} = 0" for n, _, _ in names)
+    # they start at the traced size, so a core's first frame is right even
+    # where its frame comes from the core before it and that core has not
+    # yet loaded its own: a reset is not long enough to ripple a chain
+    start = {"W": size[0], "H": size[1]}
+    regs = ", ".join(f"{n} = {max(0, start[d] - k)}" for n, d, k in names)
     a(f"    reg [{POS-1}:0] {regs};")
     a(f"    always @(posedge clk) if (rst || ({take})) begin")
     for name, d, k in names:
@@ -323,6 +328,28 @@ def _emit_frame_dims(a, frame, minus=(1,), take="in_valid && in_sof && !stall"):
         a(f"        {name} <= {src}{f' - {k}' if k else ''};")
     a("    end")
 
+
+
+def _frame_out_ports(frame) -> list:
+    """The frame size a run-time core hands to the next: two output ports,
+    none at build size."""
+    if frame != "runtime":
+        return []
+    return ["    // the frame this core puts out, as it has it in force: what",
+            "    // the next core latches as its own frame starts",
+            f"    output wire [{POS-1}:0] out_frame_width,",
+            f"    output wire [{POS-1}:0] out_frame_height,"]
+
+
+def _emit_frame_out(a, frame, dw=0, dh=0):
+    """Drive out_frame_*: the frame in force, less the columns and rows
+    this core's window takes off (0 for a core that keeps its frame)."""
+    if frame != "runtime":
+        return
+    w = "fw" if dw == 0 else f"(fw - {POS}'d{dw})"
+    h = "fh" if dh == 0 else f"(fh - {POS}'d{dh})"
+    a(f"    assign out_frame_width = {w};")
+    a(f"    assign out_frame_height = {h};")
 
 def _range_bits_as(lo, hi, signed):
     """Bits to hold [lo, hi] on a datapath of the GIVEN signedness.
@@ -955,6 +982,7 @@ def _generate_expr(line, module_name, plan=None, frame="build") -> dict:
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, doc in params:
         L.extend(_param_port(name, bits, psg, doc))
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")
@@ -968,7 +996,8 @@ def _generate_expr(line, module_name, plan=None, frame="build") -> dict:
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
-    _emit_frame_dims(a, frame)
+    _emit_frame_dims(a, frame, size=(image.width, image.height))
+    _emit_frame_out(a, frame)
     a("")
 
     for parent in arrays:
@@ -1143,6 +1172,7 @@ def _generate_expr_stack(stack, module_name, plan=None,
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, doc in params:
         L.extend(_param_port(name, bits, psg, doc))
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")
@@ -1156,7 +1186,8 @@ def _generate_expr_stack(stack, module_name, plan=None,
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
-    _emit_frame_dims(a, frame)
+    _emit_frame_dims(a, frame, size=(image.width, image.height))
+    _emit_frame_out(a, frame)
     a("")
     for parent in arrays:
         size = parent.shape[0]
@@ -1292,6 +1323,7 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, _doc in params:
         L.extend(_param_port(name, bits, psg, _doc))
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")
@@ -1305,7 +1337,8 @@ def _generate_phase(canvas, module_name, clk_ns=None, label=None,
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
-    _emit_frame_dims(a, frame)
+    _emit_frame_dims(a, frame, size=(image.width, image.height))
+    _emit_frame_out(a, frame)
     a("")
     a("    // Which plane this pixel belongs to. A plane taken at `p::2` holds the")
     a("    // positions where (position & 1) == p, so XOR against the phase")
@@ -1650,6 +1683,7 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, _doc in params:
         L.extend(_param_port(name, bits, psg, _doc))
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")                         # start of frame (first pixel)
@@ -1676,7 +1710,8 @@ def _generate_core(out_line, module_name="np2hw_top", framing="height",
     # SOF too -- no separate output counter to drift on re-anchor.
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
-    _emit_frame_dims(a, frame)
+    _emit_frame_dims(a, frame, size=(image.width, image.height))
+    _emit_frame_out(a, frame, dw=N, dh=M)
 
     # line buffers: chain0 = in_data; chainK = input delayed K rows
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
@@ -1842,6 +1877,7 @@ def _generate_mux(mux, module_name, sync_memory=False,
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, _doc in params:
         a(f"    input  wire {'signed ' if psg else ''}[{bits-1}:0] param_{name},")
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid, input wire out_ready,")
     a("    output reg  out_sof, output reg out_eol, output reg out_last,")
     a("    output reg  OUT_SGN[OUT_BITS-1:0] out_data")
@@ -1851,7 +1887,8 @@ def _generate_mux(mux, module_name, sync_memory=False,
     a("    assign in_ready = !stall;")
     a(f"    wire [{POS-1}:0] ecol = in_sof ? 0 : col;")          # SOF anchors to (0,0)
     a(f"    wire [{POS-1}:0] erow = in_sof ? 0 : row;")
-    _emit_frame_dims(a, frame)
+    _emit_frame_dims(a, frame, size=(image.width, image.height))
+    _emit_frame_out(a, frame, dw=N, dh=M)
     # shared window
     a(f"    wire [{in_bits-1}:0] chain0 = in_data;")
     for k in range(1, M + 1):
@@ -2251,6 +2288,7 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, _doc in params:
         L.extend(_param_port(name, bits, psg, _doc))
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")
@@ -2270,7 +2308,9 @@ def _generate_phase_stencil(stack, module_name, clk_ns=None,
       " || (in_sof && in_valid));")
     # a frame's bottom flush ends before the next frame's start is taken,
     # so the size the flush counts to is its own frame's
-    _emit_frame_dims(a, frame, minus=minus, take="en && in_sof")
+    _emit_frame_dims(a, frame, minus=minus, take="en && in_sof",
+                     size=(realW, realH))
+    _emit_frame_out(a, frame, dw=0 if h_edge else N, dh=0 if v_edge else M)
     vbc = "in_sof || ((!vf) && (row == 0))" if (v_edge and rep) else "1'b0"
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
     a(f"    wire vbc = {vbc};")
@@ -2831,6 +2871,7 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a(f"    input  wire [{in_bits-1}:0] in_data,")
     for name, bits, psg, _, _doc in params:
         a(f"    input  wire {'signed ' if psg else ''}[{bits-1}:0] param_{name},")
+    L.extend(_frame_out_ports(frame))
     a("    output reg  out_valid,")
     a("    input  wire out_ready,")
     a("    output reg  out_sof,")                         # start of frame (first pixel)
@@ -2854,7 +2895,8 @@ def _generate_edge(out_line, image, module_name, framing="height",
     a("    wire en = !stall && !done && ((in_active && in_valid) || hf || vf || (in_sof && in_valid));")
     if rt:
         _emit_frame_dims(a, frame, minus=sorted({1, pr, pb, N + 1, M + 1} - {0}),
-                         take="en && in_sof")
+                         take="en && in_sof", size=(realW, realH))
+        _emit_frame_out(a, frame, dw=0 if h_edge else N, dh=0 if v_edge else M)
     w1 = "fw_m1" if rt else f"{aw}-1"       # the line's last column
     vbc = "in_sof || ((!vf) && (row == 0))" if (v_edge and rep) else "1'b0"
     hbc = "in_sof || ((!hf) && (col == 0))" if (h_edge and rep) else "1'b0"
@@ -3934,7 +3976,8 @@ WRAP_CSR, WRAP_DATAPATH = "u_csr", "u_datapath"
 
 def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
                  frame_sync=True, commit=None, header=(), notes=(),
-                 passthrough=(), bus_clock=False, arm=None) -> dict:
+                 passthrough=(), bus_clock=False, arm=None,
+                 outputs=()) -> dict:
     """Put an AXI4-Lite register file in front of ANY self-describing module.
 
     `control_top` does this for one generated core and folds in the geometry
@@ -3962,6 +4005,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
             which is the point at which a frame has finished and the next has
             not started, so no frame is ever processed with half its
             coefficients updated.
+        outputs: ``[(name, bits), ...]`` extra OUTPUTS the datapath drives
+            beside its streams, passed straight out -- a frame size, say.
         passthrough: ``[(name, bits), ...]`` extra INPUTS the wrapper
             declares and does nothing with except make them available to
             `bind`. This is how a port that is context rather than
@@ -4068,6 +4113,9 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     for n, (name, bits) in enumerate(passthrough):
         pins.append(Pin(name, "input", bits, before=(
             "context, not configuration: this arrives with the data",)))
+    for name, bits in outputs:
+        pins.append(Pin(name, "output", bits, before=(
+            "what the datapath hands on beside its stream",)))
     for stream in streams:
         flags = [f for f in ("sof", "eol", "last") if f in stream["flags"]]
         pins += stream_pins(stream["prefix"], stream["direction"],
@@ -4142,7 +4190,7 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     # because nothing asserted that the arm clears.
     for name in sorted(arm_ports - connected):
         a(f"        .{prefix}{name}({name}),")
-    lines = []
+    lines = [f"        .{name}({name})" for name, _ in outputs]
     for stream in streams:
         p = stream["prefix"]
         lines.append(f"        .{p}_valid({p}_valid)")

@@ -172,6 +172,9 @@ class Array:
     def __getitem__(self, key):
         key = _expand(key, self.ndim)
         g = self.t.g
+        window = self._window_of(key)
+        if window is not None:
+            return window
         idx = []
         for k, axis in zip(key, self.v.type.axes):
             dim = 1 if axis is None else g.vars.count(axis)
@@ -206,6 +209,43 @@ class Array:
         if step != 1:
             v = g.op("model.mul", v, t.const(step))
         return g.op("model.add", v, start)
+
+    def _window_of(self, key):
+        """`img[p.y0:, p.x0:][:p.h, :p.w]` -- a window registers place and
+        size -- as one node over the source it reads; None for any other
+        key. The first slice reads the source from a register start; this
+        one ends it at a register length. In NumPy the two are an ordinary
+        crop; in hardware the source streams through and the window is
+        kept, so the node keeps the source's own frame."""
+        stops = [k for k in key[:2] if isinstance(k, slice)
+                 and isinstance(k.stop, Param)]
+        if not stops:
+            return None
+        if (len(stops) != 2
+                or any(k.start is not None or k.step not in (None, 1)
+                       for k in key[:2])
+                or any(not (isinstance(k, slice) and k == slice(None))
+                       for k in key[2:])):
+            raise Unsupported("a window ends rows and columns at register "
+                              "lengths, after a register start: "
+                              "img[p.y0:, p.x0:][:p.h, :p.w]")
+        n = self.v.node
+        starts = []
+        if n.kind == "model.access":
+            for i in n.operands[1:3]:
+                d = i.node
+                if (d.kind == "model.add" and d.operands[0].node.kind
+                        == "model.var" and d.operands[1].node.kind
+                        == "model.param"):
+                    starts.append(d.operands[1])
+        if len(starts) != 2:
+            raise Unsupported("a window's lengths need its starts: slice "
+                              "the source from registers first, "
+                              "img[p.y0:, p.x0:]")
+        source = n.operands[0]
+        h, w = (self.t.register(k.stop) for k in key[:2])
+        return Array(self.t, self.t.g.op("model.window", source, starts[0],
+                                  starts[1], h, w))
 
     def _register_start(self, s) -> Value:
         """`p.py` or `1 - p.py`: index math on a register."""

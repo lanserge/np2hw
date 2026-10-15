@@ -762,13 +762,14 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
             ports -- what a bit-exact testbench wants, because it drives the
             coefficients directly instead of writing them over a bus.
     """
-    from np2hw import compose
+    from np2hw import Port, compose
     from np2hw.design.composite import _shared_subsystems
 
     form = shape(design)
     netlist(design)                      # np2hw's laws, before anything is made
     shared = _shared_subsystems(design)
     signals = frame_signals(design)
+    frames: dict = {}                    # path -> its frame's two expressions
 
     modules: list[tuple[str, str]] = []
     built: dict[str, Generated] = {}
@@ -801,10 +802,18 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         # blocks before it took off. Every core that follows a run-time
         # frame keeps its input's size or loses a constant span (a valid
         # window's), so the traced difference holds at every size.
+        # The frame as it reaches this block: the size the block driving it
+        # hands on, as that block has it in force; or, for a block the
+        # design's input drives, the frame's own context signals.
         frame = None
         if signals:
-            frame = (_frame_at(signals[0], form.width - given.width),
-                     _frame_at(signals[1], form.height - given.height))
+            driver = _driver(design, s)
+            if driver in built and _hands_frame(built[driver]):
+                frame = _frame_out(design, driver)
+            else:
+                frame = (_frame_at(signals[0], form.width - given.width),
+                         _frame_at(signals[1], form.height - given.height))
+            frames[s.path] = frame
         result = s.block.generate(
             form.spec.with_stream(given.channels, given.bit_depth),
             given.width, given.height, module_name=name, clk_ns=clk_ns,
@@ -812,11 +821,14 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         modules.extend(result.modules)
         built[s.path] = seen[name] = result
 
+    outs = _frame_ports(design, built)
     top = compose(
         module_name=design.name,
-        instances=_instances(design, built),
+        instances=_instances(design, built, frames),
         connections=_connections(design, built),
-        ports=_ports(design, built),
+        ports=_ports(design, built) + [Port(name, "out", width=16)
+                                       for name in outs],
+        assigns=outs,
         header=header(
             design, what=f"{design.name} -- composed ISP pipeline "
                  f"({len(built)} generated block(s), {form.spec.bit_depth}-bit)",
@@ -902,6 +914,8 @@ def _control_top(design, top: dict, built: dict) -> dict:
         top, address_map(design), bind=control_bind(design, built),
         passthrough=[(f"ctx_{c.name}", c.bits) for c in contexts(design)
                      if c.name in carried],
+        # each output's frame size, as its last block hands it on
+        outputs=[(name, 16) for name in _frame_ports(design, built)],
         module_name=f"{design.name}_ctrl",
         addr_bits=allocator(design).address_bits(),
         # ONE bank here, not two. A shadow-and-live pair in the register
@@ -970,6 +984,33 @@ def handed_on(result) -> Handed:
     channels = int(out.get("channels", 1))
     return Handed(channels, int(result.core.out_bits) // max(1, channels),
                   int(out["cols"]), int(out["rows"]))
+
+
+def keeps_window(result) -> bool:
+    """Whether a generated block keeps a window its registers set: then the
+    frame it hands on is the window's, and the traced size bounds it."""
+    return bool((result.core["interface"].get("output") or {}).get("window"))
+
+
+def _driver(design, s: Stage):
+    """The path of the block driving ``s``'s input, or None where the
+    design's input does."""
+    if not s.block.ports.inputs:
+        return None
+    source = netlist(design).driver(Endpoint(s.path, s.block.ports.inputs[0]))
+    return source.node if source is not None else None
+
+
+def _hands_frame(result) -> bool:
+    """Whether a generated block hands its frame size on (out_frame_*): a
+    core built for a run-time frame does."""
+    return any(n == "frame_width" for n, *_ in result.core.interface["params"])
+
+
+def _frame_out(design, path: str) -> tuple:
+    """The wires a block's frame size leaves on."""
+    prefix = stage(design, path).module_prefix
+    return (f"{prefix}_out_frame_width", f"{prefix}_out_frame_height")
 
 
 def _incoming(design, s: Stage, built: dict) -> Handed:
@@ -1095,25 +1136,54 @@ def _output_boundary(design, built, name) -> dict:
     return out
 
 
-def _instances(design, built) -> list:
-    """One np2hw Instance per generated block, with its parameter bindings."""
+def _instances(design, built, frames=None) -> list:
+    """One np2hw Instance per generated block, with its parameter bindings
+    and, for a block that hands its frame size on, the wires it leaves on.
+    A block's frame is bound per instance: two instances of one module may
+    be driven by different blocks."""
     from np2hw import Instance
 
+    frames = frames or {}
     instances = []
     for path, result in built.items():
         s = stage(design, path)
         declared = [name for name, _, _ in result.core.interface["params"]]
         bind = {}
         for name in declared:
-            if name in result.context_map:
+            if name in ("frame_width", "frame_height") and path in frames:
+                expr = frames[path][0 if name == "frame_width" else 1]
+                bind[name] = (expr, "the frame as the block before hands it on"
+                              if not expr.startswith(("ctx_", "(ctx_"))
+                              else "the frame's own context")
+            elif name in result.context_map:
                 bind[name] = (result.context_map[name],
                               "pipeline context, not a register")
             else:
                 bind[name] = f"param_{s.module_prefix}_{name}"
+        outputs = {}
+        if _hands_frame(result):
+            w, h = _frame_out(design, path)
+            outputs = {"out_frame_width": (w, 16),
+                       "out_frame_height": (h, 16)}
         instances.append(Instance(
             name=s.module_prefix, core=result.core, bind=bind,
+            outputs=outputs,
             comment=f"{path} (base 0x{s.instance.base:04x})"))
     return instances
+
+
+def _frame_ports(design, built) -> dict:
+    """{port: wire}: each output stream's frame size, as the block driving
+    it hands it on -- `<output>_frame_width` and `_height` -- for whatever
+    the design feeds next. None where the driver is built for one size."""
+    outs = {}
+    for source, sink in netlist(design).edges:
+        if sink.node is None and source.node in built \
+                and _hands_frame(built[source.node]):
+            w, h = _frame_out(design, source.node)
+            outs[f"{sink.port}_frame_width"] = w
+            outs[f"{sink.port}_frame_height"] = h
+    return outs
 
 
 def _connections(design, built) -> list:

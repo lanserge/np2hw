@@ -50,7 +50,15 @@ def rewrite(c: Canonical):
         find = mg.vars.find
         src_axes = [find(a) for a in src.type.axes]
         driving, chan = src_axes[:2], src_axes[2] if len(src_axes) > 2 else None
-        if [find(a) if a else None for a in c.output.type.axes] != driving:
+        # A window over the source: its word streams through whole and the
+        # window is kept -- the control pass gates it. Only the source, as
+        # yet: a value computed inside a window belongs to the next block.
+        win = c.output.node if c.output.node.kind == "model.window" else None
+        if win is not None:
+            if win.operands[0].node is not src.node:
+                raise Unsupported("a window over a computed value: window "
+                                  "the source, and compute in the next block")
+        elif [find(a) if a else None for a in c.output.type.axes] != driving:
             raise Unsupported("an output that is not the source's frame")
         g = Graph(intern=True, locations=False)
         g.vars = mg.vars
@@ -171,9 +179,17 @@ def rewrite(c: Canonical):
 
             return pick(0, vals)
 
-        for n in walk([c.output]):
-            values[id(n)] = one(n)
-        unit = Unit(g, {"data": values[id(c.output.node)]})
+        if win is not None:
+            if img.signed:
+                raise Unsupported("a signed source")
+            bounds = tuple(one(o.node) for o in win.operands[1:])
+            unit = Unit(g, {"data": port_in()})
+            unit.facts["window"] = bounds           # y0, x0, h, w
+            unit.facts["channels"] = mg.vars.count(chan) if chan else 1
+        else:
+            for n in walk([c.output]):
+                values[id(n)] = one(n)
+            unit = Unit(g, {"data": values[id(c.output.node)]})
         # registers in the model's order of first use -- the order the tracer
         # declared them, which sets their addresses in a register map
         order = list(mg.symbols)
@@ -256,10 +272,28 @@ def control() -> Pass:
                      g.op("hw.lt", epos[cols], limit[cols]))
         first = lambda v: EQ(epos[v], c(0))
         final = lambda v: EQ(epos[v], last[v])
-        flags = {"valid": inside,
-                 "sof": AND(inside, AND(first(rows), first(cols))),
-                 "eol": AND(inside, final(cols)),
-                 "last": AND(inside, AND(final(rows), final(cols)))}
+        if "window" in unit.facts:
+            # kept: inside the frame and the window; the frame starts at
+            # the window's corner, and a line (the frame) ends at the
+            # window's edge or the frame's own, whichever comes first
+            y0, x0, h, w = unit.facts["window"]
+            end = {rows: g.op("hw.sub", g.op("hw.add", y0, h), c(1)),
+                   cols: g.op("hw.sub", g.op("hw.add", x0, w), c(1))}
+            start = {rows: y0, cols: x0}
+            keep = lambda v: AND(g.op("hw.ge", epos[v], start[v]),
+                                 g.op("hw.le", epos[v], end[v]))
+            inside = AND(inside, AND(keep(rows), keep(cols)))
+            edge = lambda v: g.op("hw.or", EQ(epos[v], end[v]), final(v))
+            flags = {"valid": inside,
+                     "sof": AND(inside, AND(EQ(epos[rows], y0),
+                                            EQ(epos[cols], x0))),
+                     "eol": AND(inside, edge(cols)),
+                     "last": AND(inside, AND(edge(rows), edge(cols)))}
+        else:
+            flags = {"valid": inside,
+                     "sof": AND(inside, AND(first(rows), first(cols))),
+                     "eol": AND(inside, final(cols)),
+                     "last": AND(inside, AND(final(rows), final(cols)))}
         def position(n):
             """The datapath's position along a variable: the counter at this
             pixel, in the bits its count needs -- the range NumPy gave it."""

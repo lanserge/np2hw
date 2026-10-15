@@ -60,6 +60,91 @@
           "scoped_to": "np2hw_cdc_fifo"
         }
       ]
+    },
+    "frame_cdc": {
+      "description": "stream_cdc for a stream that carries its frame's size: each frame's width and height cross beside its samples, published from the moment the frame's first beat is presented until the next frame's is. A link reset must assert both sides; the pointer paths are constrained by np2hw's own file, scoped to the FIFO.",
+      "parameters": {
+        "DATA_BITS": {
+          "description": "The stream's data width."
+        },
+        "A": {
+          "default": 4,
+          "description": "The FIFO holds 2**A beats: it absorbs jitter, it is not a rate adapter."
+        },
+        "SA": {
+          "default": 2,
+          "description": "The size crossing holds 2**SA frames' sizes; it fills only when that many frames are in the sample crossing at once."
+        }
+      },
+      "inputs": [
+        {
+          "name": "wclk"
+        },
+        {
+          "name": "wrst",
+          "description": "The write side's reset, active high."
+        },
+        {
+          "name": "in",
+          "stream": [
+            "sof",
+            "eol",
+            "last"
+          ],
+          "width": "DATA_BITS"
+        },
+        {
+          "name": "in_frame_width",
+          "width": 16,
+          "description": "The width of the frame whose first beat is going in."
+        },
+        {
+          "name": "in_frame_height",
+          "width": 16,
+          "description": "Its height."
+        },
+        {
+          "name": "rclk"
+        },
+        {
+          "name": "rrst",
+          "description": "The read side's reset, active high."
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "stream": [
+            "sof",
+            "eol",
+            "last"
+          ],
+          "width": "DATA_BITS"
+        },
+        {
+          "name": "out_frame_width",
+          "width": 16,
+          "description": "The width of the frame being presented: the next frame's from the moment its first beat is."
+        },
+        {
+          "name": "out_frame_height",
+          "width": 16,
+          "description": "Its height."
+        }
+      ],
+      "vivado": {
+        "module": "np2hw_frame_cdc"
+      },
+      "sources": [
+        "np2hw.hdl:np2hw_frame_cdc.v",
+        "np2hw.hdl:np2hw_cdc_fifo.v"
+      ],
+      "constraints": [
+        {
+          "file": "np2hw.hdl:np2hw_cdc_fifo.xdc",
+          "scoped_to": "np2hw_cdc_fifo"
+        }
+      ]
     }
   }
 }
