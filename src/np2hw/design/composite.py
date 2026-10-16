@@ -1271,7 +1271,12 @@ class _Loader:
             leaf = node.found.obj.configure(overrides or None, resets=values)
         config = dict(node.entry.get("config", {}))
         if isinstance(leaf, dict) and "implementation_config" in leaf:
-            config = {**leaf["implementation_config"], **config}
+            if _vendor_ip(leaf):
+                config = {**leaf["implementation_config"], **config}
+            else:
+                # an implementation that is a module: its settings are the
+                # module's parameters, as a leaf's build is
+                build = dict(leaf["implementation_config"])
         both = sorted(set(config) & set(build))
         if both:
             raise CompositionError(f"{path}: {both} set under both build and "

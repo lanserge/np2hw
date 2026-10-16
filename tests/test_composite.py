@@ -1147,7 +1147,8 @@ RX = {"parameters": {"implementation": {"default": "'a'"},
                 "facts": {"order": [2, 0, 1]},
                 "config": {"MODE": "'fast' if speed > 1 else 'slow'"}},
           "b": {"vivado": {"module": "bmod"}, "sources": ["b.v"],
-                "facts": {"order": [0, 1, 2]}}}}
+                "facts": {"order": [0, 1, 2]},
+                "config": {"RATE": "speed * 10"}}}}
 SNK = {"parameters": {"W": {}}, "inputs": [{"name": "d", "width": "W"}],
        "vivado": {"module": "snk"}, "sources": ["snk.v"]}
 
@@ -1185,6 +1186,16 @@ def test_the_implementation_is_set_from_outside_and_its_facts_follow(
     assert rx.leaf["sources"] == ["b.v"]
     assert design.parameters["first"] == 0
     assert _with_rx(library).parameters["first"] == 2
+
+
+def test_a_module_implementations_settings_are_its_parameters(library):
+    """An implementation that is a module takes its settings as module
+    parameters, as any module leaf takes its build: there is no vendor
+    tool to hand them to."""
+    rx = _with_rx(library, {"build": {"implementation": "'b'",
+                                      "speed": 3}}).instances["rx"]
+    assert rx.build == {"RATE": 30}
+    assert rx.config == {}
 
 
 def test_an_implementations_settings_follow_the_blocks_parameters(library):

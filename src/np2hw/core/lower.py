@@ -277,8 +277,19 @@ def control() -> Pass:
             # the window's corner, and a line (the frame) ends at the
             # window's edge or the frame's own, whichever comes first
             y0, x0, h, w = unit.facts["window"]
-            end = {rows: g.op("hw.sub", g.op("hw.add", y0, h), c(1)),
-                   cols: g.op("hw.sub", g.op("hw.add", x0, w), c(1))}
+            # The window's last row and column: frame-constant, since the
+            # registers placing it change only at a commit, between
+            # frames -- so worked out once into a register and compared
+            # against, not added up again beneath every pixel's verdict,
+            # where the sum and the compare were one carry chain too long
+            # for the clock.
+            end = {}
+            for v, (at, n) in ((rows, (y0, h)), (cols, (x0, w))):
+                bound = g.op("hw.sub", g.op("hw.add", at, n), c(1))
+                end[v] = reg_symbol(f"win_end_{v}", bound.type.lo,
+                                    bound.type.hi, 0)
+                unit.regs.append(g.node("hw.reg", [bound, c(1)],
+                                        {"name": f"win_end_{v}"}))
             start = {rows: y0, cols: x0}
             keep = lambda v: AND(g.op("hw.ge", epos[v], start[v]),
                                  g.op("hw.le", epos[v], end[v]))

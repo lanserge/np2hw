@@ -11,6 +11,16 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed
 
+- **A window's bounds are registered.** Its last row and column -- the
+  registers that place it, added -- are worked out once into a register,
+  frame-constant as they are, and compared against; the sum and the
+  compare in one cycle were a carry chain too long for the clock.
+- **An implementation that is a module takes its settings as parameters.**
+  A block filled by a Verilog implementation gets its `config`, evaluated
+  over the block's parameters, as the module's parameters -- as any module
+  leaf takes its build -- where it used to be refused as vendor IP
+  properties.
+
 - **A context register exists only where something reads it.** A
   register-backed context signal is made -- in the decode, the published
   map, the ports and the binding -- only where a block consumes it, or the
