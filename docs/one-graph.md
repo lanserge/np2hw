@@ -524,7 +524,47 @@ Access across time is access on `t`, and everything spatial carries over:
   first outputs come once the history is full; a pad on `t` defines them by
   its edge rule, from the first frame.
 
-Where the frames are stored is the memory's lowering choice.
+**Where the frames are stored.** The reads on `t` state the store's
+requirement completely: its depth (the spread of starts), its size (the
+frame's positions, the sample's width) and its access -- every accepted
+pixel writes its sample and reads the same position, and any spatial
+spread around it, in each past frame. All of it in raster order, so every
+address the store will need is known ahead: it is a counter.
+
+A frame store is storage like that on every driving axis -- the reuse of
+what was read -- one level further out: a shift register holds the last
+few pixels, line buffers the last few lines, frame stores the last few
+frames. Frames are too large to keep on chip in general, so the store is
+a hierarchy of two tiers:
+
+- **near** -- on-chip lines of each past frame, the ones about to be used;
+- **far** -- the whole past frames, where they fit: on chip, or external
+  memory.
+
+A transfer engine moves lines from far to near ahead of their use, in
+raster order and in line-sized bursts, which is also what external memory
+reads efficiently. The datapath never addresses memory: it reads the past
+as lines the near tier delivers, and those are the line buffers a spatial
+read across time needs anyway -- `v[t - 1, r + 1, c]` is the window rule
+on that stream, with no copy between the transfer and the window. A
+model that reads only the same pixel from each past frame needs no more
+near tier than a few bursts in flight.
+
+**A live stream cannot wait for memory.** Its source does not pause, so a
+refill that arrives late is pixels lost, not a stall: the transfer runs
+ahead by enough lines to cover the worst-case latency of a memory the
+design shares with others, the bandwidth it needs leaves headroom, and the
+blanking is where it catches up. These are requirements checked when the
+design is built, not hoped for when it runs.
+
+**The binding is the design's.** Block RAM and memory ports are shared by
+everything a design holds, so where a store lives is chosen where the
+design is composed -- on chip, the near tier the whole store; or external
+memory, with the line-ahead transfer -- with a default, on chip when it
+fits. The compiler states the requirement: the size, the bandwidth, and
+the latency the stream can hide. A binding that cannot meet it is refused
+by name at build. The datapath is the same whichever binding holds its
+past.
 
 ### 7. The hardware level
 
@@ -559,4 +599,6 @@ none.
 ### Left open, by design
 
 Hierarchy by instances of named subgraphs; several clocks; resource-limited
-schedules; a parser for dumps; pad modes beyond replicate and zero.
+schedules; a parser for dumps; pad modes beyond replicate and zero; frame
+store bindings beyond on chip and a line-ahead transfer from external
+memory (caches, compression).

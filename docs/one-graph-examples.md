@@ -327,8 +327,9 @@ a remainder chosen at run time, as the CFA phase is on rows and columns.
 **Hardware**
 
     counters   r_frame, r_row, r_col      -- t, the outermost driver
-    memory     frames: 3 x H x W, lowered to block RAM, a macro, or
-               external memory by its properties
+    memory     frames: 3 x H x W, bound where the design is composed:
+               block RAM, a macro, or external memory with lines
+               transferred ahead (one-graph.md, decision 6)
     select     which frame is which phase, by ph
     datapath   two differences -> CORDIC
 
