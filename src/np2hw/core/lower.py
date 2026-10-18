@@ -265,21 +265,15 @@ def rewrite(c: Canonical, dev=None):
             if index.type.hi > size - 1:
                 raise Unsupported(f"{name}: an index reaching "
                                   f"{index.type.hi}, past its {size} entries")
-            width = max(1, top.bit_length())
-
-            def tree(base, bit):
-                """Entries base .. base + 2**(bit+1) - 1 by the index's
-                bits bit .. 0; past the reachable top, nothing is built."""
-                if bit < 0:
-                    return entry(base)
-                upper = base + (1 << bit)
-                low = tree(base, bit - 1)
-                if upper > top:
-                    return low
-                return g.op("hw.sel", g.op("hw.bits", index, lo=bit, width=1),
-                            tree(upper, bit - 1), low)
-
-            return tree(0, width - 1)
+            # the entries the index can reach, chosen by it
+            out = (entry(0) if top == 0 else
+                   g.op("hw.mux", index, *(entry(i) for i in range(top + 1))))
+            # past one lookup table the device reads it in a cycle of its
+            # own: the entries spread out across the die, and the route to
+            # them is the cost (Device.gather_is_read)
+            if isinstance(obj, Param) and fam.gather_is_read(size):
+                return g.op("hw.read", out)
+            return out
 
         def field_of(n) -> Value:
             """An access of the source by its own driving variables, and by a
@@ -308,6 +302,17 @@ def rewrite(c: Canonical, dev=None):
         def select(n, ops) -> Value:
             sizes = n.attr("sizes")
             keys, vals = ops[:len(sizes)], ops[len(sizes):]
+            # keys that are bit fields of their sizes, outermost first, make
+            # one index: one mux of every choice, the shape a lookup table
+            # selects in
+            bits = [(s - 1).bit_length() for s in sizes]
+            if all(s == 1 << b and k.type.lo >= 0 and k.type.hi < s
+                   for s, b, k in zip(sizes, bits, keys)):
+                index = (keys[0] if len(keys) == 1 else
+                         g.op("hw.cat", *reversed(keys), field=max(bits))
+                         if len(set(bits)) == 1 else None)
+                if index is not None:
+                    return g.op("hw.mux", index, *vals)
 
             def pick(level, choices):
                 if level == len(sizes):
@@ -545,39 +550,146 @@ def control() -> Pass:
 # schedule and materialise
 # --------------------------------------------------------------------------- #
 
-def schedule() -> Pass:
-    """Every node a stage. One stage for the pointwise family: the datapath
-    and the flags computed in the beat, registered at the output. The
-    budget check against a clock is np2hw.core.emit's, at generation."""
+# Leaves that FLOAT: a constant is wiring and a register port, or a build
+# parameter, is stable for the whole frame, so each feeds any stage directly
+# and never rides with a pixel. Everything else that is this pixel's -- its
+# word, its position, its stored past -- is pinned to the stage it arrives
+# in, and a later stage sees it through the registers that carry it.
+_FLOATING = ("hw.const", "hw.param", "hw.parameter")
+
+
+def schedule(clk_ns=None, dev=None) -> Pass:
+    """Every node of the datapath a stage, so each stage fits `clk_ns` on
+    the device `dev`, by the device's own cost model (np2hw.timing). A node
+    lands in the latest stage any of its inputs lives in; when its path
+    there would exceed the budget it starts the next stage, its inputs
+    arriving through that stage's registers. With no budget, or one the
+    whole datapath fits in, it is one stage: the datapath and the flags in
+    the beat, registered at the output. An operation that alone exceeds the
+    budget is refused: no register can land inside one."""
 
     def run_(unit: Unit) -> Unit:
         unit.facts["stages"] = 1
+        if clk_ns is None:
+            return unit
+        from ..timing import Depth, device
+        from .pipeline import _cost
+        fam = device(dev)
+        stage: dict = {}
+        depth: dict = {}
+        for n in walk([unit.roots["data"]]):
+            if n.kind in _FLOATING:
+                continue
+            cost = _cost(n, fam)
+            if fam.ns(cost) > clk_ns:
+                raise ValueError(
+                    f"{n.kind} alone estimates {fam.ns(cost):.1f} ns against "
+                    f"the {clk_ns:.1f} ns budget on {fam.name} -- a pipeline "
+                    "register cannot land inside one operation. Slow the "
+                    "clock or restructure the model.")
+            staged = [o.node for o in n.operands if o.node.kind not in _FLOATING]
+            s = max((stage[id(o)] for o in staged), default=0)
+            if n.kind == "hw.read":
+                # a read owns its stage: what it read lands in the next,
+                # through the register the stage boundary is, at the
+                # clock-to-out the device costs a read at
+                stage[id(n)], depth[id(n)] = s + 1, fam.mem()
+                continue
+            below = Depth()
+            for o in staged:
+                if stage[id(o)] == s:
+                    below = fam.worst(below, depth[id(o)])
+            d = below + cost
+            if fam.ns(d) > clk_ns:
+                s, d = s + 1, cost
+            stage[id(n)], depth[id(n)] = s, d
+        root = unit.roots["data"].node
+        unit.facts["stages"] = stage.get(id(root), 0) + 1
+        unit.facts["stage_of"] = stage
         return unit
 
     return Pass("schedule", run_, levels={"hw"})
 
 
 def materialise() -> Pass:
-    """Every value crossing the output stage becomes a register: the data --
-    no reset, it means something only while out_valid says so -- and the
-    flags, reset."""
+    """Every value crossing a stage becomes a register. In one stage: the
+    data at the output -- no reset, it means something only while out_valid
+    says so -- and the flags, reset. In several: each value a later stage
+    reads is carried to it through registers of its own, one a stage,
+    shared by every reader that needs it there; the flags ride the same
+    stages beside the data; and one ready holds every stage while the
+    output stalls."""
 
     def run_(unit: Unit) -> Unit:
         g, f = unit.g, unit.facts
         data = unit.roots["data"]
-        g.symbols["out_data"] = {"lo": data.type.lo, "hi": data.type.hi,
-                                 "init": None}
-        unit.regs.append(g.node("hw.reg", [data, f["go"]],
-                                {"name": "out_data"}))
+        stages = f.get("stages", 1)
         outputs = {"in_ready": f["ready"]}
-        for flag in ("valid", "sof", "eol", "last"):
-            name = f"out_{flag}"
-            g.symbols.setdefault(name, {"lo": 0, "hi": 1, "init": 0})
-            unit.regs.append(g.node(
-                "hw.reg", [g.op("hw.and", f["in_valid"],
-                                unit.roots[f"flag_{flag}"]), f["ready"]],
-                {"name": name}))
-            outputs[name] = g.op("hw.regread", name=name)
+        if stages == 1:
+            g.symbols["out_data"] = {"lo": data.type.lo, "hi": data.type.hi,
+                                     "init": None}
+            unit.regs.append(g.node("hw.reg", [data, f["go"]],
+                                    {"name": "out_data"}))
+            for flag in ("valid", "sof", "eol", "last"):
+                name = f"out_{flag}"
+                g.symbols.setdefault(name, {"lo": 0, "hi": 1, "init": 0})
+                unit.regs.append(g.node(
+                    "hw.reg", [g.op("hw.and", f["in_valid"],
+                                    unit.roots[f"flag_{flag}"]), f["ready"]],
+                    {"name": name}))
+                outputs[name] = g.op("hw.regread", name=name)
+        else:
+            stage_of = f["stage_of"]
+            ready = f["ready"]
+            built: dict = {}
+            carried: dict = {}
+
+            def at(v: Value, k: int, reset=None) -> Value:
+                """`v` as stage `k` sees it: computed there, or carried
+                from the stage it was computed in through a register a
+                stage."""
+                n = v.node
+                if n.kind in _FLOATING:
+                    return v
+                home = stage_of.get(id(n), 0)
+                if k == home:
+                    return here(v)
+                key = (id(n), v.index, k)
+                if key not in carried:
+                    name = f"p{len(carried)}_s{k}"
+                    g.symbols[name] = {"lo": v.type.lo, "hi": v.type.hi,
+                                       "init": reset}
+                    unit.regs.append(g.node(
+                        "hw.reg", [at(v, k - 1, reset), ready],
+                        {"name": name}))
+                    carried[key] = g.op("hw.regread", name=name)
+                return carried[key]
+
+            def here(v: Value) -> Value:
+                """`v` built in its own stage, its inputs as that stage
+                sees them."""
+                n = v.node
+                if id(n) not in built:
+                    home = stage_of.get(id(n), 0)
+                    built[id(n)] = g.node(
+                        n.kind, [at(o, home) for o in n.operands],
+                        dict(n.attrs))
+                return built[id(n)].result(v.index)
+
+            last = stages - 1
+            word = at(data, last)
+            g.symbols["out_data"] = {"lo": data.type.lo, "hi": data.type.hi,
+                                     "init": None}
+            unit.regs.append(g.node("hw.reg", [word, ready],
+                                    {"name": "out_data"}))
+            for flag in ("valid", "sof", "eol", "last"):
+                name = f"out_{flag}"
+                g.symbols.setdefault(name, {"lo": 0, "hi": 1, "init": 0})
+                taken = g.op("hw.and", f["in_valid"],
+                             unit.roots[f"flag_{flag}"])
+                unit.regs.append(g.node("hw.reg", [at(taken, last, 0), ready],
+                                        {"name": name}))
+                outputs[name] = g.op("hw.regread", name=name)
         outputs["out_data"] = g.op("hw.regread", name="out_data")
         # a memory's ports, wired to its instance by the printer
         outputs.update({k: v for k, v in unit.roots.items()
@@ -589,12 +701,13 @@ def materialise() -> Pass:
     return Pass("materialise", run_, levels={"hw"})
 
 
-def lower(c: Canonical, dev=None) -> Unit:
+def lower(c: Canonical, dev=None, clk_ns=None) -> Unit:
     """The canonical graph, lowered to a hardware module for the device
-    `dev` (the default device when None) -- or Unsupported."""
+    `dev` (the default device when None), its stages fitting `clk_ns` when
+    one is given -- or Unsupported."""
     unit = Unit(c.g, {"out": c.output})
     try:
-        return run(unit, [rewrite(c, dev), control(), schedule(),
+        return run(unit, [rewrite(c, dev), control(), schedule(clk_ns, dev),
                           materialise()])
     except GraphError as e:
         raise Unsupported(f"lowering: {e}") from e

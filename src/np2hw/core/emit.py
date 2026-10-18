@@ -136,6 +136,23 @@ class _Printer:
             if k == "hw.wrap" and n.attr("signed") and _signed(v):
                 return self.wire(v, f"$signed({field})")
             return self.wire(v, field)
+        if k == "hw.mux":
+            idx, choices = ops[0], ops[1:]
+            dom = _signed(v) or any(_signed(o) for o in choices)
+            i = self.name(idx)
+            # a balanced tree on the index's bits, which the tools map onto
+            # their lookup tables and wide multiplexers
+            def tree(base, bit):
+                if bit < 0 or base + (1 << bit) >= len(choices):
+                    return (self.ref(choices[base], dom) if bit < 0 else
+                            tree(base, bit - 1))
+                b = i if idx.type.bits == 1 else f"{i}[{bit}]"
+                return (f"({b} ? {tree(base + (1 << bit), bit - 1)} "
+                        f": {tree(base, bit - 1)})")
+            top = max(1, (len(choices) - 1).bit_length())
+            return self.wire(v, tree(0, top - 1))
+        if k == "hw.read":
+            return self.name(ops[0])        # the value; its register is a stage's
         if k == "hw.cat":
             f = n.attr("field")
             parts = []

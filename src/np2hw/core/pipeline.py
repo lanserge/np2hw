@@ -19,21 +19,25 @@ from .trace import trace
 class CoreModule:
     """A model lowered by the new compiler, ready to print. `recipe` is what
     the reference needs to lower it instead, for an option this one does
-    not honour yet. Lowered for the device `dev`; for another, it is
-    lowered again from the same canonical graph (for_device)."""
+    not honour yet. Lowered for the device `dev` and the clock budget
+    `clk_ns`; for others, it is lowered again from the same canonical graph
+    (for_build)."""
     unit: Unit
     image: object
     recipe: tuple
     canonical: object = None
     dev: object = None
+    clk_ns: float | None = None
 
-    def for_device(self, dev) -> "CoreModule":
-        """This model lowered for `dev`: itself, if it already is."""
+    def for_build(self, dev, clk_ns=None) -> "CoreModule":
+        """This model lowered for `dev` with its stages fitting `clk_ns`:
+        itself, if it already is."""
         from ..timing import device
-        if device(dev) is device(self.dev) or self.canonical is None:
+        if self.canonical is None or (device(dev) is device(self.dev)
+                                      and clk_ns == self.clk_ns):
             return self
-        return CoreModule(lower(self.canonical, dev), self.image, self.recipe,
-                          self.canonical, dev)
+        return CoreModule(lower(self.canonical, dev, clk_ns), self.image,
+                          self.recipe, self.canonical, dev, clk_ns)
 
 
 def compile(fn, image, *params, channels: int = 1, dev=None) -> CoreModule:
@@ -60,9 +64,11 @@ def stage_ns(mod: CoreModule, dev) -> float:
 
 
 def _cost(n, dev):
+    from ..timing import Depth
     k = n.kind
     if k in ("hw.port", "hw.parameter", "hw.const", "hw.param", "hw.regread",
-             "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.cat", "hw.not"):
+             "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.cat", "hw.not",
+             "hw.read"):
         return dev.wire()
     if k in ("hw.add", "hw.sub", "hw.neg"):
         return dev.add(n.value.type.bits)
@@ -78,5 +84,7 @@ def _cost(n, dev):
         return dev.select()
     if k == "hw.memread":
         return dev.mem()
+    if k == "hw.mux":
+        return Depth(levels=dev.mux_levels(len(n.operands) - 1))
     raise ValueError(f"no cost for {k} -- a new kind needs its hardware "
                      "shape here before it ships")

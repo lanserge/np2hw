@@ -387,10 +387,17 @@ def main():
     Aw = rng.integers(0, FULL + 1, (6, 8)).astype(np.uint16)
     _, outw = to_ir(white_balance, Image2D("img", 8, 6, bits=BITS), *wbp)
     meta_w = generate(outw, module_name="wb_148", clk_ns=CLK_148M5)
-    ok = meta_w["pipeline_stages"] == 2 and check(
+    # Three: the multiply ends a stage and the clip takes the next. The
+    # position at a frame's start (`in_sof ? 0 : count`) and the CFA parity
+    # `(row + py) & 1` are logic the cost model charges ahead of the
+    # multiply, where the reference's estimate took the counters as free.
+    # Synthesis packs that small cone into one lookup table, so the
+    # estimate is safe rather than tight; the board's own timing report is
+    # what calibrates it. Exact, so a staging change nobody intended shows.
+    ok = meta_w["pipeline_stages"] == 3 and check(
         "wb_148", white_balance, Aw, params=wbp, param_values=gains,
         bits=BITS, clk_ns=CLK_148M5)
-    result("chain: the gain chain cuts after its multiply, bit-exact", ok,
+    result("chain: the gain chain cuts around its multiply, bit-exact", ok,
            f"{meta_w['pipeline_stages']} stages")
 
     ok = all(checks)

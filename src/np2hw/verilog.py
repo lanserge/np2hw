@@ -1542,10 +1542,12 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         import os
         from .core.trace import Unsupported
         try:
-            built = out_line.for_device(dev)
-        except Unsupported:
+            # its stages cut to the clock: one, when the datapath fits
+            built = out_line.for_build(dev, clk_ns)
+        except (Unsupported, ValueError):
             # this device builds something here the new compiler does not
-            # yet (a constant table as a memory): the reference does, below
+            # yet (a constant table as a memory), or the budget cannot be
+            # met by stages: the reference does what it can, below
             if os.environ.get("NP2HW_CORE") == "strict":
                 raise
             built = None
@@ -1562,7 +1564,7 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         # dtypes; the reference computes an expression exactly, so a model
         # whose arithmetic overflows a dtype comes out of them differently,
         # and an option must not change what a model computes.
-        why = ("this device's tables" if built is None else
+        why = ("this device's tables, or its budget" if built is None else
                "clk_ns" if not fits else "framing/max_width")
         core_facts = emit.generate(out_line.unit, module_name, dev)
         from .trace import reference, trace as trace_graph

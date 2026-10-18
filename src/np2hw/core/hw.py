@@ -111,6 +111,20 @@ def _verify_cat(g, n):
                              "bits", n.loc)
 
 
+def _mux(g, ts, a):
+    """One of the choices by an index: operand 0 the index, the rest the
+    choices in order -- the range the choices span."""
+    choices = ts[1:]
+    return _t(min(t.lo for t in choices), max(t.hi for t in choices))
+
+
+def _verify_mux(g, n):
+    idx, choices = n.operands[0], n.operands[1:]
+    if idx.type.lo < 0 or idx.type.hi >= len(choices):
+        raise GraphError(f"a mux of {len(choices)} indexed by "
+                         f"[{idx.type.lo}, {idx.type.hi}]", n.loc)
+
+
 def _sel(g, ts, a):
     c, x, y = ts
     return _t(min(x.lo, y.lo), max(x.hi, y.hi))
@@ -170,6 +184,12 @@ for _k in (
     Kind("hw.bits", _P, 1, _un(_bits)),
     # bit assembly: fields into a word, operand 0 lowest
     Kind("hw.cat", _P, None, _cat, _verify_cat),
+    # one of n choices by an index: the shape a lookup table selects in,
+    # costed by the device's own mux arity (Device.mux_levels)
+    Kind("hw.mux", _P, None, _mux, _verify_mux),
+    # a table read the device makes a read of its own (Device.gather_is_read):
+    # its value unchanged, a stage boundary after it when stages are cut
+    Kind("hw.read", _P, 1, _un(lambda x, a: (x.lo, x.hi))),
     # the position of the pixel being taken along a driving variable: the
     # rewrite pass's reference, replaced by its counter in the control pass
     Kind("hw.position", _P, 0, lambda g, ts, a: _t(0, a["count"] - 1)),
