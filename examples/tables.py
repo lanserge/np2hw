@@ -137,7 +137,9 @@ def main():
            check("wall_read", wallpaper, A, bits=BITS))
     _, out = to_ir(wallpaper, Image2D("img", W, H, bits=BITS))
     meta = generate(out, module_name="wall")
-    registered = "always @(posedge clk) if (!stall) begin" in meta["verilog"]
+    # registered: the read takes a stage of its own, whichever compiler
+    # printed it; inline: every entry written out where it is declared
+    registered = meta["pipeline_stages"] >= 2
     inline = meta["verilog"].count("wall[") >= WALL.data.size
     result("table: a large one is a memory, its read REGISTERED and its "
            "contents inline",

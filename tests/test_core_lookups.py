@@ -179,21 +179,23 @@ def big_table(img):
     return BIG[img.astype(np.int32)].astype(np.uint16)
 
 
-def test_a_constant_table_the_device_makes_a_memory_is_refused():
-    """Past the device's bound a table is a memory read through a
-    register, a stage the pointwise family does not schedule yet."""
+def test_a_constant_table_the_device_makes_a_memory_is_a_registered_read(
+        tmp_path):
+    """Past the device's bound a table is a memory: its contents inline,
+    read through a register -- a stage of its own, budget or no budget."""
     from np2hw.timing import device
     assert not device(None).rom_in_logic(BIG.data.size)
-    with pytest.raises(NotImplementedError, match="1024-entry constant table "
-                                                  "is a memory on 7series"):
-        _compile(big_table)
+    core = _compile(big_table, name="big")
+    assert core["pipeline_stages"] == 2
+    assert core["verilog"].count("rom_big[") >= BIG.data.size
+    frame = np.random.default_rng(5).integers(0, 1 << 10, (H, W))
+    want = big_table(frame.astype(np.uint16)).astype(np.int64)
+    assert _sim(tmp_path, core, frame, {}) == want.ravel().tolist()
 
 
-def test_the_device_decides_how_a_table_is_built(monkeypatch):
-    """The same model on a device whose bound the table passes: refused
-    there by the new compiler, built here -- the model and the Rom say
-    nothing about it -- and, outside strict mode, built there by the
-    reference instead, its read through a register."""
+def test_the_device_decides_how_a_table_is_built():
+    """The same model on a device whose bound the table passes: logic here,
+    a memory read there -- the model and the Rom say nothing about it."""
     from np2hw.timing import Series7
 
     class Lean(Series7):
@@ -201,13 +203,10 @@ def test_the_device_decides_how_a_table_is_built(monkeypatch):
         rom_logic_entries = 8
 
     _, mod = to_ir(droop, Image2D("img", W, H, bits=10))
-    assert generate(mod, module_name="d")["memories"] == []
-    with pytest.raises(NotImplementedError, match="17-entry constant table "
-                                                  "is a memory on lean"):
-        generate(mod, module_name="d", dev=Lean())
-    monkeypatch.delenv("NP2HW_CORE")
-    lean = generate(mod, module_name="d", dev=Lean())
-    assert "always @(posedge clk) if (!stall) begin" in lean["verilog"]
+    here = generate(mod, module_name="d")
+    there = generate(mod, module_name="d", dev=Lean())
+    assert here["pipeline_stages"] == 1 and "rom_roots[" not in here["verilog"]
+    assert there["pipeline_stages"] == 2 and "rom_roots[" in there["verilog"]
 
 
 def signed_index(img, knot):

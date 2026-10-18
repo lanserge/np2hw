@@ -40,6 +40,7 @@ class _Printer:
         self.frame: dict[str, str] = {}       # parameter -> run-time register
         self.names: dict[int, str] = {}
         self.lines: list[str] = []
+        self.roms: dict[str, list[str]] = {}
         self.k = 0
 
     def name(self, v: Value) -> str:
@@ -151,6 +152,21 @@ class _Printer:
                         f": {tree(base, bit - 1)})")
             top = max(1, (len(choices) - 1).bit_length())
             return self.wire(v, tree(0, top - 1))
+        if k == "hw.rom":
+            # contents inline; the address it reads is the stage register
+            # before it, so the tools build the table as a ROM
+            name = f"rom_{n.attr('name')}"
+            data = n.attr("data")
+            if name not in self.roms:
+                lo, hi = min(data), max(data)
+                t = Type((), ("x", 0), min(lo, 0), max(hi, 0))
+                self.roms[name] = [
+                    f"    reg {'signed ' if lo < 0 else ''}"
+                    f"[{t.bits - 1}:0] {name} [0:{len(data) - 1}];",
+                    "    initial begin",
+                    *(f"        {name}[{i}] = {d};" for i, d in enumerate(data)),
+                    "    end"]
+            return self.wire(v, f"{name}[{self.name(ops[0])}]")
         if k == "hw.read":
             return self.name(ops[0])        # the value; its register is a stage's
         if k == "hw.cat":
@@ -287,6 +303,7 @@ def generate(unit: Unit, module_name: str, dev=None,
         m = mems[0]
         seams = [""] + _memory_module(f"{module_name}_mem", m["bits"],
                                       m["depth"], m["aw"])
+    decls += [line for rom in p.roms.values() for line in rom]
     verilog = "\n".join(head + decls + p.lines + body + assigns +
                         ["endmodule"] + seams)
     interface = _interface(img.bits, f["out_bits"], f["out_signed"], params)

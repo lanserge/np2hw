@@ -187,6 +187,9 @@ for _k in (
     # one of n choices by an index: the shape a lookup table selects in,
     # costed by the device's own mux arity (Device.mux_levels)
     Kind("hw.mux", _P, None, _mux, _verify_mux),
+    # a constant table the device makes a memory: operand 0 its address,
+    # `data` its contents; read through a register, a stage of its own
+    Kind("hw.rom", _P, 1, lambda g, ts, a: _t(min(a["data"]), max(a["data"]))),
     # a table read the device makes a read of its own (Device.gather_is_read):
     # its value unchanged, a stage boundary after it when stages are cut
     Kind("hw.read", _P, 1, _un(lambda x, a: (x.lo, x.hi))),

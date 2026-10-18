@@ -254,10 +254,13 @@ def rewrite(c: Canonical, dev=None):
                 data = [int(v) for v in obj.data]
                 size = len(data)
                 if not fam.rom_in_logic(size):
-                    raise Unsupported(
-                        f"{name}: a {size}-entry constant table is a memory on "
-                        f"{fam.name} -- a read through a register, a stage "
-                        "the pointwise family does not schedule")
+                    if index.type.lo < 0 or index.type.hi >= size:
+                        raise Unsupported(f"{name}: an index reaching "
+                                          f"{index.type.hi}, past its {size} "
+                                          "entries")
+                    # a memory: its contents inline, read through a register,
+                    # a stage of its own (the schedule's)
+                    return g.op("hw.rom", index, name=name, data=tuple(data))
 
                 def entry(i):
                     return g.op("hw.const", value=data[i])
@@ -570,8 +573,12 @@ def schedule(clk_ns=None, dev=None) -> Pass:
 
     def run_(unit: Unit) -> Unit:
         unit.facts["stages"] = 1
-        if clk_ns is None:
+        # a constant table's memory read takes a stage whatever the budget:
+        # with none, the only cuts are the reads'
+        roms = any(n.kind == "hw.rom" for n in walk([unit.roots["data"]]))
+        if clk_ns is None and not roms:
             return unit
+        budget = float("inf") if clk_ns is None else clk_ns
         from ..timing import Depth, device
         from .pipeline import _cost
         fam = device(dev)
@@ -581,10 +588,10 @@ def schedule(clk_ns=None, dev=None) -> Pass:
             if n.kind in _FLOATING:
                 continue
             cost = _cost(n, fam)
-            if fam.ns(cost) > clk_ns:
+            if fam.ns(cost) > budget:
                 raise ValueError(
                     f"{n.kind} alone estimates {fam.ns(cost):.1f} ns against "
-                    f"the {clk_ns:.1f} ns budget on {fam.name} -- a pipeline "
+                    f"the {budget:.1f} ns budget on {fam.name} -- a pipeline "
                     "register cannot land inside one operation. Slow the "
                     "clock or restructure the model.")
             staged = [o.node for o in n.operands if o.node.kind not in _FLOATING]
@@ -593,14 +600,20 @@ def schedule(clk_ns=None, dev=None) -> Pass:
                 # a read owns its stage: what it read lands in the next,
                 # through the register the stage boundary is, at the
                 # clock-to-out the device costs a read at
-                stage[id(n)], depth[id(n)] = s + 1, fam.mem()
+                if clk_ns is not None:
+                    stage[id(n)], depth[id(n)] = s + 1, fam.mem()
+                    continue
+            if n.kind == "hw.rom":
+                # a memory read: its address registered at the end of the
+                # stage that computes it, its word in the next -- always
+                stage[id(n)], depth[id(n)] = s + 1, cost
                 continue
             below = Depth()
             for o in staged:
                 if stage[id(o)] == s:
                     below = fam.worst(below, depth[id(o)])
             d = below + cost
-            if fam.ns(d) > clk_ns:
+            if fam.ns(d) > budget:
                 s, d = s + 1, cost
             stage[id(n)], depth[id(n)] = s, d
         root = unit.roots["data"].node

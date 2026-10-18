@@ -82,7 +82,7 @@ def _cost(n, dev):
         return dev.absolute(n.value.type.bits)
     if k in ("hw.sel", "hw.and", "hw.or"):
         return dev.select()
-    if k == "hw.memread":
+    if k in ("hw.memread", "hw.rom"):
         return dev.mem()
     if k == "hw.mux":
         return Depth(levels=dev.mux_levels(len(n.operands) - 1))

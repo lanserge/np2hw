@@ -389,6 +389,10 @@ def canonicalise(t: Traced) -> Canonical:
     r = _Rebuild(t)
     for n in walk([t.output]):
         r.map[id(n)] = r.node(n)
+    # a model may use only where its pixels are, never their values: its
+    # source is still the stream it is given
+    if id(t.source.node) not in r.map:
+        r.map[id(t.source.node)] = r.node(t.source.node)
     c = Canonical(r.g, r.map[id(t.source.node)], r.map[id(t.output.node)],
                   t.image, registers_in_order(t.output))
     return _Selects(c).run()
