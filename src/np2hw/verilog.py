@@ -1539,8 +1539,20 @@ def generate(out_line, module_name="np2hw_top", framing="height",
     if isinstance(out_line, CoreModule):
         from .core import emit
         from .core.pipeline import stage_ns
-        fits = clk_ns is None or stage_ns(out_line, dev) <= clk_ns
+        import os
+        from .core.trace import Unsupported
+        try:
+            built = out_line.for_device(dev)
+        except Unsupported:
+            # this device builds something here the new compiler does not
+            # yet (a constant table as a memory): the reference does, below
+            if os.environ.get("NP2HW_CORE") == "strict":
+                raise
+            built = None
+        fits = built is not None and (clk_ns is None
+                                      or stage_ns(built, dev) <= clk_ns)
         if framing == "height" and max_width is None and fits:
+            out_line = built
             return _stamp_stream_geometry(
                 emit.generate(out_line.unit, module_name, dev, frame=frame),
                 out_line)
@@ -1550,6 +1562,8 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         # dtypes; the reference computes an expression exactly, so a model
         # whose arithmetic overflows a dtype comes out of them differently,
         # and an option must not change what a model computes.
+        why = ("this device's tables" if built is None else
+               "clk_ns" if not fits else "framing/max_width")
         core_facts = emit.generate(out_line.unit, module_name, dev)
         from .trace import reference, trace as trace_graph
         fn, image, params, channels = out_line.recipe
@@ -1564,7 +1578,7 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         if want != got:
             raise ValueError(
                 f"{module_name}: the reference compiler, which "
-                f"{'clk_ns' if not fits else 'framing/max_width'} needs, "
+                f"{why} needs, "
                 f"lowers this model to a {got[0]}-bit output where the new "
                 f"compiler makes {want[0]} bits -- its arithmetic leaves a "
                 "dtype that NumPy wraps and the reference does not. Widen the "

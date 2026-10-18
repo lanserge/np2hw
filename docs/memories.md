@@ -110,10 +110,11 @@ composition can gather these into its build report; revela does.
 
 ## What this does not cover
 
-- **Constant tables** (`np.take` on a literal array — a tone curve's
-  knots) are read through a register and are small; they synthesise as
-  logic or as a ROM at the integrator's choice and are not behind the
-  seam.
+- **Constant tables** (`np2hw.Rom`) are built as the device decides
+  (`Device.rom_in_logic`): a small one as logic, its contents constants
+  read in the stage that uses them, and a larger one as an initialised
+  memory read through a register, which the tools build as a ROM. Either
+  way they are not behind the seam.
 - **The clock-crossing FIFO** (`cdc_fifo`) is a dual-clock memory, which
   is a different macro and a different contract; its seam is a separate
   one (Next).

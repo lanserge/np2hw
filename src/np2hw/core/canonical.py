@@ -33,6 +33,33 @@ class Canonical:
     source: Value
     output: Value
     image: object
+    # the registers and register arrays by name, in the order the module
+    # lists their ports (registers_in_order)
+    registers: tuple = ()
+
+
+def registers_in_order(output: Value) -> tuple:
+    """The model's registers and register arrays by name, in the order the
+    generated module lists their ports -- the order the reference's
+    expression generators list them in, so a core's interface does not
+    depend on which compiler built it: met walking the FAITHFUL record from
+    the output, depth first, each node's operands in the order the model
+    wrote them -- a table read by its index -- each name at its first
+    meeting. Read from the record, not the canonical graph, which orders
+    commutative operands for recognising. (A register's ADDRESS is not
+    this: it is the block's own declaration's.)"""
+    seen: dict = {}
+    visited: set = set()
+    stack = [output.node]
+    while stack:
+        n = stack.pop()
+        if id(n) in visited:
+            continue
+        visited.add(id(n))
+        if n.kind in ("model.param", "model.table"):
+            seen.setdefault(n.attr("name"), None)
+        stack.extend(reversed([o.node for o in n.operands]))
+    return tuple(seen)
 
 
 def _needs_wrap(v: Value, c) -> bool:
@@ -171,7 +198,8 @@ class _Selects:
             self.map[id(n)] = self.node(n)
         return Canonical(self.g, self.map.get(id(self.c.source.node),
                                               self.c.source),
-                         self.map[id(self.c.output.node)], self.c.image)
+                         self.map[id(self.c.output.node)], self.c.image,
+                         self.c.registers)
 
     def node(self, n: Node) -> Value:
         g = self.g
@@ -362,5 +390,5 @@ def canonicalise(t: Traced) -> Canonical:
     for n in walk([t.output]):
         r.map[id(n)] = r.node(n)
     c = Canonical(r.g, r.map[id(t.source.node)], r.map[id(t.output.node)],
-                  t.image)
+                  t.image, registers_in_order(t.output))
     return _Selects(c).run()

@@ -80,11 +80,16 @@ def main():
     # One wire namespace across the three channel DAGs: each input lane
     # is a FIELD TAP extracted exactly once, shared by every output
     # channel that reads it -- not re-derived per use.
-    lanes = core.verilog.count(", in_data[")
+    # each extraction from the input word, as either compiler writes it:
+    # the reference as a slice of in_data in a concatenation, np2hw.core as
+    # a wire of its own reading in_data whole, which its field is cut from
+    lanes = (core.verilog.count(", in_data[")
+             + core.verilog.count(" = in_data;"))
     iface = core["interface"]["output"]
     print(f"  channels={core['channels']} out_bits={core.out_bits} "
-          f"field_bits={iface['field_bits']} lane-taps={lanes} "
-          f"expr_nodes={core['expr_nodes']}")
+          f"field_bits={iface['field_bits']} lane-taps={lanes}"
+          + (f" expr_nodes={core['expr_nodes']}"
+             if "expr_nodes" in core else ""))
     shape_ok = (core["channels"] == 3 and core.out_bits == BITS
                 and iface["field_bits"] == FIELD and iface["channels"] == 3
                 and lanes == 3 and core.line_buffers == 0)

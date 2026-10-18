@@ -177,6 +177,12 @@ class Array:
             return window
         idx = []
         for k, axis in zip(key, self.v.type.axes):
+            if axis is not None and isinstance(k, slice) and k == slice(None):
+                # the whole axis, in order: its own variable, so `x[..., k]`
+                # is still x's frame -- a variable of its own would be a
+                # second lattice that only happens to have the same count
+                idx.append(g.op("model.var", name=axis))
+                continue
             dim = 1 if axis is None else g.vars.count(axis)
             idx.append(self._index(k, dim))
         return self._op("model.access", self.v, *idx)

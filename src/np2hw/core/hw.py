@@ -94,6 +94,23 @@ def _bits(x, a):
     return 0, top
 
 
+def _cat(g, ts, a):
+    """Fields into a word, operand 0 in the low bits, each `field` bits:
+    the exact range of the word they make."""
+    f = a["field"]
+    return _t(sum(t.lo << (f * i) for i, t in enumerate(ts)),
+              sum(t.hi << (f * i) for i, t in enumerate(ts)))
+
+
+def _verify_cat(g, n):
+    f = n.attr("field")
+    for i, o in enumerate(n.operands):
+        if o.type.lo < 0 or o.type.hi >= 1 << f:
+            raise GraphError(f"bit assembly: field {i} holds "
+                             f"[{o.type.lo}, {o.type.hi}], not {f} unsigned "
+                             "bits", n.loc)
+
+
 def _sel(g, ts, a):
     c, x, y = ts
     return _t(min(x.lo, y.lo), max(x.hi, y.hi))
@@ -151,6 +168,8 @@ for _k in (
     Kind("hw.sel", _P, 3, _sel),
     Kind("hw.wrap", _P, 1, _un(_wrap)),
     Kind("hw.bits", _P, 1, _un(_bits)),
+    # bit assembly: fields into a word, operand 0 lowest
+    Kind("hw.cat", _P, None, _cat, _verify_cat),
     # the position of the pixel being taken along a driving variable: the
     # rewrite pass's reference, replaced by its counter in the control pass
     Kind("hw.position", _P, 0, lambda g, ts, a: _t(0, a["count"] - 1)),

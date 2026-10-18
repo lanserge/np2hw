@@ -106,10 +106,12 @@ class Device:
     mem_ns = None              # a memory's clock-to-out (registered read)
     carry_chain_ns = None      # starting one carry chain, and leaving it
     lut_inputs = None          # how many inputs one lookup table has
+    rom_logic_entries = None   # the most entries a constant table built as
+                               # logic has (rom_in_logic)
 
     _REQUIRED = ("name", "level_ns", "carry_ns_per_bit", "dsp_ns",
                  "mul_attribute", "overhead_ns", "mem_ns", "carry_chain_ns",
-                 "lut_inputs")
+                 "lut_inputs", "rom_logic_entries")
 
     def __init__(self):
         missing = [f for f in self._REQUIRED if getattr(self, f) is None]
@@ -158,6 +160,16 @@ class Device:
         by how many inputs a lookup table has, like every tree here."""
         per = _clog2(self.lut_inputs)
         return max(1, -(-_clog2(max(terms, 2)) // per))
+
+    def rom_in_logic(self, entries: int) -> bool:
+        """Whether a constant table of `entries` is built as LOGIC -- its
+        contents constants, read through a select tree in the stage that
+        uses it -- or as a MEMORY, an initialised block read through a
+        register, a stage of its own. A question about the device, not the
+        model: the table computes the same values either way, and only
+        what it costs differs. Width does not enter: each output bit is a
+        table of its own, the same shape whatever the word's width."""
+        return entries <= self.rom_logic_entries
 
     def wire(self) -> Depth:
         """Costs nothing: a register output, a constant, a mask, a
@@ -313,6 +325,10 @@ class Series7(Device):
     # path, so still fitted rather than swept.
     carry_chain_ns = 0.5
     lut_inputs = 6
+    # A slice's four 6-input LUTs and its F7/F8 multiplexers read one bit of
+    # a 256-entry table in one level of logic: a slice per output bit, where
+    # block RAM would take a tile and a stage of its own.
+    rom_logic_entries = 256
 
 
 SERIES7 = Series7()

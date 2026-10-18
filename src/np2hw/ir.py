@@ -78,10 +78,13 @@ class Rom:
 
     A `Param` array is one register per entry -- exactly right for the
     33 knots of a tone curve, and absurd for the 16384 pixels of a
-    logo. A Rom is the same read with the contents baked: an
-    initialised memory, addressed by a data-derived index, and read
-    through a register so the tools infer block RAM rather than
-    building a mux tree the size of the table.
+    logo. A Rom is the same read with the contents baked, addressed by a
+    data-derived index. How it is built is the device's question, not
+    this object's (np2hw.timing.Device.rom_in_logic): a table small
+    enough is logic, its contents constants read in the stage that uses
+    them; a larger one is an initialised memory read through a register,
+    a stage of its own, so the tools infer block RAM rather than a mux
+    tree the size of the table. Either way it reads the same values.
 
     Indexed by a TRACED value it becomes hardware; indexed by an
     ordinary integer or array it is plain NumPy, so a model that reads

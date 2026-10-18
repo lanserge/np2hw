@@ -134,6 +134,14 @@ class _Printer:
             if k == "hw.wrap" and n.attr("signed") and _signed(v):
                 return self.wire(v, f"$signed({field})")
             return self.wire(v, field)
+        if k == "hw.cat":
+            f = n.attr("field")
+            parts = []
+            for o in reversed(ops):
+                w = o.type.bits
+                parts.append(self.name(o) if w == f else
+                             f"{{{f - w}'b0, {self.name(o)}}}")
+            return self.wire(v, f"{{{', '.join(parts)}}}")
         raise NotImplementedError(f"no printing for {k}")
 
 
@@ -248,10 +256,14 @@ def generate(unit: Unit, module_name: str, dev=None,
         # a window passes the packed word through: its channels as they came
         interface["output"]["channels"] = f["channels"]
         interface["output"]["field_bits"] = img.bits // f["channels"]
+    if f.get("out_channels", 1) > 1:
+        # a stack: its channels in one word, channel 0 lowest
+        interface["output"]["channels"] = f["out_channels"]
+        interface["output"]["field_bits"] = f["out_field"]
     return Core({
         "verilog": verilog,
         "interface": interface,
-        "channels": f.get("channels", 1),
+        "channels": f.get("out_channels", f.get("channels", 1)),
         "weighted": {(0, 0): 1},
         "in_bits": img.bits,
         "out_bits": f["out_bits"],

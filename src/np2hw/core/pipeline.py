@@ -19,15 +19,27 @@ from .trace import trace
 class CoreModule:
     """A model lowered by the new compiler, ready to print. `recipe` is what
     the reference needs to lower it instead, for an option this one does
-    not honour yet."""
+    not honour yet. Lowered for the device `dev`; for another, it is
+    lowered again from the same canonical graph (for_device)."""
     unit: Unit
     image: object
     recipe: tuple
+    canonical: object = None
+    dev: object = None
+
+    def for_device(self, dev) -> "CoreModule":
+        """This model lowered for `dev`: itself, if it already is."""
+        from ..timing import device
+        if device(dev) is device(self.dev) or self.canonical is None:
+            return self
+        return CoreModule(lower(self.canonical, dev), self.image, self.recipe,
+                          self.canonical, dev)
 
 
-def compile(fn, image, *params, channels: int = 1) -> CoreModule:
-    unit = lower(canonicalise(trace(fn, image, *params, channels=channels)))
-    return CoreModule(unit, image, (fn, image, params, channels))
+def compile(fn, image, *params, channels: int = 1, dev=None) -> CoreModule:
+    c = canonicalise(trace(fn, image, *params, channels=channels))
+    return CoreModule(lower(c, dev), image, (fn, image, params, channels),
+                      c, dev)
 
 
 def stage_ns(mod: CoreModule, dev) -> float:
@@ -50,7 +62,7 @@ def stage_ns(mod: CoreModule, dev) -> float:
 def _cost(n, dev):
     k = n.kind
     if k in ("hw.port", "hw.parameter", "hw.const", "hw.param", "hw.regread",
-             "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.not"):
+             "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.cat", "hw.not"):
         return dev.wire()
     if k in ("hw.add", "hw.sub", "hw.neg"):
         return dev.add(n.value.type.bits)

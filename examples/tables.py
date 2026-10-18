@@ -13,7 +13,9 @@ column it is on, because its framing depends on them.
 
 `Rom(data)` is the read whose contents are fixed at generation. A Param
 array is one register per entry, which is right for 33 tone-curve knots
-and impossible for 16384 logo pixels; a Rom is an initialised memory
+and impossible for 16384 logo pixels. How a Rom is built is the device's
+call (Device.rom_in_logic): a table small enough is LOGIC, constants
+read in the stage that uses them; a larger one is an initialised memory
 read THROUGH A REGISTER, which is what makes the tools build block RAM
 instead of a mux tree as deep as the table. That register is not a
 timing hint -- it is the read, so it always takes a stage, budget or no
@@ -27,8 +29,9 @@ than by analogy to logic.
   PINNED        the same model with a budget tight enough to force
                 extra stages: position must ride the delay lines with
                 its pixel, not float like a register port.
-  TABLE         a table read, bit-exact, with the read registered and
-                the framing delayed to match.
+  TABLE         a table read, bit-exact: a small one as logic, in the
+                stage that uses it; a large one with the read registered
+                and the framing delayed to match.
   WINDOW        the overlay shape itself: a bitmap composited at a
                 position, from a table indexed by row*W + col -- the
                 logo block's arithmetic, on a small canvas where the
@@ -63,6 +66,8 @@ SHAPE[3:5, 3:5] = 3
 MARK = Rom(SHAPE.ravel(), name="mark")
 INK = np.array([0, 60, 200, 255], dtype=np.int64)
 PALETTE = Rom(INK, name="ink")
+# a table larger than the device builds as logic: one entry a pixel
+WALL = Rom((np.arange(W * H) * 37) % 251, name="wall")
 
 
 def tint(img):
@@ -85,6 +90,13 @@ def overlay(img):
     entry = MARK[((y - Y0) & (LH - 1)) * LW + ((x - X0) & (LW - 1))]
     return np.where(inside & (entry > 0), PALETTE[entry],
                     img.astype(np.int32)).astype(np.uint8)
+
+
+def wallpaper(img):
+    """A table with an entry for every pixel, read at its position: too
+    large for logic, so a memory read through a register."""
+    y, x = coords(img)
+    return WALL[y * W + x].astype(np.uint8)
 
 
 def main():
@@ -114,12 +126,23 @@ def main():
 
     _, out = to_ir(overlay, Image2D("img", W, H, bits=BITS))
     meta = generate(out, module_name="overlay_shape")
-    registered = "always @(posedge clk) if (!stall) begin" in meta["verilog"]
-    inline = meta["verilog"].count("mark[") >= MARK.data.size
     result("window: the overlay composites where it should", True,
            f"{meta['pipeline_stages']} stages")
-    result("table: read is REGISTERED and contents travel inline",
-           registered and inline)
+    # the mark's 64 entries and the ink's 4: logic, no memory of their own
+    result("table: a small table is logic, in the stage that uses it",
+           meta["memories"] == [] and meta["pipeline_stages"] == 1)
+
+    from np2hw.timing import device
+    result("table: a large table read is bit-exact",
+           check("wall_read", wallpaper, A, bits=BITS))
+    _, out = to_ir(wallpaper, Image2D("img", W, H, bits=BITS))
+    meta = generate(out, module_name="wall")
+    registered = "always @(posedge clk) if (!stall) begin" in meta["verilog"]
+    inline = meta["verilog"].count("wall[") >= WALL.data.size
+    result("table: a large one is a memory, its read REGISTERED and its "
+           "contents inline",
+           not device(None).rom_in_logic(WALL.data.size)
+           and registered and inline)
 
     def runaway(img):
         # index reaches the whole 8-bit range; the table holds 64

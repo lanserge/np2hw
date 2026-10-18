@@ -20,9 +20,10 @@ Checks, each a way the emitter could be wrong:
                  NumPy function on real data.
   IDENTITY       the ramp table reproduces the input exactly: the classic
                  LUT off-by-one (top segment one short) shows here first.
-  STRUCTURE      one register-array mux, shared by both reads -- not one
-                 array per gather; and the gather index is proven in range
-                 at TRACE time, so an unclippable index REFUSES to trace.
+  STRUCTURE      one register array, read by both gathers -- one register
+                 port per knot, not a copy of the array per read; and the
+                 gather index is proven in range at TRACE time, so an
+                 unclippable index REFUSES to trace.
 
 Run:  python examples/pointwise_lut.py   (needs iverilog)
 """
@@ -83,10 +84,14 @@ def main():
 
     _, line = to_ir(pwl, Image2D("img", 8, 6, bits=BITS), *knots_param)
     core = generate(line, module_name="pwl")
-    luts = core.verilog.count("] knots_lut [")
-    reads = core.verilog.count("knots_lut[e")
-    shape_ok = luts == 1 and reads == 2
-    print(f"  one register array ({luts}), shared by both gathers ({reads} reads)")
+    # one port per knot, whichever compiler built the core: a copy of the
+    # array per read would declare each knot twice
+    import re
+    ports = re.findall(r"input\s+wire\s+(?:signed\s+)?\[[^\]]*\]\s*"
+                       r"param_(knots_\d+)", core.verilog)
+    shape_ok = len(ports) == N and len(set(ports)) == N
+    print(f"  one register array, read by both gathers ({len(ports)} knot "
+          f"ports for {N} knots)")
 
     # An index that can escape the table must refuse to trace.
     def runaway(img, knots):
