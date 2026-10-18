@@ -11,8 +11,8 @@ target more than anything else np2hw emits:
 | FPGA, read combinationally | distributed RAM behind a select tree |
 | silicon, either way | **D × W flip-flops** — 23,040 for one 1920-wide 12-bit line |
 
-So the emitters that read their line buffers through a register put the
-array behind a module of its own, and that module is **the memory seam**:
+So every line buffer is read through a register, and its
+array sits behind a module of its own. That module is **the memory seam**:
 the one place an integrator targeting silicon replaces, by name, with a
 memory macro. Nothing else in the generated design knows or cares which
 implementation sits there.
@@ -70,33 +70,29 @@ Four things, and the comment on every emitted seam module says the same:
 Hold and bypass are both cheap, both the integrator's, and both outside
 the seam's contract, which is why the module stays as small as it is.
 
-## Which emitters offer the seam
+## Which memories sit behind a seam
 
-| model shape | emitter | line-buffer read | under `sync_memory=True` |
-| --- | --- | --- | --- |
-| padded — `np.pad(..., mode="edge" \| "constant")` | edge | **registered** | accepted, behind the seam |
-| CFA phases — `out[py::2, px::2] = ...` | phase stencil | **registered** | accepted, behind the seam |
-| unpadded window | general core | combinational | **refused** |
-| `np.where(enable, A, B)` over a window | mux | combinational | **refused** |
-| a stream's recent past | `frame_history` | **registered** | behind its own seam, `<module>_mem`, same four rules; reported in its `memories` |
+| what the model reads | line-buffer read | under `sync_memory=True` |
+| --- | --- | --- |
+| any window -- padded (`mode="edge"` or zero), CFA phases, unpadded, a crop, a filter of a filter's result, `np.where` over a window | **registered**, read a column ahead | accepted, behind the seam, `<module>_linebuf` |
+| a video's past frames | **registered**, read a position ahead | accepted, behind its own seam, `<module>_mem`, same four rules |
+| a stream's recent past (`frame_history`) | **registered** | accepted, behind its own seam, `<module>_mem`, same four rules |
 
-The two combinational readers are not a defect. On an FPGA a
-combinational read is distributed RAM, and for a window that fits it is
-the cheaper choice — which is exactly why an unflagged generate keeps
-emitting it. What `sync_memory=True` states is a fact about the target:
-no SRAM macro implements a combinational read, so a design bound for
-silicon must not contain one. The refusal names the module, the count,
-and the fix (pad the model, or write it as phases).
+What `sync_memory=True` states is a fact about the target: no SRAM macro
+implements a combinational read, so a design bound for silicon must not
+contain one. Every memory above keeps it, so the flag changes nothing that
+is emitted; it is the promise, checked, that a core bound for silicon
+makes, and it refuses -- naming the module, the count and the fix -- any
+core that would break it.
 
 ```python
 generate(out, module_name="blur", sync_memory=True)
-# ValueError: blur: 2 line buffers here read ASYNCHRONOUSLY -- ...
 ```
 
 ## What every core publishes
 
-Whichever way the flag is set, a generated core reports the memories it
-inferred, so an integrator reads the fact instead of grepping for it:
+A generated core reports the memories it inferred, so an integrator reads
+the fact instead of grepping for it:
 
 ```python
 core["memories"]

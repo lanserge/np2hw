@@ -63,6 +63,81 @@ def rewrite(c: Canonical, dev=None):
         # yet: a value computed inside a window belongs to the next block.
         win = c.output.node if c.output.node.kind == "model.window" else None
         out_axes = [find(a) if a else None for a in c.output.type.axes]
+
+        def var_start(v):
+            """An index `var + start`: (its variable, its start) -- or None."""
+            n = v.node
+            while n.kind == "model.expand":     # a broadcast keeps the value
+                n = n.operands[0].node
+            if n.kind == "model.var":
+                return find(n.attr("name")), 0
+            if n.kind == "model.add":
+                a_, b_ = n.operands
+                for x, k in ((a_, b_), (b_, a_)):
+                    inner = var_start(x) if k.node.kind == "model.const" \
+                        else None
+                    if inner is not None:       # starts add up
+                        return inner[0], inner[1] + k.node.attr("value")
+            return None
+
+        # The window rule: reads of a padded buffer, or of the source at an
+        # offset, by the output's own variables at constant starts. Each such
+        # buffer is a WINDOW SOURCE: the spread of its starts is its storage,
+        # line buffers for the rows and shift registers for the columns, and
+        # the latest starts set the lag the output trails the input by.
+        stencil: dict = {}
+        out_frame = None
+        for n in walk([c.output]):
+            if n.kind != "model.access":
+                continue
+            base = n.operands[0].node
+            if base.kind == "model.pad":
+                pad = base
+            elif base is src.node and tsrc is None:
+                rc = [var_start(i) for i in n.operands[1:3]]
+                if all(r is not None and r[1] == 0 and r[0] == a
+                       for r, a in zip(rc, driving)):
+                    continue                    # a pointwise read
+                pad = None
+            else:
+                continue
+            rc = [var_start(i) for i in n.operands[1:3]]
+            if None in rc:
+                raise Unsupported("a window read that is not the output's "
+                                  "frame at a constant offset")
+            if out_frame is None:
+                out_frame = (rc[0][0], rc[1][0])
+            elif out_frame != (rc[0][0], rc[1][0]):
+                raise Unsupported("window reads on two lattices")
+            key = id(base)
+            if key not in stencil:
+                if pad is not None:
+                    (pt, _), (pl, _) = pad.attr("widths")[:2]
+                    zero = pad.attr("mode") == "zero"
+                else:
+                    pt = pl = 0
+                    zero = False
+                stencil[key] = {"node": base, "pad": (pt, pl), "zero": zero,
+                                "taps": set()}
+            stencil[key]["taps"].add((rc[0][1], rc[1][1]))
+        if stencil:
+            if tsrc is not None or win is not None:
+                raise Unsupported("a window over a video, or within a window")
+            # one lag for the core: the most any window reaches past the
+            # output's own pixel. Each source's taps are counted back from
+            # the newest row and column that lag brings -- a source reaching
+            # less keeps more lines, read further back.
+            lag = tuple(max(max(t[i] for t in st["taps"]) - st["pad"][i]
+                            for st in stencil.values()) for i in (0, 1))
+            if min(lag) < 0:
+                raise Unsupported("a window reading ahead of the output")
+            for st in stencil.values():
+                st["max"] = tuple(lag[i] + st["pad"][i] for i in (0, 1))
+                st["K"] = tuple(st["max"][i] - min(t[i] for t in st["taps"]) + 1
+                                for i in (0, 1))
+            frame_vars = list(out_frame)
+        else:
+            frame_vars = None
         # a video's output frames: the output's own variable on time, which
         # every read across time indexes
         tout = out_axes.pop(0) if tsrc is not None and out_axes else None
@@ -72,15 +147,16 @@ def rewrite(c: Canonical, dev=None):
             raise Unsupported("a window over a video")
         # a stack of the frame's values along a last axis: channels of one
         # word, as np2hw packs every multi-channel stream
+        frame = frame_vars or driving
         lanes = (c.output.node.operands
                  if c.output.node.kind == "model.stack"
-                 and out_axes == driving + [find(c.output.node.attr("var"))]
+                 and out_axes == frame + [find(c.output.node.attr("var"))]
                  else None)
         if win is not None:
             if win.operands[0].node is not src.node:
                 raise Unsupported("a window over a computed value: window "
                                   "the source, and compute in the next block")
-        elif lanes is None and out_axes != driving:
+        elif lanes is None and out_axes != frame:
             raise Unsupported("an output that is not the source's frame")
         g = Graph(intern=True, locations=False)
         g.vars = mg.vars
@@ -164,10 +240,16 @@ def rewrite(c: Canonical, dev=None):
             if k == "model.access":
                 if n.operands[0].node.kind == "model.table":
                     return lookup(n, ops[1])
+                if id(n.operands[0].node) in stencil:
+                    return tap(n)
                 return field_of(n)
+            if k == "model.pad":
+                return None                         # only its reads are lowered
             if k == "model.var":
                 v = find(n.attr("name"))
-                if v not in driving and v != tout:
+                # a position is data only where the control pass finds it
+                # read: the output's, or the source's beside no window
+                if v not in (frame_vars or []) + driving and v != tout:
                     raise Unsupported(f"variable {v} used as data")
                 return g.op("hw.position", var=v, count=mg.vars.count(v))
             if k == "model.expand":
@@ -237,11 +319,15 @@ def rewrite(c: Canonical, dev=None):
             family does not schedule."""
             name = n.operands[0].node.attr("name")
             obj = mg.symbols[name]["object"]
-            if index.type.lo < 0:
-                raise Unsupported(f"{name}: an index that can be negative "
-                                  f"([{index.type.lo}, {index.type.hi}])")
+            size = obj.shape[0] if isinstance(obj, Param) else len(obj.data)
+            if index.type.lo < 0 or index.type.hi >= size:
+                # the model's error, not the compiler's: NumPy would raise
+                # on such a frame, and hardware has nothing to raise
+                raise ValueError(
+                    f"{name}[{size}]: the index can reach [{index.type.lo}, "
+                    f"{index.type.hi}], which falls outside the table. Mask "
+                    "or clip the index first; hardware has no IndexError.")
             if isinstance(obj, Param):              # a register array
-                size = obj.shape[0]
 
                 def entry(i):
                     leaf = obj[i]
@@ -252,22 +338,14 @@ def rewrite(c: Canonical, dev=None):
                                 signed=bool(leaf.signed))
             else:                                   # a constant table
                 data = [int(v) for v in obj.data]
-                size = len(data)
                 if not fam.rom_in_logic(size):
-                    if index.type.lo < 0 or index.type.hi >= size:
-                        raise Unsupported(f"{name}: an index reaching "
-                                          f"{index.type.hi}, past its {size} "
-                                          "entries")
                     # a memory: its contents inline, read through a register,
                     # a stage of its own (the schedule's)
                     return g.op("hw.rom", index, name=name, data=tuple(data))
 
                 def entry(i):
                     return g.op("hw.const", value=data[i])
-            top = min(index.type.hi, size - 1)
-            if index.type.hi > size - 1:
-                raise Unsupported(f"{name}: an index reaching "
-                                  f"{index.type.hi}, past its {size} entries")
+            top = index.type.hi
             # the entries the index can reach, chosen by it
             out = (entry(0) if top == 0 else
                    g.op("hw.mux", index, *(entry(i) for i in range(top + 1))))
@@ -277,6 +355,37 @@ def rewrite(c: Canonical, dev=None):
             if isinstance(obj, Param) and fam.gather_is_read(size):
                 return g.op("hw.read", out)
             return out
+
+        def tap(n) -> Value:
+            """A read of a window source at (start row, start column): the
+            value `a` rows and `b` columns back from the newest in its
+            window, which the control pass builds from line buffers, shift
+            registers and the edge rule. Reading a channel of the source
+            directly, the field of the word it keeps."""
+            base = n.operands[0].node
+            st = stencil[id(base)]
+            if "value" not in st:
+                # what the window keeps: the padded value, as this pixel has
+                # it -- or the source's whole word, read at an offset
+                kept = (values[id(base.operands[0].node)] if base.kind ==
+                        "model.pad" else port_in())
+                if kept is None:
+                    raise Unsupported("a window over a value the pointwise "
+                                      "family does not compute")
+                st["value"] = kept
+            kept = st["value"]
+            (_, dr), (_, dc) = (var_start(i) for i in n.operands[1:3])
+            t = g.op("hw.tap", key=id(base), a=st["max"][0] - dr,
+                     b=st["max"][1] - dc, lo=kept.type.lo, hi=kept.type.hi)
+            if base.kind == "model.pad":
+                return t
+            rest = n.operands[3:]
+            if not chan:
+                return t
+            if not rest or rest[0].node.kind != "model.const":
+                raise Unsupported("a read the pointwise family does not take")
+            ch = rest[0].node.attr("value")
+            return g.op("hw.bits", t, lo=ch * field, width=field)
 
         def field_of(n) -> Value:
             """An access of the source by its own driving variables, and by a
@@ -362,6 +471,14 @@ def rewrite(c: Canonical, dev=None):
         # register ports in the order the reference lists them
         # (canonical.registers_in_order); a register array's entries at its
         # place, by index
+        if stencil:
+            unit.facts["stencil"] = {
+                "lag": lag, "out": (mg.vars.count(frame_vars[0]),
+                                    mg.vars.count(frame_vars[1])),
+                "vars": frame_vars,
+                "sources": [{"key": k, "value": st["value"], "K": st["K"],
+                             "zero": st["zero"]}
+                            for k, st in stencil.items() if "value" in st]}
         if tsrc is not None:
             # frames the output waits for (the live read's start), and the
             # store: how many, and the word it keeps per position
@@ -396,6 +513,161 @@ def _substitute(g: Graph, roots: dict, fn) -> dict:
     return {k: go(v) for k, v in roots.items()}
 
 
+def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
+                     in_sof, out_ready) -> Unit:
+    """The control of a core with windows (docs/one-graph.md, the window
+    rule and decision 7). Its counters run over a STEP raster -- the output's
+    frame grown by the lag, (H_out + L_r) x (W_out + L_c), or the input's
+    where the input reaches further (a crop's rows and columns past its
+    window, which are taken and never read) -- one step a beat: a step takes an input pixel while it lies inside the input's
+    frame, and gives an output pixel once it is past the lag. The steps
+    past the input's frame are FLUSH steps, which take nothing and hold the
+    next frame back through `in_ready`; the frame's start re-anchors the
+    steps only at a step that wants a pixel, so a frame waiting while the
+    last is flushed waits.
+
+    Each window source keeps its rows in line buffers, read a column ahead
+    so a column's word lands as its step arrives, and its columns in a
+    shift register a row. The edge rule is the pad's. Replicate: a row or
+    column before the frame's first reads the first -- a select on the
+    step's position -- and one past its last reads the last, because a
+    flush step feeds the last row or column back in as the newest. Zero:
+    the same selects, and the same flush, with zero in place of the edge."""
+    img = unit.facts["image"]
+    st = unit.facts["stencil"]
+    H, W = img.height, img.width
+    (lr, lc), (ho, wo) = st["lag"], st["out"]
+    # a crop's TAIL: input rows and columns past the window's last
+    tr, tc = H - ho - lr, W - wo - lc
+    hs, ws = max(ho + lr, H), max(wo + lc, W)
+    LT = lambda x, y: g.op("hw.lt", x, y)
+    GE = lambda x, y: g.op("hw.ge", x, y)
+    clip = lambda x, hi: g.op("hw.clip", x, lo=0, hi=hi)
+    one = lambda x: g.op("hw.add", x, c(1))
+    # The frame as it arrives: the build's size, or at a run-time size the
+    # frame's own (the printer reads WIDTH and HEIGHT from the frame
+    # registers then), never more than the build's. The steps' last row and
+    # column follow it: the output's frame -- the input's, less any border
+    # an unpadded window drops -- grown by the lag, or with a tail the
+    # input's own. An axis with a tail has the slice's own extent, so its
+    # output ends where the slice does.
+    extent = dict(lo=1, hi=(1 << POS) - 1, bits=POS)
+    fw = g.op("hw.parameter", name="WIDTH", **extent)
+    fh = g.op("hw.parameter", name="HEIGHT", **extent)
+    last_c = g.op("hw.add", fw, c(ws - W - 1))
+    last_r = g.op("hw.add", fh, c(hs - H - 1))
+    out_c = c(lc + wo - 1) if tc > 0 else last_c
+    out_r = c(lr + ho - 1) if tr > 0 else last_r
+
+    cy = reg_symbol("step_r", 0, hs - 1, 0)
+    cx = reg_symbol("step_c", 0, ws - 1, 0)
+    wants = AND(LT(cy, fh), LT(cx, fw))
+    anchor = AND(AND(in_valid, in_sof), wants)
+    ey, ex = SEL(anchor, c(0), cy), SEL(anchor, c(0), cx)
+    valid = reg_symbol("out_valid", 0, 1, 0)
+    ready = NOT(AND(valid, NOT(out_ready)))
+    take = SEL(wants, in_valid, c(1))            # a pixel, or a flush step
+    go = AND(ready, take)
+    line_end = EQ(ex, last_c)
+    # past each counter's last step the select takes 0, so the clip changes
+    # no value
+    nx = SEL(line_end, c(0), clip(one(ex), ws - 1))
+    ny = SEL(line_end, SEL(EQ(ey, last_r), c(0), clip(one(ey), hs - 1)),
+             ey)
+    unit.regs.append(g.node("hw.reg", [nx, go], {"name": "step_c"}))
+    unit.regs.append(g.node("hw.reg", [ny, go], {"name": "step_r"}))
+
+    emit = AND(GE(ey, c(lr)), GE(ex, c(lc)))
+    if tr > 0:
+        emit = AND(emit, LT(ey, c(lr + ho)))
+    if tc > 0:
+        emit = AND(emit, LT(ex, c(lc + wo)))
+    out_eol = EQ(ex, out_c)
+    flags = {"valid": emit,
+             "sof": AND(emit, AND(EQ(ey, c(lr)), EQ(ex, c(lc)))),
+             "eol": AND(emit, out_eol),
+             "last": AND(emit, AND(EQ(ey, out_r), out_eol))}
+
+    taps, mems = {}, []
+    aw = max(1, (W - 1).bit_length())
+    # the column the next step reads: a column ahead, the next line's first
+    # after the last
+    ahead = SEL(LT(nx, fw), clip(nx, W - 1), c(0))
+    for j, src in enumerate(st["sources"]):
+        val = src["value"]
+        kr, kc = src["K"]
+        zero = src["zero"]
+        if val.type.lo < 0:
+            raise Unsupported("a window over a value that can be negative")
+        bits = max(1, val.type.hi.bit_length())
+        word = dict(lo=0, hi=(1 << bits) - 1)
+        reads = [g.op("hw.memread", name=f"lb{j}_{a}", **word)
+                 for a in range(1, kr)]
+        # the newest row: this pixel's value, or past the frame's last row
+        # the last row again
+        cur = val if kr == 1 else SEL(LT(ey, fh), val,
+                                      c(0) if zero else reads[0])
+        rows_v = [cur]
+        for a in range(1, kr):
+            # a row before the frame's first reads the first
+            rows_v.append(SEL(GE(ey, c(a)), reads[a - 1],
+                              c(0) if zero else rows_v[a - 1]))
+        for a in range(1, kr):
+            name = f"lb{j}_{a}"
+            unit.roots.update({
+                f"mem_{name}_we": AND(go, LT(ex, fw)),
+                f"mem_{name}_wa": g.op("hw.bits", ex, lo=0, width=aw),
+                f"mem_{name}_wd": cur if a == 1 else reads[a - 2],
+                f"mem_{name}_re": go, f"mem_{name}_ra": ahead})
+            mems.append({"instance": f"u_{name}", "name": name, "bits": bits,
+                         "depth": W, "aw": aw, "read": "sync",
+                         "seam": "linebuf"})
+        for a in range(kr):
+            names = [f"sr{j}_{a}_{b}" for b in range(1, kc)]
+            regs = [reg_symbol(n, 0, (1 << bits) - 1, None) for n in names]
+            # the newest column: the row's word here, or past the line's
+            # last column the last again
+            col = rows_v[a] if kc == 1 else SEL(LT(ex, fw), rows_v[a],
+                                                 c(0) if zero else regs[0])
+            for b, n in enumerate(names, start=1):
+                unit.regs.append(g.node(
+                    "hw.reg", [col if b == 1 else regs[b - 2], go],
+                    {"name": n}))
+            cols_v = [col]
+            for b in range(1, kc):
+                # a column before the line's first reads the first
+                cols_v.append(SEL(GE(ex, c(b)), regs[b - 1],
+                                  c(0) if zero else cols_v[b - 1]))
+            for b in range(kc):
+                taps[(src["key"], a, b)] = cols_v[b]
+
+    out = dict(zip(st["vars"], ((ey, lr), (ex, lc))))
+
+    def substitute(n):
+        if n.kind == "hw.tap":
+            return taps[(n.attr("key"), n.attr("a"), n.attr("b"))]
+        if n.kind == "hw.position":
+            v = n.attr("var")
+            if v not in out:
+                raise Unsupported("the source's position used as data "
+                                  "beside a window")
+            at, lag = out[v]
+            w = max(1, (n.attr("count") - 1).bit_length())
+            return g.op("hw.bits", g.op("hw.sub", at, c(lag)) if lag else at,
+                        lo=0, width=w)
+        return None
+
+    roots = _substitute(g, unit.roots, substitute)
+    unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()}}
+    unit.facts.update(go=go, ready=ready, in_valid=in_valid, take=take,
+                      in_ready=AND(ready, wants), memories=mems,
+                      out_size=(ho, wo), border=(H - ho, W - wo),
+                      # cycles past a frame's last pixel taken until its
+                      # output is out: the flush steps left, and a margin
+                      drain=(lr + 1) * ws + 8)
+    return unit
+
+
 def control() -> Pass:
     """Each driving variable of the source gets a counter -- the innermost
     advancing on every accepted beat, the outer when the inner wraps -- and
@@ -426,6 +698,9 @@ def control() -> Pass:
             g.symbols[name] = {"lo": lo, "hi": hi, "init": init}
             return g.op("hw.regread", name=name)
 
+        if "stencil" in unit.facts:
+            return _stencil_control(unit, g, c, AND, NOT, EQ, SEL,
+                                    reg_symbol, in_valid, in_sof, out_ready)
         cnt = {v: reg_symbol(f"cnt_{v}", 0, (1 << POS) - 1, 0)
                for v in (rows, cols)}
         valid = reg_symbol("out_valid", 0, 1, 0)
@@ -529,7 +804,8 @@ def control() -> Pass:
                     "mem_hist_re": go, "mem_hist_ra": ahead})
                 unit.facts["memories"] = [{
                     "instance": "u_hist", "name": "hist", "bits":
-                    stores * word, "depth": size, "aw": aw, "read": "sync"}]
+                    stores * word, "depth": size, "aw": aw, "read": "sync",
+                    "seam": "mem"}]
 
         def position(n):
             """The datapath's position along a variable: the counter at this
@@ -575,7 +851,10 @@ def schedule(clk_ns=None, dev=None) -> Pass:
         unit.facts["stages"] = 1
         # a constant table's memory read takes a stage whatever the budget:
         # with none, the only cuts are the reads'
-        roms = any(n.kind == "hw.rom" for n in walk([unit.roots["data"]]))
+        # the datapath and the flags beside it: what the output stage reads
+        outs = [unit.roots["data"]] + [v for k, v in unit.roots.items()
+                                       if k.startswith("flag_")]
+        roms = any(n.kind == "hw.rom" for n in walk(outs))
         if clk_ns is None and not roms:
             return unit
         budget = float("inf") if clk_ns is None else clk_ns
@@ -584,13 +863,14 @@ def schedule(clk_ns=None, dev=None) -> Pass:
         fam = device(dev)
         stage: dict = {}
         depth: dict = {}
-        for n in walk([unit.roots["data"]]):
+        for n in walk(outs):
             if n.kind in _FLOATING:
                 continue
             cost = _cost(n, fam)
             if fam.ns(cost) > budget:
                 raise ValueError(
-                    f"{n.kind} alone estimates {fam.ns(cost):.1f} ns against "
+                    f"operation '{n.kind.split('.', 1)[1]}' alone estimates "
+                    f"{fam.ns(cost):.1f} ns against "
                     f"the {budget:.1f} ns budget on {fam.name} -- a pipeline "
                     "register cannot land inside one operation. Slow the "
                     "clock or restructure the model.")
@@ -616,8 +896,7 @@ def schedule(clk_ns=None, dev=None) -> Pass:
             if fam.ns(d) > budget:
                 s, d = s + 1, cost
             stage[id(n)], depth[id(n)] = s, d
-        root = unit.roots["data"].node
-        unit.facts["stages"] = stage.get(id(root), 0) + 1
+        unit.facts["stages"] = max(stage.get(id(v.node), 0) for v in outs) + 1
         unit.facts["stage_of"] = stage
         return unit
 
@@ -637,7 +916,10 @@ def materialise() -> Pass:
         g, f = unit.g, unit.facts
         data = unit.roots["data"]
         stages = f.get("stages", 1)
-        outputs = {"in_ready": f["ready"]}
+        outputs = {"in_ready": f.get("in_ready", f["ready"])}
+        # what makes a step's flags real: an input pixel taken, or a step
+        # that needs none (a window's flush)
+        taken_by = f.get("take", f["in_valid"])
         if stages == 1:
             g.symbols["out_data"] = {"lo": data.type.lo, "hi": data.type.hi,
                                      "init": None}
@@ -647,7 +929,7 @@ def materialise() -> Pass:
                 name = f"out_{flag}"
                 g.symbols.setdefault(name, {"lo": 0, "hi": 1, "init": 0})
                 unit.regs.append(g.node(
-                    "hw.reg", [g.op("hw.and", f["in_valid"],
+                    "hw.reg", [g.op("hw.and", taken_by,
                                     unit.roots[f"flag_{flag}"]), f["ready"]],
                     {"name": name}))
                 outputs[name] = g.op("hw.regread", name=name)
@@ -657,6 +939,16 @@ def materialise() -> Pass:
             built: dict = {}
             carried: dict = {}
 
+            def home_of(n) -> int:
+                """The stage `n` is computed in: the schedule's, or for a
+                node the schedule never saw -- one materialise makes, as
+                the taken flags -- the latest stage among its inputs."""
+                if id(n) not in stage_of:
+                    stage_of[id(n)] = max(
+                        (home_of(o.node) for o in n.operands
+                         if o.node.kind not in _FLOATING), default=0)
+                return stage_of[id(n)]
+
             def at(v: Value, k: int, reset=None) -> Value:
                 """`v` as stage `k` sees it: computed there, or carried
                 from the stage it was computed in through a register a
@@ -664,7 +956,7 @@ def materialise() -> Pass:
                 n = v.node
                 if n.kind in _FLOATING:
                     return v
-                home = stage_of.get(id(n), 0)
+                home = home_of(n)
                 if k == home:
                     return here(v)
                 key = (id(n), v.index, k)
@@ -680,14 +972,16 @@ def materialise() -> Pass:
 
             def here(v: Value) -> Value:
                 """`v` built in its own stage, its inputs as that stage
-                sees them."""
-                n = v.node
-                if id(n) not in built:
-                    home = stage_of.get(id(n), 0)
+                sees them -- every node below it built first, in order, so
+                no chain of operands is followed by recursion."""
+                for n in walk([v]):
+                    if id(n) in built:
+                        continue
+                    home = home_of(n)
                     built[id(n)] = g.node(
                         n.kind, [at(o, home) for o in n.operands],
                         dict(n.attrs))
-                return built[id(n)].result(v.index)
+                return built[id(v.node)].result(v.index)
 
             last = stages - 1
             word = at(data, last)
@@ -698,7 +992,7 @@ def materialise() -> Pass:
             for flag in ("valid", "sof", "eol", "last"):
                 name = f"out_{flag}"
                 g.symbols.setdefault(name, {"lo": 0, "hi": 1, "init": 0})
-                taken = g.op("hw.and", f["in_valid"],
+                taken = g.op("hw.and", taken_by,
                              unit.roots[f"flag_{flag}"])
                 unit.regs.append(g.node("hw.reg", [at(taken, last, 0), ready],
                                         {"name": name}))

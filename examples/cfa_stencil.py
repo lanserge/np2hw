@@ -12,12 +12,12 @@ which positions each applies to.
 Two things lower specially, and both are asserted below rather than claimed:
 
 - The planes share ONE window. Four tap combinations do not cost four sets
-  of line buffers; they cost one window and a positional mux (position
-  parity XOR the phase registers -- the same programmable mapping as
+  of line buffers; they cost one window and a positional select (position
+  parity against the phase registers -- the same programmable mapping as
   cfa_phase, so one bitstream serves every CFA order).
 - `np.stack([r, g, b], axis=-1)` is how a model says "channels", and the
-  channels ride the SAME window: C muxes, one select, one output word with
-  channel 0 in the low bits. Models never shift-and-mask channels together;
+  channels ride the SAME window: one output word with channel 0 in the
+  low bits. Models never shift-and-mask channels together;
   the word layout is the stream boundary's one statement.
 
 Edges replicate via np.pad(mode="edge"), so output is full-size -- and
@@ -113,20 +113,17 @@ def main():
     _, out = to_ir(interpolate, Image2D("img", W, H, bits=BITS), *params)
     core = generate(out, module_name="cfa_stencil")
     # FOUR planes x THREE channels over one 3x3 window: exactly TWO line
-    # buffers (one window, shared), three positional muxes (one per
-    # channel), and the select follows the OUTPUT pixel's position through
-    # the edge flushes, XORed with the phase registers.
-    # one seam module per emitter, instantiated once per line buffer --
-    # so count the instances, which is what a line buffer is now
-    buffers = core.verilog.count(" u_linebuf")
-    muxes = core.verilog.count("case ({sel_row, sel_col})")
-    positional = "wire sel_row = o_row[0] ^ param_py" in core.verilog
-    print(f"  {core['phases']} planes x {core['channels']} channels -> "
-          f"{buffers} line buffer(s), {muxes} channel mux(es), "
+    # buffers (one window, shared), whatever the planes and channels. The
+    # select is positional and phase-programmable: the phase registers are
+    # the core's only ports, and the ONE build above was bit-exact at every
+    # phase, its edges included.
+    buffers = len(core["memories"])
+    ports = [n for n, _ in core["params"]]
+    print(f"  4 planes x {core['channels']} channels -> "
+          f"{buffers} line buffer(s), ports {ports}, "
           f"out_bits={core.out_bits}")
-    print(f"  select follows the output pixel, phase-programmable: {positional}")
-    shape_ok = (buffers == 2 and muxes == 3 and core.out_bits == 3 * BITS
-                and positional and core.line_buffers == 2)
+    shape_ok = (buffers == 2 and core.line_buffers == 2
+                and core.out_bits == 3 * BITS and sorted(ports) == ["px", "py"])
 
     print("\n" + ("CFA STENCIL PASS" if all(results) and shape_ok else "FAIL"))
     return 0 if all(results) and shape_ok else 1

@@ -1,20 +1,17 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""The memory seam, and the refusal that guards it.
+"""The memory seam, and the promise it keeps.
 
 A line buffer is `reg [W-1:0] mem [0:D-1]`. Inferred on an FPGA that is
 block RAM; on silicon it is D*W flip-flops, and one 1920-wide 12-bit
-line is 23,040 of them. So the stencil emitters that read their line
-buffers through a register put the array behind a module of its own --
-`<module>_linebuf`, one write port, one read port, both synchronous --
-which an integrator binds a memory macro to by name. The contract the
-binding must honour is written on the module (docs/memories.md).
-
-Not every emitter can offer that. The general window reads its line
-buffers COMBINATIONALLY -- distributed RAM on an FPGA, and no SRAM macro
-implements a combinational read. `sync_memory=True` refuses such a model
-rather than emit it; the same model generates as before without the
-flag, because on an FPGA the asynchronous read is the right choice.
+line is 23,040 of them. So every window reads its line buffers through
+a register, a column ahead, and puts the array behind a module of its
+own -- `<module>_linebuf`, one write port, one read port, both
+synchronous -- which an integrator binds a memory macro to by name. The
+contract the binding must honour is written on the module
+(docs/memories.md). `sync_memory=True` is the promise a design bound for
+silicon makes -- no memory reads combinationally -- and every window
+keeps it, padded or not.
 
 Three things are proven here, each as something that can fail:
 
@@ -22,12 +19,12 @@ Three things are proven here, each as something that can fail:
      its line buffers are seam instances (the shape, asserted);
   2. the same padded model generates IDENTICALLY with and without the
      flag -- the flag never changes what is emitted, only what is refused;
-  3. an unpadded model is refused under the flag, by name and with the
-     reason, and still generates and simulates bit-exact without it.
+  3. an unpadded model, under the flag, is a seam too, and bit-exact.
 
 Run:  python examples/linebuf_seam.py   (needs iverilog)
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -47,9 +44,20 @@ def blur121_edge(img):
 
 
 def blur121(img):
-    """The same filter unpadded: shrinks by two rows, reads asynchronously."""
+    """The same filter unpadded: shrinks by two rows."""
     x = img.astype(np.uint16)
     return ((x[:-2, :] + 2 * x[1:-1, :] + x[2:, :]) // 4).astype(np.uint8)
+
+
+def _seam(core, name):
+    """Two line buffers, each an instance of the seam, its read
+    registered -- and no array read anywhere else."""
+    src = "\n".join(line for line in core["verilog"].splitlines()
+                    if not line.lstrip().startswith("//"))
+    return (f"module {name}_linebuf #(" in src
+            and len(re.findall(rf"^\s+{name}_linebuf #\(", src, re.M)) == 2
+            and "if (re) rd <= mem[ra];" in src
+            and src.count(" mem[") == 2)
 
 
 def main():
@@ -61,10 +69,7 @@ def main():
     _, out = to_ir(blur121_edge, Image2D("img", W, H, bits=8))
     core = generate(out, module_name="seam_edge", sync_memory=True)
     src = core["verilog"]
-    seam = ("module seam_edge_linebuf #(" in src
-            and src.count(" u_linebuf") == 2
-            and "if (re) rd <= mem[ra];" in src
-            and ".rd(chain1_q)" in src)
+    seam = _seam(core, "seam_edge")
     published = ([m["read"] for m in core["memories"]] == ["sync", "sync"]
                  and all(m["module"] == "seam_edge_linebuf"
                          for m in core["memories"]))
@@ -81,27 +86,16 @@ def main():
           f"{'PASS' if same else 'FAIL'}")
     results.append(same)
 
-    # 3. the refusal, named, and the unrefused path still bit-exact
-    _, out_async = to_ir(blur121, Image2D("img", W, H, bits=8))
-    try:
-        generate(out_async, module_name="seam_async", sync_memory=True)
-        refused, named = False, False
-    except ValueError as error:
-        text = str(error)
-        refused = True
-        named = ("seam_async" in text and "ASYNCHRONOUSLY" in text
-                 and "np.pad" in text)
-    print(f"  an asynchronous line buffer is refused            "
-          f"{'PASS' if refused else 'FAIL'}")
-    print(f"  ...by module name, with the reason and the fix    "
-          f"{'PASS' if named else 'FAIL'}")
-    async_core = generate(out_async, module_name="seam_async")
-    async_ok = ([m["read"] for m in async_core["memories"]] == ["async"] * 2
-                and "chain1 = mem1[" in async_core["verilog"])
-    print(f"  without the flag it emits, published read=async   "
-          f"{'PASS' if async_ok else 'FAIL'}")
-    results += [refused, named, async_ok]
-    results.append(check("seam_async", blur121, A))
+    # 3. an unpadded window keeps the promise too
+    _, out_unpadded = to_ir(blur121, Image2D("img", W, H, bits=8))
+    unpadded = generate(out_unpadded, module_name="seam_crop",
+                        sync_memory=True)
+    kept = (_seam(unpadded, "seam_crop")
+            and [m["read"] for m in unpadded["memories"]] == ["sync"] * 2)
+    print(f"  an unpadded window is a seam under the flag too   "
+          f"{'PASS' if kept else 'FAIL'}")
+    results.append(kept)
+    results.append(check("seam_crop", blur121, A, sync_memory=True))
 
     ok = all(results)
     print("\n" + ("LINEBUF SEAM PASS" if ok else "FAIL"))

@@ -1544,11 +1544,13 @@ def generate(out_line, module_name="np2hw_top", framing="height",
         try:
             # its stages cut to the clock: one, when the datapath fits
             built = out_line.for_build(dev, clk_ns)
-        except (Unsupported, ValueError):
+        except (Unsupported, ValueError) as error:
             # this device builds something here the new compiler does not
-            # yet (a constant table as a memory), or the budget cannot be
-            # met by stages: the reference does what it can, below
+            # yet, or the budget cannot be met by stages: the reference does
+            # what it can, below
             if os.environ.get("NP2HW_CORE") == "strict":
+                if isinstance(error, ValueError):
+                    raise ValueError(f"{module_name}: {error}") from error
                 raise
             built = None
         fits = built is not None and (clk_ns is None
@@ -3135,7 +3137,7 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a = L.append
     a("`timescale 1ns/1ps")
     a(f"module {tb_name};")
-    a("    reg clk = 0, rst = 1, in_valid = 0;")
+    a("    reg clk = 0, rst = 1, in_valid = 0, in_sof = 0;")
     a(f"    reg  [{in_bits-1}:0] in_data;")
     for name, bits in meta["params"]:
         a(f"    reg  [{bits-1}:0] param_{name};")
@@ -3145,7 +3147,7 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a(f"    reg [{in_bits-1}:0] img [0:{W*H-1}];")
     a("    always #5 clk = ~clk;")
     conns = ["        .clk(clk), .rst(rst),",
-             "        .in_valid(in_valid), .in_ready(in_ready), .in_sof(1'b0), .in_data(in_data),"]
+             "        .in_valid(in_valid), .in_ready(in_ready), .in_sof(in_sof), .in_data(in_data),"]
     for name, _ in meta["params"]:
         conns.append(f"        .param_{name}(param_{name}),")
     conns.append("        .out_valid(out_valid), .out_ready(out_ready), "
@@ -3169,18 +3171,20 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
         a("            integer r, c;")
         a(f"            for (r = 0; r < {H}; r = r + 1) begin")
         a(f"                for (c = 0; c < {W}; c = c + 1) begin")
-        a(f"                    in_data = img[r*{W}+c]; in_valid = 1; @(negedge clk);")
+        a(f"                    in_data = img[r*{W}+c]; in_sof = (r == 0 && c == 0); in_valid = 1;")
+        a("                    @(posedge clk); while (!in_ready) @(posedge clk); @(negedge clk);")
         a("                end")
-        a(f"                in_valid = 0; for (c = 0; c < {meta['hblank']}; c = c + 1) @(negedge clk);")
+        a(f"                in_valid = 0; in_sof = 0; for (c = 0; c < {meta['hblank']}; c = c + 1) @(negedge clk);")
         a("            end")
         a(f"            for (c = 0; c < {meta['vdrain']}; c = c + 1) @(negedge clk);")
         a("        end")
     else:
         a(f"        for (i = 0; i < {W*H}; i = i + 1) begin")
-        a("            in_data = img[i]; in_valid = 1; @(negedge clk);")
+        a("            in_data = img[i]; in_sof = (i == 0); in_valid = 1;")
+        a("            @(posedge clk); while (!in_ready) @(posedge clk); @(negedge clk);")
         a("        end")
-        drain = meta.get("flush_cycles", 2)
-        a(f"        in_valid = 0; for (i = 0; i < {drain}; i = i + 1) @(negedge clk);")
+        drain = max(meta.get("flush_cycles", 2), meta.get("vdrain", 0))
+        a(f"        in_valid = 0; in_sof = 0; for (i = 0; i < {drain}; i = i + 1) @(negedge clk);")
     a("        $fclose(f); $finish;")
     a("    end")
     a("endmodule")

@@ -187,6 +187,10 @@ for _k in (
     # one of n choices by an index: the shape a lookup table selects in,
     # costed by the device's own mux arity (Device.mux_levels)
     Kind("hw.mux", _P, None, _mux, _verify_mux),
+    # a window's tap: the value `a` rows and `b` columns back from the newest
+    # in the window of source `key` -- the rewrite pass's reference,
+    # replaced by its storage and edge selects in the control pass
+    Kind("hw.tap", _P, 0, lambda g, ts, a: _t(a["lo"], a["hi"])),
     # a constant table the device makes a memory: operand 0 its address,
     # `data` its contents; read through a register, a stage of its own
     Kind("hw.rom", _P, 1, lambda g, ts, a: _t(min(a["data"]), max(a["data"]))),

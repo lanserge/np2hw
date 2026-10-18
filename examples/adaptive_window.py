@@ -11,8 +11,8 @@ expired -- but the capability is generic to every adaptive filter):
            averaged estimate, phase-routed; the raw sample rides along
            as a BROADCAST channel of the output word.
   stage B: window taps over the LANES of that 2-channel word -- colour
-           differences (raw - green) interpolated per site. Field
-           extraction happens per tap; no model touches the word.
+           differences (raw - green) interpolated per site. The lanes
+           are fields of the word; no model touches the word.
 
 Every plane's DAG shares ONE wire namespace, so a gradient used by two
 planes -- or two channels -- is computed once.
@@ -124,13 +124,18 @@ def main():
     _, out2 = to_ir(rb_from_differences, Image2D("word", W, H, bits=2 * BITS),
                     *PARAMS, channels=2)
     core2 = generate(out2, module_name="adapt_rb")
-    lane_taps = core2.verilog.count(":8]")               # green-lane slices
+    lane_taps = core2.verilog.count(f"[{2 * BITS - 1}:{BITS}]")  # green lane
+    # both lanes are kept, and nothing more: the line storage is the
+    # word's rows, however the lanes are laid out in it
+    row_bits = sum(m["bits"] for m in core2["memories"])
     print(f"  A: {core.line_buffers} line buffers, {selects} selects, "
           f"out {core.out_bits}b; B: {core2.line_buffers} line buffers, "
-          f"{lane_taps} high-lane taps, out {core2.out_bits}b")
+          f"{lane_taps} high-lane reads, {row_bits} bits of rows, "
+          f"out {core2.out_bits}b")
     shape_ok = (core.line_buffers == 4 and core.out_bits == 2 * BITS
                 and selects >= 2 and core2.line_buffers == 2
-                and core2.out_bits == 3 * BITS and lane_taps >= 5)
+                and core2.out_bits == 3 * BITS and lane_taps >= 1
+                and row_bits == core2.line_buffers * 2 * BITS)
 
     print("\n" + ("ADAPTIVE WINDOW PASS" if all(results) and shape_ok
                   else "FAIL"))

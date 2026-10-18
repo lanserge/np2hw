@@ -45,6 +45,7 @@ construction would fail first:
 Run:  python examples/timing_split.py   (needs iverilog)
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -163,9 +164,10 @@ def adaptive(img, py, px):
 
 def _two_frames(meta, W, H, frames, values):
     """Drive the core through consecutive frames, in_sof on each first
-    pixel, edge-feed pacing; return the collected output words."""
+    pixel, each pixel held until the core takes it, and the gaps the core
+    asks for; return the collected output words."""
     mod = meta["module"]
-    hb, vd = meta["hblank"], meta["vdrain"]
+    hb, vd = meta.get("hblank", 0), meta["vdrain"]
     L = []
     a = L.append
     a("`timescale 1ns/1ps")
@@ -201,6 +203,7 @@ def _two_frames(meta, W, H, frames, values):
     a(f"                    in_data = img[fr*{W*H} + r*{W} + c];")
     a("                    in_valid = 1;")
     a("                    in_sof = (r == 0) && (c == 0);")
+    a("                    @(posedge clk); while (!in_ready) @(posedge clk);")
     a("                    @(negedge clk);")
     a("                end")
     a("                in_valid = 0; in_sof = 0;")
@@ -298,7 +301,7 @@ def main():
     As = rng.integers(0, (1 << SBITS), (SH, SW)).astype(np.uint8)
     _, outs = to_ir(demosaic, Image2D("img", SW, SH, bits=SBITS), *cfa)
     meta_s = generate(outs, module_name="dm_148", clk_ns=CLK_148M5)
-    split_s = meta_s["pipeline_stages"] == 2
+    split_s = meta_s["pipeline_stages"] >= 2
     ok = split_s and check("dm_148", demosaic, As, params=cfa,
                            param_values={"py": 1, "px": 0}, bits=SBITS,
                            clk_ns=CLK_148M5)
@@ -310,12 +313,14 @@ def main():
     result("stencil: a fitting clock generates identically",
            easy_s["pipeline_stages"] == 1 and easy_s["verilog"] == plain_s)
 
+    # the line buffers' read is a stage of its own, so the floor is one
+    # operation's depth, the same as any datapath's
     try:
-        generate(outs, module_name="dm_floor", clk_ns=4.0)
+        generate(outs, module_name="dm_floor", clk_ns=2.0)
         refused, named = False, False
     except ValueError as error:
-        refused, named = True, "window read" in str(error)
-    result("stencil: below the window read's own depth refuses, named",
+        refused, named = True, "alone estimates" in str(error)
+    result("stencil: below one operation's own depth refuses, named",
            refused and named)
 
     # Two frames, back to back, in_sof pulsed on each first pixel: the
@@ -338,12 +343,24 @@ def main():
     # plus a select tree that deepens with the line -- which is why the
     # same stencil closed at 1280 and missed at 1920. Assert the shape,
     # because simulation cannot see which primitive the tools pick.
-    src = generate(outs, module_name="dm_shape")["verilog"]
+    shape = generate(outs, module_name="dm_shape")
+    src = shape["verilog"]
     # behind the memory seam: a *_linebuf module with a registered read
-    # port driving chain1_q, and no continuous read of any array
-    registered = (".rd(chain1_q)" in src and "if (re) rd <= mem[ra];" in src
-                  and "chain1 = mem1[" not in src)
-    one_ahead = "rd_col = in_sof" in src
+    # port, published read=sync, and no continuous read of any array
+    seam = {m["module"] for m in shape["memories"]}
+    registered = (len(shape["memories"]) == shape.line_buffers
+                  and all(m["read"] == "sync" for m in shape["memories"])
+                  and all(f"module {name}" in src for name in seam)
+                  and "if (re) rd <= mem[ra];" in src
+                  and re.search(r"^\s*(wire|assign)\b.*\bmem\w*\[", src,
+                                re.M) is None)
+    # read a column ahead, its latency costs no register: the datapath's
+    # word-wide registers are the window's shift registers and the output
+    top = src[:min(src.index(f"module {name}") for name in seam)]
+    width = shape["in_bits"] - 1
+    data_regs = len(re.findall(rf"^\s*reg \[{width}:0\]", top, re.M))
+    one_ahead = data_regs == (shape.line_buffers + 1) * shape["N"]
+    # (the output word is three channels wide, so it is not counted here)
     result("stencil: line buffers are read through a register", registered)
     result("stencil: the address is one column AHEAD, so no schedule "
            "shift", one_ahead)

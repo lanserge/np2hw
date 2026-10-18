@@ -1,8 +1,9 @@
 # One graph: indexes, access, data
 
 Status: in progress, its decisions settled (see the end). The graph core,
-the tracer, canonicalising, the pointwise family's lowering and reads
-across a video's frames are built in `np2hw.core`, and `to_ir` hands every
+the tracer, canonicalising, the pointwise family's lowering, windows,
+stages cut to a clock, and reads across a video's frames are built in
+`np2hw.core`, and `to_ir` hands every
 model to it first; a model it does not reach yet is lowered by np2hw's
 present compiler, the reference it is measured against -- except a video,
 which the reference has no frame axis for. `NP2HW_CORE=off` forces the reference, `NP2HW_CORE=strict`
@@ -290,8 +291,10 @@ The passes, each visiting every shared node once:
 
 Built so far: canonicalise (which shares by interning, so the second pass
 happens inside the first), then rewrite, control (the driving variables'
-counters and flags), schedule, materialise and print. The window pass
-arrives with the stencil family.
+counters and flags), schedule, materialise and print. The window rule is
+applied within rewrite and control: rewrite finds each window source and
+its taps, control builds their line buffers, shift registers and edge rule
+on a step raster the lag and the flush come from.
 
 ### The window rule
 
@@ -309,6 +312,17 @@ off them:
   start is a remainder chosen at run time and changes nothing structural;
 - **an extent** -- a count smaller than the source's -- becomes gating at
   the edges; a coarser step alone is the same clock with a valid pattern.
+  The source's rows and columns past the last start are still taken from
+  the stream, and never read;
+- **compose** by substitution: a computed value read at a shifted index
+  is that value computed at the index, its variables replaced, so a filter
+  applied to a filter's result is one window over the source -- its spread
+  the sum of the two. The inner arithmetic is computed at each tap of the
+  outer one; identical taps are one node by interning, and a shifted copy
+  is arithmetic again rather than a register, which a later pass may trade;
+- **the edge** is the pad's: a row or column off the frame reads the
+  nearest edge under `mode="edge"` and zero under a zero pad, each a select
+  on the step's position, the rows past the last fed back by the flush.
 
 On the frame axis the same rule is the frame history: the spread of starts
 in `t` is the number of frame stores -- derived from the reads, never

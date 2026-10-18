@@ -8,7 +8,9 @@ height. Validated against the SAME NumPy function (np.pad is the oracle too).
 
 Run:  python examples/edges.py   (needs iverilog)
 """
-import sys, os
+import os
+import re
+import sys
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
@@ -118,20 +120,9 @@ def forward_diff_padded(img):
 
 
 def backward_diff_padded(img):
-    """Its mirror reads only the TOP-LEFT padding: refused, not built wrong."""
+    """Its mirror reads only the TOP-LEFT padding, and its output is signed."""
     x = np.pad(img.astype(np.int16), 1)
     return x[1:-1, 1:-1] - x[1:-1, :-2]
-
-
-def refused_one_sided():
-    from np2hw import Image2D, to_ir
-    try:
-        to_ir(backward_diff_padded, Image2D("img", W, H, 8))
-    except ValueError as e:
-        print(f"  backward_diff  refused: {str(e)[:52]}...  PASS")
-        return True
-    print("  backward_diff  BUILT -- one-sided padding  FAIL")
-    return False
 
 
 def main():
@@ -151,7 +142,7 @@ def main():
         check("lap4_zero_s", laplace4_zero_signed, A), # no corner tap
         check("cross_pad2", cross_in_wide_pad, A),     # unread padding
         check("fwd_diff_pad", forward_diff_padded, A), # left padding unread
-        refused_one_sided(),                           # left padding only
+        check("bwd_diff_pad", backward_diff_padded, A), # left padding only
     ]
     oh, ow = gaussian2d_edge(A).shape
     print(f"\n2D gaussian output = {oh}x{ow} (input {H}x{W}) -> "
@@ -164,15 +155,26 @@ def main():
     # emitted structure is what has to be asserted.
     from np2hw import Image2D, to_ir, generate
     _, out = to_ir(gaussian2d_edge, Image2D("img", H, W, bits=8))
-    src = generate(out, module_name="edge_shape")["verilog"]
-    # The line buffers live behind the memory seam now: a *_linebuf
-    # module whose read port is registered, driven at the datapath's
-    # `chain1_q`. That is the block-RAM shape, stated once per module.
-    registered = ".rd(chain1_q)" in src and "if (re) rd <= mem[ra];" in src
-    one_ahead = "rd_col = in_sof" in src
-    # the async form is a CONTINUOUS read of the array (`wire ... =
-    # mem1[...]`), which the general core emits and the seam never does
-    async_read = "chain1 = mem1[" in src
+    core = generate(out, module_name="edge_shape")
+    src = core["verilog"]
+    # The line buffers live behind the memory seam: a *_linebuf module
+    # whose read port is registered. That is the block-RAM shape, stated
+    # once per module and published with every memory.
+    seam = {m["module"] for m in core["memories"]}
+    registered = (len(core["memories"]) == core.line_buffers
+                  and all(m["read"] == "sync" for m in core["memories"])
+                  and all(f"module {name}" in src for name in seam)
+                  and "if (re) rd <= mem[ra];" in src)
+    # The read is issued a column ahead, so its cycle of latency costs no
+    # register: the datapath keeps the window's shift registers, one row
+    # of N per row of the window, and the output word -- nothing more.
+    top = src[:min(src.index(f"module {name}") for name in seam)]
+    data_regs = len(re.findall(r"^\s*reg \[7:0\]", top, re.M))
+    one_ahead = data_regs == (core.line_buffers + 1) * core["N"] + 1
+    # the async form is a CONTINUOUS read of an array, which the seam
+    # never makes
+    async_read = re.search(r"^\s*(wire|assign)\b.*\bmem\w*\[", src,
+                           re.M) is not None
     print(f"  line buffers read through a register           "
           f"{'PASS' if registered else 'FAIL'}")
     print(f"  the address is one column AHEAD, no shift       "

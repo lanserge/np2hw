@@ -187,7 +187,8 @@ class _Selects:
     """Rules, each exact: a `where` on a remainder is a select (A); a canvas
     whose planes tile the lattice is a select (B); a select over the same
     operation is that operation over selects (C); an access through a
-    buffer's own variables is the buffer."""
+    buffer's own variables is the buffer; an access of a computed value is
+    that value computed at the index (D)."""
 
     def __init__(self, c: Canonical):
         self.c, self.g = c, c.g
@@ -218,12 +219,66 @@ class _Selects:
 
     def access(self, ops) -> Value:
         buf, idx = ops[0], ops[1:]
-        find = self.g.vars.find
+        vars_ = self.g.vars
+        find = vars_.find
         if all(i.node.kind == "model.var" and a is not None
                and find(i.node.attr("name")) == find(a)
                for i, a in zip(idx, buf.type.axes)):
             return buf
+        # Every axis read whole, in order, through a variable of its own
+        # count that is none of the buffer's other axes: the same positions,
+        # so the same variable -- two variables paired on one position with
+        # equal counts are unified, as broadcasting pairs them (decision 3)
+        # -- and the access is the buffer.
+        axes = [find(a) if a is not None else None for a in buf.type.axes]
+        names = [find(i.node.attr("name")) if i.node.kind == "model.var"
+                 else None for i in idx]
+        if (len(idx) == len(axes) and None not in axes and None not in names
+                and len(set(names)) == len(names)
+                and all(vars_.count(v) == vars_.count(a)
+                        for v, a in zip(names, axes))
+                and all(v == a or v not in axes for v, a in zip(names, axes))):
+            for v, a in zip(names, axes):
+                vars_.unify(v, a)
+            return buf
+        # D: a computed value read at an index is the value computed there
+        # -- its own variables replaced by the index -- so a slice of a
+        # result is a window over the source, as composing filters is
+        if buf.node.kind not in _BUFFERS and None not in axes \
+                and len(idx) == len(axes) and all(map(_offset, idx)):
+            got = self._at(buf, dict(zip(axes, idx)))
+            if got is not None:
+                return got
         return self.g.op("model.access", buf, *idx)
+
+    def _at(self, v: Value, sub: dict):
+        """`v` with its variables replaced by the values in `sub`, through
+        operations that act position by position -- or None where one does
+        not (an operation whose attributes name an axis)."""
+        memo: dict[int, Value] = {}
+        g, find = self.g, self.g.vars.find
+
+        def go(x: Value):
+            n = x.node
+            if id(n) in memo:
+                return memo[id(n)]
+            if n.kind in _BUFFERS or n.kind == "model.const":
+                out = x                      # re-indexed only by its access
+            elif n.kind == "model.var":
+                out = sub.get(find(n.attr("name")), x)
+            elif n.kind == "model.access":
+                ops = [go(o) for o in n.operands]
+                out = None if None in ops else self.access(ops)
+            elif n.kind in _POINTWISE:
+                ops = [go(o) for o in n.operands]
+                out = None if None in ops else \
+                    g.node(n.kind, ops, dict(n.attrs)).value
+            else:
+                out = None
+            memo[id(n)] = out
+            return out
+
+        return go(v)
 
     # -- A: where on a remainder ---------------------------------------------
 
@@ -376,6 +431,29 @@ class _Selects:
             return out
 
         return go(v)
+
+
+# what an access re-indexes rather than computes, and the operations that
+# act position by position -- the ones rule D substitutes through
+_BUFFERS = {"model.source", "model.pad", "model.table", "model.param"}
+_POINTWISE = {"model.add", "model.sub", "model.mul", "model.floordiv",
+              "model.mod", "model.shr", "model.and", "model.or", "model.neg",
+              "model.abs", "model.eq", "model.ne", "model.lt", "model.le",
+              "model.gt", "model.ge", "model.where", "model.clip",
+              "model.astype", "model.bits", "model.wrap"}
+
+
+def _offset(v: Value) -> bool:
+    """An index that is a variable at a constant start: a shift, which
+    rule D substitutes -- a stride is the canvas's to read."""
+    n = v.node
+    if n.kind == "model.var":
+        return True
+    if n.kind == "model.add":
+        a, b = n.operands
+        return (_offset(a) and b.node.kind == "model.const"
+                or _offset(b) and a.node.kind == "model.const")
+    return False
 
 
 def _product(sizes):

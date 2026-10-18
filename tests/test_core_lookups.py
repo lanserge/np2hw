@@ -215,8 +215,17 @@ def signed_index(img, knot):
 
 
 def test_an_index_that_can_be_negative_is_refused():
-    with pytest.raises(NotImplementedError, match="can be negative"):
+    with pytest.raises(ValueError, match="falls outside the table"):
         _compile(signed_index, (KNOTS,))
+
+
+def past_the_end(img, knot):
+    return knot[img.astype(np.int32) >> 6].astype(np.uint16)
+
+
+def test_an_index_that_can_pass_the_end_is_refused():
+    with pytest.raises(ValueError, match=r"knot\[9\].*\[0, 15\]"):
+        _compile(past_the_end, (KNOTS,))
 
 
 # --------------------------------------------------------------------------- #
