@@ -44,6 +44,16 @@ def image_container(bits: int, signed: bool) -> tuple:
     return ("i" if signed else "u", size)
 
 
+# The trace a model is running in, while it runs: what a register reads as
+# when the model does arithmetic on it (np2hw.ir.Param's operators).
+_ACTIVE: list = []
+
+
+def active():
+    """The tracer a model is running in, or None outside a trace."""
+    return _ACTIVE[-1] if _ACTIVE else None
+
+
 class Tracer:
     """One trace: its graph, and its registers read once each."""
 
@@ -529,9 +539,12 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
     stream boundary, a fact of the source."""
     t = Tracer()
     g = t.g
+    # a video's frames are its outermost axis, as they arrive
+    axes = ((g.vars.declare(image.frames, "frames of the source", "t"),)
+            if image.frames else ())
     rows = g.vars.declare(image.height, "rows of the source", "r")
     cols = g.vars.declare(image.width, "cols of the source", "c")
-    axes = (rows, cols)
+    axes += (rows, cols)
     bits, signed = image.bits, image.signed
     if channels > 1:
         if bits % channels:
@@ -542,7 +555,11 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
     lo = -(1 << (bits - 1)) if signed else 0
     hi = (1 << (bits - (1 if signed else 0))) - 1
     src = g.op("model.source", axes=axes, container=c, lo=lo, hi=hi)
-    out = fn(Array(t, src), *params)
+    _ACTIVE.append(t)
+    try:
+        out = fn(Array(t, src), *params)
+    finally:
+        _ACTIVE.pop()
     if isinstance(out, Canvas):
         out = out.array()
     if not isinstance(out, Array):

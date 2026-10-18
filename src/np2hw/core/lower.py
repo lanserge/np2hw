@@ -54,12 +54,22 @@ def rewrite(c: Canonical, dev=None):
         mg, src = c.g, c.source
         find = mg.vars.find
         src_axes = [find(a) for a in src.type.axes]
+        img = c.image
+        # a video's frames drive outermost, the frame inside them
+        tsrc = src_axes.pop(0) if getattr(img, "frames", 0) else None
         driving, chan = src_axes[:2], src_axes[2] if len(src_axes) > 2 else None
         # A window over the source: its word streams through whole and the
         # window is kept -- the control pass gates it. Only the source, as
         # yet: a value computed inside a window belongs to the next block.
         win = c.output.node if c.output.node.kind == "model.window" else None
         out_axes = [find(a) if a else None for a in c.output.type.axes]
+        # a video's output frames: the output's own variable on time, which
+        # every read across time indexes
+        tout = out_axes.pop(0) if tsrc is not None and out_axes else None
+        if tsrc is not None and tout is None:
+            raise Unsupported("a video's output with no frame axis")
+        if tsrc is not None and win is not None:
+            raise Unsupported("a window over a video")
         # a stack of the frame's values along a last axis: channels of one
         # word, as np2hw packs every multi-channel stream
         lanes = (c.output.node.operands
@@ -74,8 +84,60 @@ def rewrite(c: Canonical, dev=None):
             raise Unsupported("an output that is not the source's frame")
         g = Graph(intern=True, locations=False)
         g.vars = mg.vars
-        img = c.image
         field = img.bits // (mg.vars.count(chan) if chan else 1)
+
+        def start_on_t(v) -> int:
+            """An index on the frame axis, `tout + start`: its start. The
+            window rule on time -- every read through the output's own
+            frame variable, at a constant offset."""
+            n = v.node
+            if n.kind == "model.var" and find(n.attr("name")) == tout:
+                return 0
+            if n.kind == "model.add":
+                a, b = n.operands
+                for x, k in ((a, b), (b, a)):
+                    if (x.node.kind == "model.var"
+                            and find(x.node.attr("name")) == tout
+                            and k.node.kind == "model.const"):
+                        return k.node.attr("value")
+            raise Unsupported("a read across time that is not the output's "
+                              "frame at a constant offset")
+
+        # The reads across time: their starts on the frame axis. The latest
+        # is the live frame, and each other start that many frames before
+        # it is a frame the store keeps: the spread is the store's depth,
+        # derived from the reads (docs/one-graph.md, decision 6).
+        starts = set()
+        whole = False
+        if tsrc is not None:
+            whole = c.output.node is src.node
+            for n in walk([c.output]):
+                for i, o in enumerate(n.operands):
+                    if o.node is not src.node:
+                        continue
+                    if n.kind == "model.access" and i == 0:
+                        starts.add(start_on_t(n.operands[1]))
+                    else:
+                        whole = True            # the video as a value
+            if whole:
+                # its frames are the output's own: the live one
+                if tout != tsrc:
+                    raise Unsupported("a video read whole, beside its own "
+                                      "frames")
+                starts.add(0)
+        live = max(starts) if starts else 0
+        stores = live - min(starts) if starts else 0
+        word = img.bits                         # one sample's word, kept
+        history = (g.op("hw.memread", name="hist", lo=0,
+                        hi=(1 << (stores * word)) - 1) if stores else None)
+
+        def past(depth: int, lo: int, width: int) -> Value:
+            """A field of the sample `depth` frames before the live one:
+            the live word itself, or the store's word for this position."""
+            if depth == 0:
+                return g.op("hw.bits", port_in(), lo=lo, width=width)
+            return g.op("hw.bits", history, lo=(depth - 1) * word + lo,
+                        width=width)
         params: dict = {}
         values: dict = {}
 
@@ -94,6 +156,10 @@ def rewrite(c: Canonical, dev=None):
                     return None                     # only fields are read
                 if img.signed:
                     raise Unsupported("a signed source")
+                if tsrc is not None:
+                    # the video as a value is its live frame; otherwise it
+                    # is only what its reads read, each lowered on its own
+                    return past(live, 0, img.bits) if whole else None
                 return port_in()
             if k == "model.access":
                 if n.operands[0].node.kind == "model.table":
@@ -101,7 +167,7 @@ def rewrite(c: Canonical, dev=None):
                 return field_of(n)
             if k == "model.var":
                 v = find(n.attr("name"))
-                if v not in driving:
+                if v not in driving and v != tout:
                     raise Unsupported(f"variable {v} used as data")
                 return g.op("hw.position", var=v, count=mg.vars.count(v))
             if k == "model.expand":
@@ -221,14 +287,23 @@ def rewrite(c: Canonical, dev=None):
             if n.operands[0].node is not src.node:
                 raise Unsupported("a read of a computed buffer")
             idx = n.operands[1:]
+            depth = 0
+            if tsrc is not None:
+                depth = live - start_on_t(idx[0])
+                idx = idx[1:]
             for i, a in zip(idx[:2], driving):
                 if not (i.node.kind == "model.var"
                         and find(i.node.attr("name")) == a):
                     raise Unsupported("a read at an offset: a window")
-            if not chan or idx[2].node.kind != "model.const":
+            if not chan:
+                if tsrc is None or len(idx) != 2:
+                    raise Unsupported("a read the pointwise family does not "
+                                      "take")
+                return past(depth, 0, img.bits)
+            if idx[2].node.kind != "model.const":
                 raise Unsupported("a read the pointwise family does not take")
             ch = idx[2].node.attr("value")
-            return g.op("hw.bits", port_in(), lo=ch * field, width=field)
+            return past(depth, ch * field, field)
 
         def select(n, ops) -> Value:
             sizes = n.attr("sizes")
@@ -279,6 +354,11 @@ def rewrite(c: Canonical, dev=None):
         # register ports in the order the reference lists them
         # (canonical.registers_in_order); a register array's entries at its
         # place, by index
+        if tsrc is not None:
+            # frames the output waits for (the live read's start), and the
+            # store: how many, and the word it keeps per position
+            unit.facts["frames"] = {"skip": live, "stores": stores,
+                                    "word": word, "history": history}
         order = list(c.registers)
         ordered = [p for key, p in sorted(
             params.values(), key=lambda kp: (order.index(kp[0][0]),
@@ -394,11 +474,62 @@ def control() -> Pass:
                      "sof": AND(inside, AND(first(rows), first(cols))),
                      "eol": AND(inside, final(cols)),
                      "last": AND(inside, AND(final(rows), final(cols)))}
+        fr = unit.facts.get("frames")
+        if fr is not None:
+            # how many frames have been taken, up to the number the output
+            # waits for: the first frames make no output, as the model's
+            # slices start the history once it is full
+            skip, stores, word = fr["skip"], fr["stores"], fr["word"]
+            end = AND(go, AND(final(rows), final(cols)))
+            if skip:
+                taken = reg_symbol("frames_taken", 0, skip, 0)
+                # enabled only below `skip`, so the clip changes no value
+                unit.regs.append(g.node("hw.reg", [
+                    g.op("hw.clip", g.op("hw.add", taken, c(1)), lo=0,
+                         hi=skip),
+                    AND(end, g.op("hw.ne", taken, c(skip)))],
+                    {"name": "frames_taken"}))
+                full = EQ(taken, c(skip))
+                flags = {k: AND(v, full) for k, v in flags.items()}
+            if stores:
+                # the store: one word per position, holding that position's
+                # past samples, newest lowest. Each pixel taken writes its
+                # word back SHIFTED -- its own sample in, the oldest out --
+                # and the read runs a position ahead, from the address's
+                # next state, so the next pixel's word lands as it arrives.
+                img = unit.facts["image"]
+                size = img.width * img.height
+                aw = max(1, (size - 1).bit_length())
+                addr = reg_symbol("hist_addr", 0, size - 1, 0)
+                here = SEL(in_sof, c(0), addr)
+                # past the last position the select takes 0, so the clip
+                # changes no value
+                ahead = SEL(EQ(here, c(size - 1)), c(0),
+                            g.op("hw.clip", g.op("hw.add", here, c(1)), lo=0,
+                                 hi=size - 1))
+                unit.regs.append(g.node("hw.reg", [ahead, go],
+                                        {"name": "hist_addr"}))
+                hist = fr["history"]
+                live = g.op("hw.port", name="in_data", bits=word, lo=0,
+                            hi=(1 << word) - 1)
+                kept = [live] + [g.op("hw.bits", hist, lo=k * word,
+                                      width=word)
+                                 for k in range(stores - 1)]
+                unit.roots.update({
+                    "mem_hist_we": go, "mem_hist_wa": here,
+                    "mem_hist_wd": g.op("hw.cat", *kept, field=word),
+                    "mem_hist_re": go, "mem_hist_ra": ahead})
+                unit.facts["memories"] = [{
+                    "instance": "u_hist", "name": "hist", "bits":
+                    stores * word, "depth": size, "aw": aw, "read": "sync"}]
+
         def position(n):
             """The datapath's position along a variable: the counter at this
             pixel, in the bits its count needs -- the range NumPy gave it."""
             if n.kind != "hw.position":
                 return None
+            if n.attr("var") not in epos:
+                raise Unsupported("the frame's position used as data")
             w = max(1, (n.attr("count") - 1).bit_length())
             return g.op("hw.bits", epos[n.attr("var")], lo=0, width=w)
 
@@ -448,6 +579,9 @@ def materialise() -> Pass:
                 {"name": name}))
             outputs[name] = g.op("hw.regread", name=name)
         outputs["out_data"] = g.op("hw.regread", name="out_data")
+        # a memory's ports, wired to its instance by the printer
+        outputs.update({k: v for k, v in unit.roots.items()
+                        if k.startswith("mem_")})
         unit.roots = outputs
         f.update(out_bits=data.type.bits, out_signed=data.type.lo < 0)
         return unit

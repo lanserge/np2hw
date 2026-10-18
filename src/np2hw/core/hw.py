@@ -174,6 +174,9 @@ for _k in (
     # rewrite pass's reference, replaced by its counter in the control pass
     Kind("hw.position", _P, 0, lambda g, ts, a: _t(0, a["count"] - 1)),
     Kind("hw.regread", frozenset({STATEFUL}), 0, _regread),
+    # a memory's read port, named: the word its registered read holds
+    Kind("hw.memread", frozenset({STATEFUL}), 0,
+         lambda g, ts, a: _t(a["lo"], a["hi"])),
     Kind("hw.reg", frozenset({STATEFUL}), 2, lambda g, ts, a: (), _verify_reg),
 ):
     register(_k)

@@ -304,6 +304,10 @@ class Image2D:
     height: int
     bits: int = 8
     signed: bool = False
+    # A VIDEO when set: the model is handed (T, H, W), `frames` long -- the
+    # length it is traced at, enough for its reads across time. The stream
+    # has no end; only the reads' spread on the frame axis is hardware.
+    frames: int = 0
 
 
 class Param:
@@ -362,12 +366,49 @@ class Param:
             node = node[int(step)]
         return f"{node}: {self.description}" if self.description else str(node)
 
-    # -- phase arithmetic ---------------------------------------------------- #
+    # -- arithmetic ---------------------------------------------------------- #
     #
-    # Deliberately minimal: a Param may be used as a slice start, and its
-    # COMPLEMENT may be taken. That is all a phase needs, and it is all that
-    # lowers to a single XOR against a counter bit. General arithmetic on
-    # registers is a different feature and would lower to real logic.
+    # A register is a scalar input, and arithmetic on it is the model's math,
+    # as on any value -- while np2hw.core traces the model, where it is a
+    # value with a range like any other. Outside such a trace a Param has
+    # no arithmetic: the reference compiler takes a register only as an
+    # operand of the image's own expression, as a slice start, or as the
+    # COMPLEMENT a phase needs (`1 - py`, `py ^ 1`), which keep their
+    # meaning here so a slice start stays a phase.
+
+    def _traced(self):
+        """This register as a value of the trace running, or None."""
+        from .core.trace import Array, active
+        t = active()
+        if t is None or self.shape:
+            return None
+        return Array(t, t.register(self))
+
+    def _arith(op, reflected=False):
+        def method(self, other):
+            v = self._traced()
+            if v is None:
+                return NotImplemented
+            return op(other, v) if reflected else op(v, other)
+        return method
+
+    __add__ = _arith(lambda a, b: a + b)
+    __radd__ = _arith(lambda a, b: a + b, True)
+    __sub__ = _arith(lambda a, b: a - b)
+    __mul__ = _arith(lambda a, b: a * b)
+    __rmul__ = _arith(lambda a, b: a * b, True)
+    __and__ = _arith(lambda a, b: a & b)
+    __rand__ = _arith(lambda a, b: a & b, True)
+    __or__ = _arith(lambda a, b: a | b)
+    __ror__ = _arith(lambda a, b: a | b, True)
+    __rshift__ = _arith(lambda a, b: a >> b)
+    __floordiv__ = _arith(lambda a, b: a // b)
+    __mod__ = _arith(lambda a, b: a % b)
+    del _arith
+
+    def __neg__(self):
+        v = self._traced()
+        return NotImplemented if v is None else -v
 
     def __xor__(self, other):
         if other in (0, 1):
@@ -379,7 +420,8 @@ class Param:
     def __rsub__(self, other):
         if other == 1:
             return PhaseRef(self, invert=True)
-        return NotImplemented
+        v = self._traced()
+        return NotImplemented if v is None else other - v
 
     def __repr__(self):
         sh = f" {self.shape}" if self.shape else ""

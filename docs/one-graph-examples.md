@@ -300,43 +300,60 @@ packing (1).
 ## 6. Depth from the last four frames
 
 ```python
-def depth(video, ph):               # video: (T, H, W); one phase a frame
+def quadrature(video, pos, tag):        # video: (T, H, W); one phase a frame
     v = video.astype(np.int32)
-    s = [v[k + 3 - ph] for k in range(4)]   # the four frames, by phase
-    i, q = s[0] - s[2], s[1] - s[3]
-    return atan2_q(i, q)                   # CORDIC, as in tofquad
+    f = [v[3:], v[2:-1], v[1:-2], v[:-3]]          # f[k]: frame n - k
+    phase_of = [tag[(pos - k) & 3] for k in range(4)]
+
+    def phase(j):                                  # the frame carrying j
+        return np.where(phase_of[0] == j, f[0],
+                        np.where(phase_of[1] == j, f[1],
+                                 np.where(phase_of[2] == j, f[2], f[3])))
+    i, q = phase(0) - phase(2), phase(1) - phase(3)
+    return atan2_q(i, q)                           # CORDIC, as in tofquad
 ```
 
-(Illustrative: the history is the last four frames, and which one carries
-which reference phase follows the register `ph`.)
+`pos` is the live frame's place in the sensor's capture loop and `tag` the
+phase at each place: scalar inputs, constant for a frame. Frame n-k sits k
+places back, so its phase is `tag[(pos - k) & 3]`, and any phase order is
+table contents. Where `pos` comes from -- the stream's frame phase, read
+from each frame's header, or a register -- the model does not say: it is
+bound where the design is composed.
 
 **Model level**
 
-    vars  t : T  drives (outermost)   r : H  drives   c : W  drives
+    vars  u : T-3  drives (outermost)   r : H  drives   c : W  drives
     %1 = model.astype(%0) {i32}                  : (t, r, c)
-    %2 = model.access(%1) {frames: t + 3 - ph}   : (t, r, c)
-    %3 = model.access(%1) {frames: t + 2 - ph}   ...  (four accesses)
-    %6 = model.sub(%2, %4) ; %7 = model.sub(%3, %5)
-    %8.. CORDIC data math                        : (t, r, c)
+    %2 = model.access(%1, u + 3, r, c)           : (u, r, c)
+    %3 = model.access(%1, u + 2, r, c)           ...  (four accesses)
+    %6 = model.sub(%pos, 1) ; %7 = model.and(%6, 3)
+    %8 = model.access(%tag, %7)                  : ()     (four lookups)
+    %9.. where-selects of the frames by phase, two differences, CORDIC
 
-**Window rule on `t`:** one group -- `t`, `r`, `c` at step 1. Starts on `t`
+The four slices pair on one position with equal counts, so they unify into
+one output variable `u` on time, read at starts 3, 2, 1 and 0.
+
+**Window rule on `t`:** one group -- `u`, `r`, `c` at step 1. Starts on `t`
 spread over 3: THREE FRAME STORES, derived from the reads, not declared.
-The register `ph` in the starts selects which stored frame feeds which term:
-a remainder chosen at run time, as the CFA phase is on rows and columns.
+The latest start is the live frame; the first three frames make no output.
 
 **Hardware**
 
-    counters   r_frame, r_row, r_col      -- t, the outermost driver
-    memory     frames: 3 x H x W, bound where the design is composed:
-               block RAM, a macro, or external memory with lines
-               transferred ahead (one-graph.md, decision 6)
-    select     which frame is which phase, by ph
+    counters   r_row, r_col; frames taken, up to 3, holding the output back
+    memory     3 x H x W words of the past samples, one word a position,
+               read a position ahead and written back shifted -- bound
+               where the design is composed: block RAM, a macro, or
+               external memory with lines transferred ahead (decision 6)
+    lookups    four 4-entry register reads at (pos - k) & 3
+    select     each phase's frame, by the tags
     datapath   two differences -> CORDIC
 
 **Settles.** Frame history is access on `t`, its depth from the reads; the
 source is `(T, H, W)`, `t` advancing on each start of frame; the first
 frames follow what the model wrote -- a slice that starts at `3` gives no
-output until three frames are stored, a pad on `t` defines them (6).
+output until three frames are stored, a pad on `t` defines them; and a
+sensor's capture loop is a scalar input the model routes by, its source
+the design's (6).
 
 ---
 

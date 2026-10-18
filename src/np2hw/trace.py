@@ -647,7 +647,9 @@ def to_ir(fn, image: Image2D, *params, out_bits=None, channels=1):
             return None, mod
         except Exception as e:
             _core_log(fn, f"reference: {type(e).__name__}: {e}")
-            if core == "strict":
+            # the reference has no frame axis: a video is the new
+            # compiler's or nobody's
+            if core == "strict" or getattr(image, "frames", 0):
                 raise
     return reference(trace(fn, image, *params, channels=channels),
                      channels=channels, out_bits=out_bits)

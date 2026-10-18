@@ -79,6 +79,8 @@ class _Printer:
             return self.wire(v, str(n.attr("value")), "c")
         if k == "hw.regread":
             return f"r_{n.attr('name')}"
+        if k == "hw.memread":
+            return f"mem_{n.attr('name')}_rd"
         dom = _signed(v) or any(_signed(o) for o in ops)
         if k in _BIN:
             a, b = (self.ref(o, dom) for o in ops)
@@ -157,6 +159,11 @@ def generate(unit: Unit, module_name: str, dev=None,
     from ..verilog import Core, _interface, _frame_params, _frame_out_ports
     f = unit.facts
     img = f["image"]
+    mems = f.get("memories", [])
+    if "frames" in f and frame == "runtime":
+        raise NotImplementedError(
+            f"{module_name}: a video at a run-time frame size -- its store "
+            "is sized from the frame it is built for")
     p = _Printer(dev)
     p.frame = {"WIDTH": "fw", "HEIGHT": "fh"} if frame == "runtime" else {}
     for n in walk(unit.all_roots()):
@@ -213,6 +220,18 @@ def generate(unit: Unit, module_name: str, dev=None,
         head += [f"    assign out_frame_width = {ow};",
                  f"    assign out_frame_height = {oh};"]
     decls, body = [], []
+    for m in mems:
+        # a memory behind its seam: the module an integrator binds by name
+        n, w, aw = m["name"], m["bits"], m["aw"]
+        decls += [f"    wire mem_{n}_we, mem_{n}_re;",
+                  f"    wire [{aw - 1}:0] mem_{n}_wa, mem_{n}_ra;",
+                  f"    wire [{w - 1}:0] mem_{n}_wd, mem_{n}_rd;",
+                  f"    {module_name}_mem #(.W({w}), .D({m['depth']}), "
+                  f".AW({aw})) {m['instance']} (",
+                  f"        .clk(clk), .we(mem_{n}_we), .wa(mem_{n}_wa), "
+                  f".wd(mem_{n}_wd),",
+                  f"        .re(mem_{n}_re), .ra(mem_{n}_ra), "
+                  f".rd(mem_{n}_rd));"]
     for r in unit.regs:
         name = r.attr("name")
         d = unit.g.symbols[name]
@@ -245,8 +264,14 @@ def generate(unit: Unit, module_name: str, dev=None,
         body += load + ["        end"]
     assigns = [f"    assign {port} = {p.name(v)};"
                for port, v in unit.roots.items()]
+    seams = []
+    if mems:
+        from ..frame_history import _memory_module
+        m = mems[0]
+        seams = [""] + _memory_module(f"{module_name}_mem", m["bits"],
+                                      m["depth"], m["aw"])
     verilog = "\n".join(head + decls + p.lines + body + assigns +
-                        ["endmodule"])
+                        ["endmodule"] + seams)
     interface = _interface(img.bits, f["out_bits"], f["out_signed"], params)
     if f.get("window") is not None:
         # the frame it hands on is the window's, set at run time: the traced
@@ -275,7 +300,9 @@ def generate(unit: Unit, module_name: str, dev=None,
         "out_rows": img.height, "out_cols": img.width,
         "module": module_name,
         "image": img,
-        "memories": [],
+        "memories": [{"instance": m["instance"], "module":
+                      f"{module_name}_mem", "bits": m["bits"],
+                      "depth": m["depth"], "read": "sync"} for m in mems],
         "pipeline_stages": f.get("stages", 1),
         "flush_cycles": f.get("stages", 1) + 1,
     })

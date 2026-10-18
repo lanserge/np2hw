@@ -1,10 +1,11 @@
 # One graph: indexes, access, data
 
 Status: in progress, its decisions settled (see the end). The graph core,
-the tracer, canonicalising and the pointwise family's lowering are built in
-`np2hw.core`, and `to_ir` hands every model to it first; a model it does
-not reach yet is lowered by np2hw's present compiler, the reference it is
-measured against. `NP2HW_CORE=off` forces the reference, `NP2HW_CORE=strict`
+the tracer, canonicalising, the pointwise family's lowering and reads
+across a video's frames are built in `np2hw.core`, and `to_ir` hands every
+model to it first; a model it does not reach yet is lowered by np2hw's
+present compiler, the reference it is measured against -- except a video,
+which the reference has no frame axis for. `NP2HW_CORE=off` forces the reference, `NP2HW_CORE=strict`
 refuses the fallback, and `NP2HW_CORE_LOG` names a file recording which
 path each model took.
 
@@ -311,8 +312,9 @@ off them:
 
 On the frame axis the same rule is the frame history: the spread of starts
 in `t` is the number of frame stores -- derived from the reads, never
-declared -- and a sensor's capture loop (a time-of-flight phase) is a
-register start on `t`, as the CFA phase is on rows and columns.
+declared -- and the latest start is the live frame. A sensor's capture
+loop (a time-of-flight phase) is not a start on `t` but a scalar input,
+the routing among the stored frames arithmetic on it (decision 6).
 
 Where the rule stops: combining two lattices needs one brought onto the
 other's, and upsampling would be a step below 1, which an index refuses; a
@@ -517,8 +519,13 @@ Access across time is access on `t`, and everything spatial carries over:
 
 - the history's depth is the spread of starts on `t` -- frame stores,
   derived, never declared;
-- a sensor's capture loop is a register start on `t` -- a remainder chosen
-  at run time, as the CFA phase is on rows and columns;
+- a sensor's capture loop is a SCALAR INPUT -- the live frame's place in
+  the loop, constant for the frame -- and which stored frame carries which
+  phase is arithmetic on it, a lookup and a select. Where the input comes
+  from -- the stream's frame phase, read from each frame's header; a
+  register; a counter -- is bound where the design is composed (a node's
+  input bindings in the pipeline's JSON), never said in the model, which
+  is math on its inputs and nothing else;
 - the start of the history follows what the model wrote: a slice that
   leaves the first frames out (`v[3:]`) makes fewer output frames, and the
   first outputs come once the history is full; a pad on `t` defines them by

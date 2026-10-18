@@ -76,5 +76,7 @@ def _cost(n, dev):
         return dev.absolute(n.value.type.bits)
     if k in ("hw.sel", "hw.and", "hw.or"):
         return dev.select()
+    if k == "hw.memread":
+        return dev.mem()
     raise ValueError(f"no cost for {k} -- a new kind needs its hardware "
                      "shape here before it ships")
