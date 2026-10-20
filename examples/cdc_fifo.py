@@ -29,6 +29,11 @@ picture of the other's, so full and empty err only toward caution.
   PORTS LEAVE FLOPS       in_ready and out_valid/out_data are
                           registers -- the boundary rule holds at a
                           clock boundary too.
+  NOT THE RAM'S FLOP      the register out_data leaves is loaded from
+                          another register, never from the RAM: a block
+                          RAM's read is clocked, so a register loaded
+                          from it IS the RAM, its slow clock-to-out on
+                          the port and on whatever is built after it.
 
 Run:  python examples/cdc_fifo.py   (needs iverilog)
 """
@@ -183,6 +188,15 @@ def main():
           "assign in_ready = w_ready_q;" in v
           and "assign out_valid = out_q_v;" in v
           and "assign out_data  = out_q;" in v)
+    # every load of the port's register, and every read of the RAM
+    loads = [l for l in lines if l.startswith("out_q ") or "out_q   <=" in l
+             or l.startswith("out_q <=")]
+    reads = [l for l in lines if "<= mem[" in l]
+    check("the port is not the RAM's read latch",
+          loads and all("mem[" not in l for l in loads)
+          and reads and all("out_q" not in l for l in reads),
+          "the RAM's read lands in its own latch, and a register after it "
+          "is the port")
 
     print("\n" + ("CDC_FIFO PASS" if all(ok) else "SOME FAILED"))
     return 0 if all(ok) else 1

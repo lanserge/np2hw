@@ -80,24 +80,34 @@ module np2hw_cdc_fifo #(
 
     // ---- read side, in rclk -------------------------------
     (* ASYNC_REG = "TRUE" *) reg [A:0] rq_wgray0 = 0, rq_wgray = 0;
+    // First-word-fall-through through TWO registers. The first is the
+    // RAM's own read latch -- a block RAM's read is clocked, so that flop
+    // is the RAM, and its clock-to-out is the RAM's, slow. The second is a
+    // register after it, so the port is a flop and what the reader builds
+    // on it starts from one; a tool may fold it into the RAM's output
+    // register. Each stage loads whenever it is free or the one after it
+    // is taking its word: one read clock of latency, and no bubble.
+    reg          m_v = 1'b0;            // the read latch holds a word
+    reg  [W-1:0] m_q;
     reg          out_q_v = 1'b0;
     reg  [W-1:0] out_q;
     assign out_valid = out_q_v;
     assign out_data  = out_q;
     wire r_empty = (rgray == rq_wgray);
-    // First-word-fall-through, through a register: a word is
-    // popped into the output flop whenever that flop is free or
-    // being drained, so the port never exposes the RAM read.
-    wire r_pop   = !r_empty && (!out_q_v || out_ready);
+    wire m_move  = m_v && (!out_q_v || out_ready);
+    wire r_pop   = !r_empty && (!m_v || m_move);
     wire [A:0] rbin_n = rbin + {{A{1'b0}}, r_pop};
     always @(posedge rclk) begin
         if (rrst) begin
-            rbin <= 0; rgray <= 0; out_q_v <= 1'b0;
+            rbin <= 0; rgray <= 0; m_v <= 1'b0; out_q_v <= 1'b0;
             rq_wgray0 <= 0; rq_wgray <= 0;
         end else begin
             rq_wgray0 <= wgray; rq_wgray <= rq_wgray0;
-            if (r_pop) begin
-                out_q   <= mem[rbin[A-1:0]];
+            if (r_pop) m_q <= mem[rbin[A-1:0]];
+            if (r_pop) m_v <= 1'b1;
+            else if (m_move) m_v <= 1'b0;
+            if (m_move) begin
+                out_q   <= m_q;
                 out_q_v <= 1'b1;
             end else if (out_ready) out_q_v <= 1'b0;
             rbin <= rbin_n; rgray <= (rbin_n >> 1) ^ rbin_n;

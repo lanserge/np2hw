@@ -276,6 +276,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed (resources)
 
+- **`cdc_fifo` reads through a register after the RAM.** Its one output
+  register was loaded from the RAM, and a block RAM's read is clocked, so
+  that register was the RAM's own read latch: the RAM's slow clock-to-out
+  on the port and at the head of whatever the reader built on it -- on the
+  PYNQ-Z2 the board's worst path, the ISP's first stage. The read latch
+  now feeds a register that is the port (a tool may fold it into the RAM's
+  output register). **One more read clock of latency.**
 - **`cdc_fifo`'s memory is block RAM at every depth.** A shallow FIFO
   used to infer LUT RAM, whose read is combinational from the write
   clock's stores -- a path from one domain into the other that a timer
