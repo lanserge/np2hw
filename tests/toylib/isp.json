@@ -2,6 +2,7 @@
   "blocks": {
     "isp": {
       "description": "The toy ISP: a bias, then a balance. Geometry arrives with the stream.",
+      "vocabulary": "toylib.blocks:VOCABULARY",
       "parameters": {
         "bit_depth": {
           "description": "depth samples arrive at"
@@ -35,7 +36,10 @@
       ],
       "nodes": {
         "bias": {
-          "block": "toylib.blocks:bias"
+          "block": "toylib.blocks:bias",
+          "bind": {
+            "phase": "phase"
+          }
         },
         "balance": {
           "block": "toylib.blocks:balance"

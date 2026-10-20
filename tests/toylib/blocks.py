@@ -1,13 +1,11 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
 """Toy blocks -- a gain, an offset, a 2x2 balance, a bias that reads the phase, a channel splitter and
-joiner, a statistics sink -- and the context they are declared with."""
-import functools
-
+joiner, a statistics sink -- and the context the toy designs name."""
 import numpy as np
 
 from np2hw import saturate
-from np2hw.blocks import ContextBit, StreamPort, block, configblock
+from np2hw.blocks import StreamPort, block, configblock
 from np2hw.blocks.params import Context, Param, StatsWindow, Vocabulary
 
 CONTEXT = (
@@ -28,13 +26,15 @@ ctxblock = configblock("ctxblock", version=(1, 0),
                        params=[c.as_param() for c in CONTEXT
                                if c.origin != "stream"] + [COMMIT])
 VOCABULARY = Vocabulary(CONTEXT, block=ctxblock, commit="commit")
-toyblock = functools.partial(block, vocabulary=VOCABULARY)
+#: The toy blocks. They know nothing of the pipeline they are placed in:
+#: the toy designs name VOCABULARY.
+toyblock = block
 
 
 @toyblock(version=(1, 0), description="multiply by a gain",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
           params=[Param("gain", bits=4, default=2, description="the gain")])
-def gain(pixel, p, ctx, bit_depth):
+def gain(pixel, p, bit_depth):
     return saturate(pixel.astype(np.int32) * p.gain, bit_depth)
 
 
@@ -42,13 +42,13 @@ def gain(pixel, p, ctx, bit_depth):
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
           params=[Param("offset", bits=8, default=1,
                         description="what is added")])
-def offset(pixel, p, ctx, bit_depth):
+def offset(pixel, p, bit_depth):
     return saturate(pixel.astype(np.int32) + p.offset, bit_depth)
 
 
 @toyblock(version=(1, 0), description="one sample into two channels",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
-def pair(pixel, p, ctx, bit_depth):
+def pair(pixel, p, bit_depth):
     value = pixel.astype(np.int32)
     return np.stack([saturate(value - 1, bit_depth),
                      saturate(value + 1, bit_depth)], axis=-1)
@@ -56,7 +56,7 @@ def pair(pixel, p, ctx, bit_depth):
 
 @toyblock(version=(1, 0), description="two channels into three",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
-def triple(pixel, p, ctx, bit_depth):
+def triple(pixel, p, bit_depth):
     a, b = pixel[..., 0].astype(np.int32), pixel[..., 1].astype(np.int32)
     return np.stack([saturate(a - b, bit_depth), saturate(b - a, bit_depth),
                      saturate(a + b, bit_depth)], axis=-1)
@@ -69,21 +69,20 @@ def triple(pixel, p, ctx, bit_depth):
                         description="what counts as bright")],
           stats=[StatsWindow("counts", words=4, layout=("bright", "dark"),
                              description="two records of two counts")])
-def meter(pixel, p, ctx, bit_depth):
+def meter(pixel, p, bit_depth):
     return np.array([(pixel >= p.level).sum(), (pixel < p.level).sum()])
 
 
 @toyblock(version=(1, 0), description="add two biases and the phase's low bit",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
-          consumes=("phase",),
-          context=(ContextBit("odd", "phase", bit=0,
-                              description="low bit of the phase"),),
           params=[Param("bias", bits=10, signed=True, frac=2, shape=(2,),
                         labels=("coarse", "fine"),
                         description="Signed bias ADDED to the sample. Write "
-                                    "a quarter-step value: 4 is one level")])
-def bias(pixel, p, ctx, bit_depth):
-    value = pixel.astype(np.int32) * 4 + p.bias[0] + p.bias[1] + ctx.odd
+                                    "a quarter-step value: 4 is one level"),
+                  Param("phase", bits=2, default=0,
+                        description="a 2-bit phase; its low bit is added")])
+def bias(pixel, p, bit_depth):
+    value = pixel.astype(np.int32) * 4 + p.bias[0] + p.bias[1] + (p.phase & 1)
     return saturate(value >> 2, bit_depth)
 
 
@@ -94,6 +93,6 @@ def bias(pixel, p, ctx, bit_depth):
                         configurable=("bits", "frac"),
                         description="Gain per cell of the 2x2 tile; the "
                                     "reset is unity")])
-def balance(pixel, p, ctx, bit_depth):
+def balance(pixel, p, bit_depth):
     value = pixel.astype(np.int32) * p.gain[0, 0]
     return saturate(value >> p.decl.gain.frac, bit_depth)

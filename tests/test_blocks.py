@@ -1,36 +1,34 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
 """np2hw.blocks: a model plus what its arithmetic cannot say."""
-import functools
-
 import numpy as np
 import pytest
 
 from np2hw import saturate
-from np2hw.blocks import StreamPort, ContextBit, block, registry, resolve
+from np2hw.blocks import StreamPort, block, registry, resolve
 from np2hw.blocks.params import Context, Param
 from np2hw.blocks.stream import StreamSpec
+from toylib.blocks import VOCABULARY as TOY
 
+# what a design would name: the context its bindings read
 VOCABULARY = {
-    "phase": Context(name="phase", bits=2, description="a 2x2 tile phase",
-                     even_frame=True),
+    "phase": Context(name="phase", bits=2, description="a 2x2 tile phase"),
     "depth": Context(name="depth", bits=5, description="bits in use"),
 }
-toyblock = functools.partial(block, vocabulary=VOCABULARY)
 
 
-@toyblock(version=(1, 0), description="add an offset",
-          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
-          consumes=("phase",),
-          context=(ContextBit("row", "phase", bit=1),),
-          params=[Param("offset", bits=8, default=3,
-                        description="what is added", configurable=("bits",))])
-def offset(pixel, p, ctx, bit_depth):
+@block(version=(1, 0), description="add an offset",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
+       params=[Param("offset", bits=8, default=3,
+                     description="what is added", configurable=("bits",)),
+               Param("phase", bits=2, description="a 2x2 tile phase")],
+       even_frame=True)
+def offset(pixel, p, bit_depth):
     return pixel + p.offset
 
 
 def test_a_block_is_its_model():
-    assert offset(np.array([1, 2]), type("P", (), {"offset": 4}), None,
+    assert offset(np.array([1, 2]), type("P", (), {"offset": 4}),
                   8).tolist() == [5, 6]
     assert offset.name == "offset"
     assert offset.ports.inputs == ("in",) and offset.ports.outputs == ("out",)
@@ -38,34 +36,33 @@ def test_a_block_is_its_model():
 
 def test_run_validates_context_from_the_vocabulary():
     frame = np.full((2, 4), 250, dtype=np.int64)
-    assert (offset.run(frame, bit_depth=8, phase=3) == 253).all()
+    bound = offset.bind({"offset": "phase", "phase": "phase"}, VOCABULARY)
+    assert (bound.run(frame, bit_depth=8, phase=3) == 253).all()
     with pytest.raises(ValueError, match="outside its declared 2-bit range"):
-        offset.run(frame, bit_depth=8, phase=4)
+        bound.run(frame, bit_depth=8, phase=4)
     with pytest.raises(TypeError, match="does not consume"):
-        offset.run(frame, bit_depth=8, depth=8)
+        bound.run(frame, bit_depth=8, depth=8)
 
 
-def test_a_signal_that_needs_an_even_frame_refuses_an_odd_one():
-    with pytest.raises(ValueError, match="odd dimension"):
-        offset.run(np.zeros((3, 4), dtype=np.int64), bit_depth=8)
+def test_a_block_whose_math_needs_an_even_frame_refuses_an_odd_one():
+    """The block's own statement about its math, whatever feeds its
+    inputs."""
+    for block_ in (offset, offset.bind({"phase": "phase"}, VOCABULARY)):
+        with pytest.raises(ValueError, match="odd dimension"):
+            block_.run(np.zeros((3, 4), dtype=np.int64), bit_depth=8)
 
 
-def test_a_block_without_a_vocabulary_cannot_consume_context():
-    @block(version=(1, 0), description="reads a phase it cannot know",
-           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
-           consumes=("phase",),
-           params=[Param("k", bits=4, description="unused")])
-    def orphan(pixel, p, ctx, bit_depth):
-        return pixel
-    with pytest.raises(KeyError, match="context vocabulary does not declare"):
-        orphan.run(np.zeros((2, 2), dtype=np.int64), bit_depth=8)
+def test_a_binding_reads_only_what_the_design_declares():
+    with pytest.raises(ValueError, match="context does not declare"):
+        offset.bind({"offset": "phase"})
+    with pytest.raises(ValueError, match="context does not declare"):
+        offset.bind({"offset": "tock"}, VOCABULARY)
 
 
 def test_a_variant_is_cached_and_refuses_what_is_not_configurable():
     wide = offset.configure({"offset": {"bits": 12}})
     assert wide is offset.configure({"offset": {"bits": 12}})
     assert wide.params.params[0].bits == 12
-    assert wide.vocabulary is VOCABULARY
     with pytest.raises(ValueError, match="does not allow overriding"):
         offset.configure({"offset": {"frac": 2}})
 
@@ -90,7 +87,7 @@ def test_blocks_are_discovered_in_a_package(tmp_path, monkeypatch):
         "@block(version=(1, 0), description='increment',\n"
         "       inputs=(StreamPort('in'),), outputs=(StreamPort('out'),),\n"
         "       params=[Param('k', bits=4, description='step')])\n"
-        "def inc(pixel, p, ctx, bit_depth):\n"
+        "def inc(pixel, p, bit_depth):\n"
         "    return pixel + p.k\n")
     monkeypatch.syspath_prepend(str(tmp_path))
     assert set(registry("discolib")) == {"inc"}
@@ -120,9 +117,10 @@ def test_the_model_and_its_rtl_agree_where_a_sum_wraps():
     from np2hw.pipeline import run as runner
     from toylib.blocks import offset as toy_offset
     # toylib's offset, less its saturation: a sum that wraps
-    wrap = dataclasses.replace(toy_offset, model=lambda pixel, p, ctx,
+    wrap = dataclasses.replace(toy_offset, model=lambda pixel, p,
                                bit_depth: pixel + p.offset)
     design = assemble("t", {"o": wrap}, [("in", "o.in"), ("o.out", "out")],
+                      vocabulary=TOY,
                       stream={"bits": 8, "max_width": 16, "max_height": 4})
     chain = runner.pixel_chain(design, "in", None)
     values = {"o": {"offset": 9}, "ctxblock": {}}
@@ -165,24 +163,23 @@ def test_a_device_must_say_how_its_multiplier_is_built():
         Unstated()
 
 
-from toylib.blocks import toyblock as libblock  # noqa: E402 (a runnable vocabulary)
 
 
-@libblock(version=(1, 0), description="four times the pixel, clipped",
-          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
-def quadruple(pixel, p, ctx, bit_depth):
+@block(version=(1, 0), description="four times the pixel, clipped",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def quadruple(pixel, p, bit_depth):
     return saturate(pixel.astype(np.int32) * 4, bit_depth)
 
 
-@libblock(version=(1, 0), description="minus four times the pixel, lifted",
-          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
-def negquadruple(pixel, p, ctx, bit_depth):
+@block(version=(1, 0), description="minus four times the pixel, lifted",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def negquadruple(pixel, p, bit_depth):
     return saturate(pixel.astype(np.int32) * -4 + 1020, bit_depth)
 
 
-@libblock(version=(1, 0), description="an edge, made non-linear: 4c - |w - e|",
-          inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
-def edge(pixel, p, ctx, bit_depth):
+@block(version=(1, 0), description="an edge, made non-linear: 4c - |w - e|",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+def edge(pixel, p, bit_depth):
     height, width = pixel.shape[:2]
     x = np.pad(pixel.astype(np.int32), ((0, 0), (1, 1)), mode="edge")
     c, w, e = (x[:, 1 + d:1 + d + width] for d in (0, -1, 1))
@@ -204,6 +201,7 @@ def _shifts_are_built_as_shifts(block):
     assert SERIES7.mul_attribute not in v      # no multiplier for a 2**k
     assert " * " not in v and "<<" in v
     design = assemble("t", {"b": block}, [("in", "b.in"), ("b.out", "out")],
+                      vocabulary=TOY,
                       stream={"bits": 8, "max_width": 16, "max_height": 4})
     chain = runner.pixel_chain(design, "in", None)
     frame = np.random.default_rng(3).integers(0, 256, (4, 16))

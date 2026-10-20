@@ -35,7 +35,7 @@ PHASE = 0b11
 
 @pytest.fixture
 def pipeline():
-    return build(describe("isp", chain("bias"),
+    return build(describe("isp", chain("bias", bind={"bias": {"phase": "phase"}}),
                           bit_depth=BIT_DEPTH, width=WIDTH, height=HEIGHT))
 
 
@@ -214,7 +214,7 @@ def test_a_declared_but_unbuilt_block_says_so_in_both_artefacts():
     one document. What must not happen is software writing a coefficient, seeing
     it read back, and having no way to know it reached nothing.
     """
-    pipeline = build(describe("isp", chain("bias", "meter"),
+    pipeline = build(describe("isp", chain("bias", "meter", bind={"bias": {"phase": "phase"}}),
                               bit_depth=BIT_DEPTH, width=WIDTH, height=HEIGHT))
     blocks = {block["path"]: block for block in compose.register_map(pipeline)["blocks"]}
     assert blocks["bias"]["implemented"] is True
@@ -353,7 +353,7 @@ def test_the_map_states_every_register_presentation():
     complement in JavaScript -- the map is generated output and states
     what one rule derived."""
     built = build(describe(
-        "present", chain("bias", "balance"),
+        "present", chain("bias", "balance", bind={"bias": {"phase": "phase"}}),
         bit_depth=BIT_DEPTH, width=WIDTH, height=HEIGHT))
     blocks = {b["path"]: {r["name"]: r for r in b["registers"]}
               for b in compose.register_map(built)["blocks"]}
@@ -378,9 +378,9 @@ def test_the_crossing_constraint_names_what_the_verilog_declares():
     import re
     from np2hw.design.composite import assemble
     from np2hw.pipeline import compose
-    from toylib.blocks import gain
+    from toylib.blocks import VOCABULARY, gain
     design = assemble("x", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
-                      stream={"bits": 8, "max_width": 16, "max_height": 4})
+                      vocabulary=VOCABULARY, stream={"bits": 8, "max_width": 16, "max_height": 4})
     generated = compose.generate(design, control=True)
     (crossing,) = generated.meta["constraints"]
     assert crossing["apart"] == ["clk", "s_axil_aclk"]

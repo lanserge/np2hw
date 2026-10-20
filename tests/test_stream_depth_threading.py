@@ -18,7 +18,7 @@ from np2hw import saturate
 from np2hw.blocks import StreamPort
 from np2hw.design.composite import assemble
 from np2hw.pipeline import compose
-from toylib.blocks import gain, offset, pair, toyblock, triple
+from toylib.blocks import VOCABULARY, gain, offset, pair, toyblock, triple
 
 WIDTH, HEIGHT = 32, 16
 
@@ -31,7 +31,7 @@ def _chain(name, bit_depth, names_and_blocks):
         source = f"{path}.{block.ports.outputs[0]}"
     edges.append((source, "out"))
     return assemble(name, dict(names_and_blocks), edges,
-                    stream={"bits": bit_depth, "max_width": WIDTH,
+                    vocabulary=VOCABULARY, stream={"bits": bit_depth, "max_width": WIDTH,
                             "max_height": HEIGHT})
 
 
@@ -80,7 +80,7 @@ def test_channels_still_thread_from_the_trace():
     inputs=(StreamPort("in", "Any single-component stream."),),
     outputs=(StreamPort("out", "The same value, one bit taller."),),
 )
-def widen(pixel, p, ctx, bit_depth: int):
+def widen(pixel, p, bit_depth: int):
     return (pixel.astype(np.int32) * 2).astype(np.uint32)
 
 
@@ -90,7 +90,7 @@ def widen(pixel, p, ctx, bit_depth: int):
     inputs=(StreamPort("in", "Any single-component stream."),),
     outputs=(StreamPort("out", "Eight bits."),),
 )
-def narrow(pixel, p, ctx, bit_depth: int):
+def narrow(pixel, p, bit_depth: int):
     return saturate(pixel.astype(np.int32), 8).astype(np.uint16)
 
 
@@ -193,7 +193,7 @@ def test_geometry_is_threaded_from_the_driver_not_broadcast():
     inputs=(StreamPort("in", "Any single-component stream."),),
     outputs=(StreamPort("out", "The same depth."),),
 )
-def reflect(pixel, p, ctx, bit_depth: int):
+def reflect(pixel, p, bit_depth: int):
     return (((1 << bit_depth) - 1) - pixel.astype(np.int32)).astype(np.uint16)
 
 
@@ -230,7 +230,7 @@ def test_the_run_and_the_rtl_agree_across_a_narrowing():
     inputs=(StreamPort("in", "Any single-component stream."),),
     outputs=(StreamPort("out", "Not what the trace says."),),
 )
-def two_faced(pixel, p, ctx, bit_depth: int):
+def two_faced(pixel, p, bit_depth: int):
     if isinstance(pixel, np.ndarray):
         return pixel[1:, :]
     return saturate(pixel.astype(np.int32), bit_depth)

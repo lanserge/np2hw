@@ -21,7 +21,8 @@ it contains, written on the node they set:
 
     "isp": {"block": "acme.pipelines.isp:isp",
             "build":  {"bit_depth": 12},          what changes the hardware
-            "values": {"ccm.m": [[...], ...]}}    what the hardware holds
+            "values": {"ccm.m": [[...], ...]},    what the hardware holds
+            "bind":   {"quad.pos": "frame_seq & 3"}}  what feeds an input
 
 Keys are paths relative to the node. A setting written further out wins over
 one written further in, so the design -- the block you build -- has the last
@@ -40,6 +41,15 @@ by ``eval``. What an expression becomes depends on what it references:
     one register, alone                 an ALIAS: two paths, one register
     registers in arithmetic             refused, until np2hw can trace
                                         arithmetic between two parameters
+
+A binding is the third kind of setting: a block's scalar input fed by an
+expression rather than by a register of its own. Its names are the
+pipeline context the design's vocabulary declares -- run-time facts, so
+the expression is hardware, folded into the block's core -- and build
+parameters in scope, which are integers at load like any other. A
+composite names that vocabulary (``"vocabulary": "acme.ctx:VOCABULARY"``),
+and every composite of one design that names one names the same: a block
+knows nothing of the pipeline it is placed in.
 
 What load() returns is the tree FLATTENED: every leaf instance at its full
 path (``isp.ccm``), with its build settings and register values resolved,
@@ -416,6 +426,9 @@ class Design:
     # the design as a netlist (np2hw.design.netlist): every leaf with its
     # implementation, settings and resolved ports, every bundle and net --
     # the product the checks and the toolchains read
+    # the pipeline context its composites name (np2hw.blocks.params.
+    # Vocabulary), or None where none does
+    vocabulary: object = None
     streams: dict = field(default_factory=dict)
     # top input -> the facts of the stream entering it (bits, max_width,
     # max_height, context), from every input port it passes through on its
@@ -450,7 +463,7 @@ class _Node:
 
 @dataclass
 class _Setting:
-    kind: str                    # "build" | "values"
+    kind: str                    # "build" | "values" | "bind"
     target: str                  # absolute path of the parameter
     raw: object                  # literal or expression text
     scope: str                   # path of the composite it is written in
@@ -496,6 +509,9 @@ class _Loader:
         self.elaborations: dict[str, tuple] = {}
         self.elaborating: list[str] = []
         self.whole: dict[str, Instance] = {}
+        # the pipeline context the design's composites name: (vocabulary,
+        # where it was first named), or None
+        self.named_vocabulary = None
         self.inactive: set[str] = set()
         self.nodes: dict[str, _Node] = {}
         self.settings: dict[tuple[str, str], _Setting] = {}
@@ -511,6 +527,8 @@ class _Loader:
         self.nodes[path] = node
         if found.kind != "composite":
             return
+        if "vocabulary" in found.obj:
+            self.name_vocabulary(found.obj["vocabulary"], found.ref)
         depth = 0 if not path else path.count(".") + 1
         clash = sorted(set(found.obj.get("parameters", {}))
                        & set(found.obj["nodes"]))
@@ -524,7 +542,7 @@ class _Loader:
             where = f"{found.ref}: node {name}"
             # Its settings first: what fills a node beneath it may be one of
             # them, and must be known before that node is expanded.
-            for kind in ("build", "values"):
+            for kind in ("build", "values", "bind"):
                 for key, raw in child.get(kind, {}).items():
                     self.add_setting(_Setting(
                         kind, _join(child_path, key), raw, path, depth,
@@ -535,6 +553,22 @@ class _Loader:
                 child_found = _generated(child_found, child, where)
             self.expand(child_path, child_found, path, child,
                         [*stack, found.ref])
+
+    def name_vocabulary(self, ref: str, where: str) -> None:
+        """A composite's ``vocabulary``: the pipeline context its design's
+        bindings and streams read. One design, one vocabulary."""
+        obj = find_vocabulary(ref, where)
+        if self.named_vocabulary is None:
+            self.named_vocabulary = (obj, where)
+        elif self.named_vocabulary[0] is not obj:
+            raise CompositionError(
+                f"{where}: vocabulary {ref}, where "
+                f"{self.named_vocabulary[1]} names another; a design's "
+                "pipeline has one context")
+
+    @property
+    def vocabulary(self):
+        return self.named_vocabulary[0] if self.named_vocabulary else None
 
     def filling(self, path: str, found: Found, entry: dict,
                 where: str) -> Found:
@@ -890,6 +924,7 @@ class _Loader:
             edges=edges,
             aliases={k[len(path) + 1:]: v[len(path) + 1:]
                      for k, v in aliases.items()},
+            vocabulary=self.vocabulary,
             streams=self.streams(forward, path))
 
     def elaborate(self, path: str, where: str):
@@ -992,6 +1027,10 @@ class _Loader:
                 raise CompositionError(
                     f"{setting.where}: {target} is a build parameter; set "
                     "it under build, not values")
+            if kind == "bind" and what != "register":
+                raise CompositionError(
+                    f"{setting.where}: {target} is a build parameter; what "
+                    "is bound is a block's scalar input")
 
         # What this build has: a node whose `when` is false is not built,
         # and neither is anything inside it.
@@ -1070,6 +1109,7 @@ class _Loader:
             aliases=aliases,
             pins=self.pins(),
             constraints=self.constraints(),
+            vocabulary=self.vocabulary,
         )
         design.streams = self.streams(self.forward)
         design.hierarchy = {
@@ -1269,6 +1309,22 @@ class _Loader:
             # of the configured variant, so the map, the RTL's reset and the
             # model's defaults all read them from one place.
             leaf = node.found.obj.configure(overrides or None, resets=values)
+        bindings = {}
+        for (kind, target), setting in self.settings.items():
+            if kind != "bind" or self.split(target, setting.where)[0] \
+                    is not node:
+                continue
+            name = target[len(path) + 1:]
+            if name in values:
+                raise CompositionError(
+                    f"{setting.where}: {target} is bound, and a value is set "
+                    "for it too; a bound input has no register to hold one")
+            bindings[name] = self.binding(setting, leaf)
+        if bindings:
+            try:
+                leaf = leaf.bind(bindings, self.vocabulary)
+            except (ValueError, KeyError) as error:
+                raise CompositionError(f"{path}: {error}") from None
         config = dict(node.entry.get("config", {}))
         if isinstance(leaf, dict) and "implementation_config" in leaf:
             if _vendor_ip(leaf):
@@ -1290,6 +1346,30 @@ class _Loader:
                         values=values, domain=node.entry.get("domain"),
                         description=node.entry.get("description", ""),
                         config=config)
+
+    def binding(self, setting: _Setting, block):
+        """A binding's expression as the block takes it: every name that is
+        no context signal of the design's vocabulary is a build parameter
+        in the setting's scope, and becomes the integer it is."""
+        if not isinstance(setting.raw, str):
+            return setting.raw
+        tree = parse(setting.raw, setting.where)
+        context = set(self.vocabulary or ())
+        loader, changed = self, []
+
+        class Fold(ast.NodeTransformer):
+            def fold(self, node):
+                path = _dotted(node)
+                if path is None or path in context:
+                    return self.generic_visit(node)
+                changed.append(path)
+                return ast.copy_location(ast.Constant(loader.evaluate_build(
+                    path, setting.scope, setting.where)), node)
+
+            visit_Name = visit_Attribute = fold
+
+        tree = Fold().visit(tree)
+        return ast.unparse(tree) if changed else setting.raw
 
     def register_value(self, setting: _Setting, target: str, aliases: dict):
         """A literal, a constant from build parameters, or an alias. None
@@ -1777,12 +1857,29 @@ def _check_register(block, register: str, value, where: str) -> None:
     check(value)
 
 
+def find_vocabulary(ref: str, where: str = ""):
+    """The Vocabulary ``package.module:NAME`` names."""
+    from np2hw.blocks.params import Vocabulary
+
+    module, colon, name = ref.partition(":")
+    try:
+        obj = getattr(importlib.import_module(module), name) if colon \
+            else None
+    except (ImportError, AttributeError) as error:
+        raise CompositionError(f"{where}: vocabulary {ref}: {error}") \
+            from None
+    if not isinstance(obj, Vocabulary):
+        raise CompositionError(f"{where}: vocabulary {ref} names no "
+                               "Vocabulary (package.module:NAME)")
+    return obj
+
+
 def assemble(name: str, blocks: dict, edges, *, inputs=("in",),
-             outputs=("out",), stream: dict) -> Design:
+             outputs=("out",), stream: dict, vocabulary=None) -> Design:
     """A design built in code: ``blocks`` ``{path: Block}`` wired by
     ``edges`` ``[(source, sink), ...]``, every input entered by ``stream``
     (``bits``, ``max_width``, ``max_height``, and optionally ``channels``
-    and ``context``).
+    and ``context``), its pipeline context ``vocabulary``.
 
     For what a library file cannot name -- a chain cut out of a loaded
     design to run as a twin, a block a test declares on the spot. It is the
@@ -1795,6 +1892,7 @@ def assemble(name: str, blocks: dict, edges, *, inputs=("in",),
                                   leaf=block, folder=Path("."))
                    for path, block in blocks.items()},
         composites={"": name}, edges=[tuple(e) for e in edges], aliases={},
+        vocabulary=vocabulary,
         streams={port: dict(stream) for port in inputs})
 
 

@@ -1,9 +1,9 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
 """np2hw.pipeline: a composite of model blocks, composed and allocated."""
-import functools
-
 import pytest
+
+from designs import build, chain, describe
 
 from np2hw import pipeline
 from np2hw.blocks import StreamPort, block
@@ -34,26 +34,29 @@ def test_modules_are_named_for_the_models_package():
 
 
 def test_a_register_only_context_cannot_arrive_with_the_stream():
-    from toylib.blocks import gain
+    from toylib.blocks import VOCABULARY, gain
     design = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
+                      vocabulary=VOCABULARY,
                       stream={"bits": 8, "max_width": 64, "max_height": 8,
                               "context": ["limit"]})
     with pytest.raises(ValueError, match="software's choice"):
         compose.shape(design)
 
 
-def test_blocks_of_two_vocabularies_are_refused():
-    from toylib.blocks import gain
-    other = Vocabulary((), block=None)
-    stranger = functools.partial(block, vocabulary=other)
+#: another family's pipeline context, for a design that names two
+OTHER = Vocabulary((), block=None)
 
-    @stranger(version=(1, 0), description="from another family",
-              inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
-              params=[Param("k", bits=4, description="unused")])
-    def alien(pixel, p, ctx, bit_depth):
-        return pixel
-    design = assemble("t", {"g": gain, "a": alien},
-                      [("in", "g.in"), ("g.out", "a.in"), ("a.out", "out")],
+
+def test_a_design_naming_two_vocabularies_is_refused():
+    description = describe("outer", chain("gain", prefix="inner"))
+    description["blocks"]["inner"]["vocabulary"] = "test_pipeline:OTHER"
+    with pytest.raises(CompositionError, match="has one context"):
+        build(description)
+
+
+def test_a_design_naming_no_vocabulary_has_no_pipeline():
+    from toylib.blocks import gain
+    design = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
                       stream={"bits": 8, "max_width": 64, "max_height": 8})
-    with pytest.raises(CompositionError, match="2 context vocabularies"):
+    with pytest.raises(CompositionError, match="names no pipeline context"):
         compose.stages(design)

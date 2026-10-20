@@ -481,10 +481,10 @@ CONTEXT_ORIGINS = ("register", "either", "stream")
 class Context:
     """A pipeline-wide fact owned by the context block and consumed as a wire.
 
-    Width, height, active window, Bayer phase, bit depth. A block that needs one
-    of these lists its name in ``CONSUMES``; the pipeline composer connects the
-    wire, from the stream where the design names the fact in ``stream.context``
-    and from the context block otherwise. It is emphatically not copied into the
+    Width, height, Bayer phase, bit depth, a frame count. A design binds a
+    block's input to an expression over them; the pipeline composer connects
+    the wire, from the stream where the design names the fact in
+    ``stream.context`` and from the context block otherwise. It is emphatically not copied into the
     consuming block's register map -- one owner per fact, and every block reads
     it.
     """
@@ -502,10 +502,6 @@ class Context:
     #: configures, it does not maintain -- and it exists in a pipeline only
     #: where the stream delivers it.
     origin: str = "either"
-    #: A block that indexes by this signal -- a colour-filter phase -- has a
-    #: consistent meaning only on a frame whose dimensions are both even, so
-    #: running one over an odd frame is refused.
-    even_frame: bool = False
     #: The fact of a frame this signal's value follows when a model is run
     #: over one -- ``"width"``, ``"height"`` or ``"bit_depth"`` -- so a run
     #: sets it from the frame rather than from a list of names somewhere.
@@ -537,15 +533,15 @@ class Context:
 
 
 class Vocabulary:
-    """The pipeline context a family of blocks may consume, and the block
-    that owns it.
+    """The pipeline context a design binds its blocks' inputs to, and the
+    block that owns it.
 
-    The content that writes blocks states it once and binds it in its
-    decorator. ``signals`` are the context declarations, in order;
-    ``block`` the configuration block that holds the register-backed ones
-    and is placed in every pipeline of those blocks; ``commit`` the name of
-    the register in it that lands a batch of coefficient writes. A mapping
-    from signal name to declaration."""
+    A design names it (a composite's ``vocabulary``, or ``assemble``'s);
+    the blocks it places know nothing of it. ``signals`` are the context
+    declarations, in order; ``block`` the configuration block that holds the
+    register-backed ones and is placed in the pipeline; ``commit`` the name
+    of the register in it that lands a batch of coefficient writes. A
+    mapping from signal name to declaration."""
 
     def __init__(self, signals, block=None, commit: str = "commit"):
         self.signals = tuple(signals)

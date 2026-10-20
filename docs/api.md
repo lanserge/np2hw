@@ -10,7 +10,7 @@ from np2hw import Netlist, Node, Endpoint                          # graph, pre-
 from np2hw import Reg, RegBlock, RegInstance, AddrMap, systemrdl   # register maps
 from np2hw import axil_regfile, control_wrap                       # control plane
 from np2hw import skid, tee, cdc_fifo, frame_history               # plumbing
-from np2hw.blocks import block, configblock, StreamPort, ContextBit  # blocks
+from np2hw.blocks import block, configblock, StreamPort, Binding     # blocks
 from np2hw.blocks.params import Param, ParamSet, Context, StatsWindow
 from np2hw.blocks.stream import StreamSpec
 from np2hw.design import composite                                 # designs
@@ -126,31 +126,43 @@ module.
 ## Blocks (`np2hw.blocks`)
 
 A block is a NumPy model plus what its arithmetic cannot say: its registers
-(`np2hw.blocks.params`: `Param`, `ParamSet`, `StatsWindow`, LOCAL offsets
-only, a composer assigning each instance its base), the names of its stream
-ports (`StreamPort`; widths are traced, never declared), and the pipeline
-context it reads (`consumes`, `ContextBit`).
+and scalar inputs (`np2hw.blocks.params`: `Param`, `ParamSet`,
+`StatsWindow`, LOCAL offsets only, a composer assigning each instance its
+base) and the names of its stream ports (`StreamPort`; widths are traced,
+never declared). It knows nothing of the pipeline it is placed in: what
+feeds an input is the design's -- its register, or the pipeline context the
+design binds it to.
 
 ```python
 @block(version=(1, 0), description="...", inputs=(StreamPort("in"),),
-       outputs=(StreamPort("out"),), consumes=("phase",),
-       context=(ContextBit("row", "phase", bit=1),),
-       params=[Param("gain", bits=16, frac=8, description="...")],
-       vocabulary=CONTEXT)                      # {name: Context}
-def gain(pixel, p, ctx, bit_depth): ...
+       outputs=(StreamPort("out"),),
+       params=[Param("gain", bits=16, frac=8, description="..."),
+               Param("phase", bits=2, description="...")],
+       even_frame=True)                         # its math tiles 2x2
+def gain(pixel, p, bit_depth):
+    row, col = p.phase >> 1, p.phase & 1        # slice starts, at run time
+    ...
 ```
 
 The decorated function IS the block: `Block.run(frame, values, bit_depth,
-**context)` runs it validated from the declarations -- each consumed signal's
-range from the vocabulary, a frame with an odd dimension refused where a
-signal says `even_frame` -- and `Block.generate(spec, width, height,
-module_name)` traces it into Verilog. `Block.configure()` gives the cached
-variant with register attributes overridden. `registry(package)` and
+**context)` runs it validated from the declarations -- each context signal
+a binding reads in its declared range, a frame with an odd dimension
+refused where the block says `even_frame` -- and `Block.generate(spec,
+width, height, module_name)` traces it into Verilog. `Block.configure()`
+gives the cached variant with register attributes overridden;
+`Block.bind({input: expression}, vocabulary)` the variant with scalar
+inputs bound, against the design's pipeline context -- each leaves the
+registers, its value the expression over the pipeline context (`"(tick + 1)
+& 3"`) or an integer, evaluated by the design's one walker over integers in
+a run and over traced values in a trace, so it is folded into the core and
+the core's ports are the context it reads. A value range the input cannot
+hold is refused. `registry(package)` and
 `resolve(package, name)` discover the blocks declared under a package.
 
-Content binds its context vocabulary once, in its own decorator
-(`functools.partial(block, vocabulary=...)`); np2hw names no context
-signal. Verilog traced from a model carries the copyright and
+A design names its pipeline context (`np2hw.blocks.params.Vocabulary`): a
+composite's `"vocabulary": "package.module:NAME"`, or `assemble`'s
+`vocabulary=`; every composite of one design that names one names the same.
+np2hw names no context signal. Verilog traced from a model carries the copyright and
 `SPDX-License-Identifier` its source file states (`model_header`): a design
 derived from a model is under the model's terms.
 
@@ -160,8 +172,10 @@ A design is JSON: a library file `{"blocks": {name: {...}}}`
 (`np2hw/design/blocks.schema.json`) of leaves and composites, a composite
 holding nodes -- each a block by reference, `package.module:block` from the
 top of the import path -- their connections, and settings by path (`build`
-for what shapes the hardware, `values` for what it holds; outermost wins;
-a string is always an expression). `composite.load(ref, build=None)`
+for what shapes the hardware, `values` for what it holds, `bind` for what
+feeds a block's scalar input in place of a register -- over the pipeline
+context and the build parameters in scope; outermost wins; a string is
+always an expression). `composite.load(ref, build=None)`
 flattens one into leaves at their full paths; its `.netlist`
 (`np2hw.design.netlist`) is the design as every tool reads it -- each leaf
 with its implementation, settings and resolved ports, every bundle and net

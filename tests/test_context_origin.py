@@ -9,26 +9,26 @@ delivers it.
 """
 import pytest
 
-from np2hw.blocks import ContextBit, StreamPort
+from np2hw.blocks import StreamPort
+from np2hw.blocks.params import Param
 from np2hw.design.composite import assemble
 from np2hw.pipeline import compose
-from toylib.blocks import gain, toyblock
+from toylib.blocks import VOCABULARY, gain, toyblock
 
 STREAM = {"bits": 8, "max_width": 16, "max_height": 8}
 
 
-@toyblock(version=(1, 0), description="reads the frame's tick",
+@toyblock(version=(1, 0), description="adds a one-bit input",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
-          consumes=("tick",),
-          context=(ContextBit("lo", "tick", bit=0,
-                              description="low bit of the tick"),))
-def ticked(pixel, p, ctx, bit_depth):
-    return pixel + ctx.lo
+          params=[Param("lo", bits=1, description="what is added")])
+def ticked(pixel, p, bit_depth):
+    return pixel + p.lo
 
 
 def _ticked(context_from_stream):
-    return assemble("t", {"t": ticked}, [("in", "t.in"), ("t.out", "out")],
-                    stream=dict(STREAM, context=list(context_from_stream)))
+    return assemble("t", {"t": ticked.bind({"lo": "tick & 1"}, VOCABULARY)},
+                    [("in", "t.in"), ("t.out", "out")],
+                    vocabulary=VOCABULARY, stream=dict(STREAM, context=list(context_from_stream)))
 
 
 def _offsets(design):
@@ -51,12 +51,12 @@ def test_where_the_stream_delivers_it_the_pipeline_has_it():
     generated = compose.generate(design, control=True)
     assert "ctx_tick" in dict(generated.modules)[generated.top]
     without = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
-                       stream=STREAM)
+                       vocabulary=VOCABULARY, stream=STREAM)
     assert _offsets(design) == _offsets(without)
     assert "tick" not in _offsets(design)
 
 
 def test_elsewhere_the_pipeline_does_not_have_it():
     design = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
-                      stream=STREAM)
+                      vocabulary=VOCABULARY, stream=STREAM)
     assert "tick" not in {c.name for c in compose.contexts(design)}

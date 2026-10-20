@@ -2,6 +2,7 @@
   "blocks": {
     "pipelines": {
       "description": "A gain then an offset: the smallest pipeline of two blocks.",
+      "vocabulary": "toylib.blocks:VOCABULARY",
       "parameters": {
         "bits": {
           "default": 8,
@@ -55,6 +56,7 @@
     },
     "wide": {
       "description": "The pipeline at 10 bits, set from outside.",
+      "vocabulary": "toylib.blocks:VOCABULARY",
       "inputs": [
         {
           "name": "in"
@@ -86,6 +88,7 @@
     },
     "rgb": {
       "description": "One sample into three channels: a gain, a splitter, a joiner.",
+      "vocabulary": "toylib.blocks:VOCABULARY",
       "inputs": [
         {
           "name": "in",
@@ -137,6 +140,7 @@
     },
     "long": {
       "description": "Six blocks in a line, longer than a short reset: each takes its frame size from the one before.",
+      "vocabulary": "toylib.blocks:VOCABULARY",
       "parameters": {
         "bits": {
           "default": 8,

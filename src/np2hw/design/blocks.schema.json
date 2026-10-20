@@ -96,6 +96,24 @@
         "$ref": "#/$defs/value"
       }
     },
+    "bindings": {
+      "description": "A block's scalar inputs, each fed by an expression instead of a register of its own. Keys are paths relative to the node (quad.pos). An integer is a constant; a string is an expression over the pipeline context its block's vocabulary declares -- run-time facts, so the expression is hardware, folded into the block's core -- and the build parameters in scope, integers at load.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*$"
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "string",
+            "minLength": 1
+          }
+        ]
+      }
+    },
     "ports": {
       "type": "array",
       "items": {
@@ -174,6 +192,11 @@
             }
           }
         },
+        "vocabulary": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "The pipeline context this composite's bindings and streams read: a Vocabulary by reference, package.module:NAME. Every composite of one design that names one names the same; its blocks know nothing of it."
+        },
         "inputs": {
           "$ref": "#/$defs/ports"
         },
@@ -215,6 +238,9 @@
               },
               "values": {
                 "$ref": "#/$defs/settings"
+              },
+              "bind": {
+                "$ref": "#/$defs/bindings"
               },
               "when": {
                 "type": "string",

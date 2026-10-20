@@ -21,18 +21,21 @@ def block_ref(name: str) -> str:
 
 
 def chain(*blocks: str, prefix: str | None = None,
-          source: str = "in", sink: str = "out") -> dict:
+          source: str = "in", sink: str = "out", bind: dict | None = None) -> dict:
     """A linear run of blocks, with sinks TAPPED -- to hand to describe().
 
     A block with no outputs does not advance the datapath: it taps whatever
     the last real block produced and the stream carries on past it. With a
     ``prefix`` the run is its own composite, instantiated under that name.
+    ``bind`` is {block: {input: expression}}, each node's bindings.
     """
     nodes, connections = {}, []
     current = "in" if prefix else source
     for name in blocks:
         ports = resolve("toylib", name).ports
         nodes[name] = {"block": block_ref(name)}
+        if bind and name in bind:
+            nodes[name]["bind"] = dict(bind[name])
         connections.append([current, f"{name}.{ports.inputs[0]}"])
         if ports.outputs:
             current = f"{name}.{ports.outputs[0]}"
@@ -47,7 +50,8 @@ def describe(name: str, *chains: dict, bit_depth: int = 8,
     """A library holding the composite ``name``, built for a ``bit_depth``
     stream of up to ``width`` x ``height`` on every input."""
     stream = {"bits": bit_depth, "max_width": width, "max_height": height}
-    top = {"inputs": [{"name": n, **stream} for n in inputs],
+    top = {"vocabulary": "toylib.blocks:VOCABULARY",
+           "inputs": [{"name": n, **stream} for n in inputs],
            "outputs": [{"name": n} for n in outputs],
            "nodes": {}, "connections": []}
     blocks = {name: top}

@@ -21,13 +21,15 @@ _count = itertools.count()
 
 
 def chain(*names_and_refs, **extra):
-    """A composite: in -> each node in order -> out."""
+    """A composite: in -> each node in order -> out, around the toy
+    pipeline context."""
     nodes = {n: {"block": r} for n, r in names_and_refs}
     order = [n for n, _ in names_and_refs]
     connections = [["in", f"{order[0]}.in"]]
     connections += [[f"{a}.out", f"{b}.in"] for a, b in zip(order, order[1:])]
     connections += [[f"{order[-1]}.out", "out"]]
-    return dict({"inputs": [{"name": "in"}], "outputs": [{"name": "out"}],
+    return dict({"vocabulary": "toylib.blocks:VOCABULARY",
+                 "inputs": [{"name": "in"}], "outputs": [{"name": "out"}],
                  "nodes": nodes, "connections": connections}, **extra)
 
 

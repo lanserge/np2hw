@@ -225,26 +225,20 @@ def shape(design) -> Shape:
 
 
 def vocabulary(design):
-    """The pipeline context of a design's blocks: the one vocabulary every
-    block that has one was declared with (np2hw.blocks.params.Vocabulary),
-    which names the context block placed in the pipeline."""
-    found = {}
-    for inst in design.instances.values():
-        leaf = inst.leaf
-        if isinstance(leaf, Block) and leaf.vocabulary is not None:
-            found.setdefault(id(leaf.vocabulary), (leaf.vocabulary, inst.path))
-    if len(found) != 1:
-        from np2hw.design.composite import CompositionError
-        where = sorted(path for _, path in found.values())
+    """The pipeline context of a design: the vocabulary its composites name
+    (np2hw.blocks.params.Vocabulary), which names the context block placed
+    in the pipeline. The blocks know nothing of it."""
+    from np2hw.design.composite import CompositionError
+
+    vocab = getattr(design, "vocabulary", None)
+    if vocab is None:
         raise CompositionError(
-            f"{design.ref}: its blocks bring {len(found)} context "
-            f"vocabularies{' (' + ', '.join(where) + ')' if where else ''}; "
-            "a pipeline is built around one, which names its context block")
-    vocab = next(iter(found.values()))[0]
+            f"{design.ref}: names no pipeline context; a pipeline is built "
+            "around one, which names its context block -- a composite's "
+            "\"vocabulary\": \"package.module:NAME\"")
     if vocab.block is None:
-        from np2hw.design.composite import CompositionError
-        raise CompositionError(f"{design.ref}: its blocks' context vocabulary "
-                               "names no context block")
+        raise CompositionError(f"{design.ref}: its context vocabulary names "
+                               "no context block")
     return vocab
 
 

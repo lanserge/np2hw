@@ -210,10 +210,11 @@ class Array:
         if not isinstance(k, slice):
             raise Unsupported(f"indexing with {type(k).__name__}")
         step = 1 if k.step is None else int(k.step)
-        if isinstance(k.start, (PhaseRef, Param)):
+        if isinstance(k.start, (PhaseRef, Param)) or (
+                isinstance(k.start, Array) and k.start.ndim == 0):
             if k.stop is not None or step < 1 or dim % step:
                 raise Unsupported(f"a register start with {k}")
-            count, start = dim // step, self._register_start(k.start)
+            count, start = dim // step, self._register_start(k.start, step)
         else:
             s0, s1, s2 = k.indices(dim)
             if s2 < 1:
@@ -268,9 +269,17 @@ class Array:
         return Array(self.t, self.t.g.op("model.window", source, starts[0],
                                   starts[1], h, w))
 
-    def _register_start(self, s) -> Value:
-        """`p.py` or `1 - p.py`: index math on a register."""
+    def _register_start(self, s, step: int = 0) -> Value:
+        """`p.py`, `1 - p.py`, or a value computed from registers -- `p.phase
+        >> 1` -- whose exact range stays inside one stride: index math on
+        registers."""
         t = self.t
+        if isinstance(s, Array):
+            lo, hi = s.v.type.lo, s.v.type.hi
+            if lo < 0 or hi >= step:
+                raise Unsupported(f"a slice start ranging over [{lo}, {hi}], "
+                                  f"which a stride of {step} cannot hold")
+            return s.v
         if isinstance(s, Param):
             return t.register(s)
         reg = t.register(s.param)

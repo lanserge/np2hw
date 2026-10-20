@@ -15,15 +15,19 @@ from np2hw.pipeline import compose
 STREAM = {"bits": 8, "max_width": 64, "max_height": 32}
 
 
-def _netlist(name, nodes, connections, context=None):
+def _netlist(name, nodes, connections, context=None, bind=None):
     """A design of ``nodes`` ({instance: block name}) wired by
     ``connections``, taking an 8-bit stream of up to 64x32 at ``in``."""
     port = {"name": "in", **STREAM}
     if context is not None:
         port["context"] = context
     return {"blocks": {name: {
+        "vocabulary": "toylib.blocks:VOCABULARY",
         "inputs": [port], "outputs": [{"name": "out"}],
-        "nodes": {inst: {"block": block_ref(b)} for inst, b in nodes.items()},
+        "nodes": {inst: {"block": block_ref(b),
+                         **({"bind": bind[inst]} if bind and inst in bind
+                            else {})}
+                  for inst, b in nodes.items()},
         "connections": [list(c) for c in connections]}}}
 
 
@@ -96,10 +100,11 @@ def test_stream_context_becomes_ports_not_registers():
 
 
 def test_a_register_context_exists_where_a_block_reads_it():
-    """A register-backed context is made where a block consumes it, and
+    """A register-backed context is made where a binding reads it, and
     not where none does: the vocabulary declares, the reader brings it."""
     read = build(_netlist("ctx_read", {"b": "bias"},
-                          [("in", "b.in"), ("b.out", "out")]))
+                          [("in", "b.in"), ("b.out", "out")],
+                          bind={"b": {"phase": "phase"}}))
     unread = build(_netlist("ctx_unread", {"g": "gain"},
                             [("in", "g.in"), ("g.out", "out")]))
 

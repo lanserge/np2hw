@@ -19,7 +19,7 @@ from designs import build, chain, describe
 from np2hw.blocks import resolve
 from np2hw.design.composite import assemble
 from np2hw.pipeline import compose
-from toylib.blocks import balance
+from toylib.blocks import VOCABULARY, balance
 
 WIDTH, HEIGHT, BIT_DEPTH = 16, 8, 12
 
@@ -57,7 +57,7 @@ def test_unity_default_moves_with_the_overridden_frac():
 
     frame = np.full((4, 4), 777, dtype=np.uint16)
     out = variant(frame, variant.params.bind({}),
-                  variant.context_view({}), BIT_DEPTH)
+                  BIT_DEPTH)
     np.testing.assert_array_equal(out, frame)
 
 
@@ -69,8 +69,7 @@ def test_the_model_reads_the_declaration_not_a_module_constant():
         one_and_a_half = (1 << frac) + (1 << (frac - 1))
         bound = variant.params.bind(variant.params.declaration("gain")
                                     .values(np.full((2, 2), one_and_a_half)))
-        out = variant(frame, bound, variant.context_view({}),
-                      BIT_DEPTH)
+        out = variant(frame, bound, BIT_DEPTH)
         assert out[0, 0] == 150, f"frac={frac}"
 
 
@@ -126,7 +125,7 @@ def test_two_variants_of_one_block_are_two_types_not_one():
         [("a_in", "wb_a.in"), ("wb_a.out", "a_out"),
          ("b_in", "wb_b.in"), ("wb_b.out", "b_out")],
         inputs=("a_in", "b_in"), outputs=("a_out", "b_out"),
-        stream={"bits": BIT_DEPTH, "max_width": WIDTH, "max_height": HEIGHT})
+        vocabulary=VOCABULARY, stream={"bits": BIT_DEPTH, "max_width": WIDTH, "max_height": HEIGHT})
     compose.netlist(pipeline)
 
     addrmap = compose.address_map(pipeline)

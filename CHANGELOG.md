@@ -9,6 +9,38 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ## Unreleased
 
+### Added
+
+- **Scalar inputs bound to expressions.** A design binds a block's scalar
+  input under a node's `bind` (`{"quad.pos": "frame_seq & 3"}`), and
+  `Block.bind()` does the same in Python. The input leaves the block's
+  registers; its value is the expression, over the pipeline context the
+  block's vocabulary declares, integers, and the build parameters in scope
+  (integers at load). The design's one expression walker evaluates it --
+  over integers in a NumPy run, over traced values when the model is
+  traced -- so the expression is folded into the block's core, whose ports
+  are the context it reads, wired as any consumed context is. A range the
+  input cannot hold is refused, with the range. **Register maps change**
+  where a design binds an input: the bound register is gone.
+- **A slice may start at a value computed from registers** -- `p.phase >>
+  1`, `1 - (p.phase & 1)` -- whose exact range fits the stride: a CFA block
+  takes its phase as the one input it is.
+
+### Removed
+
+- **`ContextBit`, and `consumes=`, `context=` and `vocabulary=` on
+  `block()`.** A block knows nothing of the pipeline it is placed in: it
+  takes what it reads as inputs, and a design binds them (above). What a
+  block consumes is what its bindings read. The pipeline context is the
+  DESIGN's: a composite names it (`"vocabulary": "package.module:NAME"`,
+  every composite of one design the same one), `assemble()` takes
+  `vocabulary=`, and `Block.bind()` takes it from the design. A design that
+  names none has no pipeline. `even_frame` moves from `Context` to
+  `block()`: the block's own statement that its math tiles 2x2.
+- **A model's `ctx` argument.** A model is `(pixel, p, bit_depth)`: its
+  stream, its inputs and registers, and the stream's depth. **Every model
+  signature changes.**
+
 ### Changed
 
 - **One compiler.** `np2hw.core` builds every model; the earlier compiler,

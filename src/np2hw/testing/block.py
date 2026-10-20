@@ -6,14 +6,14 @@ A test builds the design, chooses stimulus, and runs this through
 :func:`np2hw.testing.run_cocotb` with ``test_module="np2hw.testing.block"``.
 
 Everything a block's testbench needs is a fact the block DECLARES -- which
-registers exist and how wide they are (``params``), how pipeline context
-splits into port bits (``context``), what output to expect (``Block.run``)
+registers exist and how wide they are (``params``), which pipeline context
+its bound inputs read (``consumes``, against the case's ``vocabulary``), what output to expect (``Block.run``)
 -- so this file reads the declarations and no block has a testbench of its
 own.
 
 The case names the block by reference (``package.module:name``); overrides
-reconfigure it, so a variant's RTL is checked against the variant's own
-model -- one configured declaration on both sides.
+reconfigure it and bindings bind it, so a variant's RTL is checked against
+the variant's own model -- one configured declaration on both sides.
 
 What travels on ``data`` is the PACKED word (the model's own input format),
 whatever the channel count. Framing is asserted by ``np2hw.testing.
@@ -30,7 +30,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 
 from np2hw.blocks.stream import StreamSpec
-from np2hw.design.composite import find
+from np2hw.design.composite import find, find_vocabulary
 from np2hw.testing import (check_framing, frame_to_beats, load_case,
                            reset_stream, run_frame)
 
@@ -65,7 +65,9 @@ async def bit_exact_against_model(dut):
     case = load_case()
     width, height = case["width"], case["height"]
     bit_depth = case["bit_depth"]
-    block = find(case["block"]).obj.configure(case.get("registers"))
+    block = find(case["block"]).obj.configure(case.get("registers")).bind(
+        case.get("bind"), find_vocabulary(case["vocabulary"])
+        if case.get("vocabulary") else None)
     # Raw two's complement at each register's DECLARED width -- the testbench
     # holds no mask of its own to go stale when a design overrides bits.
     reg_bits = {r.name: r.param.bits for r in block.params.registers}
@@ -84,12 +86,14 @@ async def bit_exact_against_model(dut):
         for name, value in values.items():
             getattr(dut, f"param_{name}").value = (
                 int(value) & ((1 << reg_bits[name]) - 1))
-        # Context reaches the datapath as the single-bit ports the block
-        # DECLARED -- which bit of which pipeline register feeds which port
-        # is the ContextBit's statement, not this file's.
-        for bit in block.context:
-            getattr(dut, f"param_{bit.name}").value = (
-                int(context[bit.context]) >> bit.bit) & 1
+        # Context reaches the datapath as the ports a bound input's
+        # expression reads -- one per signal, as the vocabulary declares it;
+        # the expression itself is inside the core.
+        for name in block.params.consumes:
+            if hasattr(dut, f"param_{name}"):
+                getattr(dut, f"param_{name}").value = (
+                    int(context.get(name, 0))
+                    & ((1 << block.signal(name).bits) - 1))
         # the frame's own size, as a frame arriving states it: the core
         # latches it as the frame's first pixel enters
         dut.param_frame_width.value = width

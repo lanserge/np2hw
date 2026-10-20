@@ -4,10 +4,12 @@
 
 A block is its model -- the decorated function, written at the hardware's
 arithmetic: the specification and the golden reference -- and the
-declarations nothing in that arithmetic states: its registers
-(:class:`np2hw.blocks.params.ParamSet`, LOCAL offsets only; a composer
-assigns each INSTANCE its base), the names of its stream ports, the
-pipeline context it reads. Stream widths are not declared: np2hw traces
+declarations nothing in that arithmetic states: its registers and scalar
+inputs (:class:`np2hw.blocks.params.ParamSet`, LOCAL offsets only; a
+composer assigns each INSTANCE its base) and the names of its stream ports.
+What feeds a scalar input -- its register, or the pipeline context a design
+binds it to (:meth:`Block.bind`) -- is the design's. Stream widths are not
+declared: np2hw traces
 them from the model, and a composer threads each block's traced output into
 the next block's input.
 
@@ -18,8 +20,9 @@ the next block's input.
 Verilog traced from a model carries the model's licence: its copyright
 and SPDX identifier are read from the model's own source file, which states
 them. The content that writes blocks binds one convention, in its own
-decorator over :func:`block`: the pipeline context vocabulary its blocks
-may consume (``vocabulary``). np2hw names no context signal and no licence.
+A block knows nothing of the pipeline it is placed in: what feeds its
+inputs, and what pipeline context there is to feed them from, are the
+design's. np2hw names no context signal and no licence.
 """
 from __future__ import annotations
 
@@ -45,32 +48,6 @@ class StreamPort:
 
     name: str
     description: str = ""
-
-
-@dataclass(frozen=True)
-class ContextBit:
-    """A single-bit slice of a pipeline context register, taken by the model.
-
-    A traced model wants the Bayer phase as two one-bit values it can use as
-    slice starts; the pipeline owns it as one two-bit context register. This
-    says which bit feeds which model argument, so the composer can wire it and
-    nobody writes a wrapper to split it.
-    """
-
-    name: str                 # the model argument, and the generated param port
-    context: str              # the pipeline context signal it comes from
-    bit: int
-    description: str = ""
-
-    @property
-    def expression(self) -> str:
-        return f"ctx_{self.context}[{self.bit}]"
-
-    def to_np2hw(self):
-        """The one-bit np2hw Param the traced model uses as a slice phase."""
-        from np2hw import Param as Np2hwParam
-
-        return Np2hwParam(self.name, bits=1, description=self.description)
 
 
 @dataclass(frozen=True)
@@ -130,10 +107,11 @@ class Generated:
             ``param_*`` inputs, in register-map order.
         consumes: pipeline context signals the top module expects as wires.
         context_map: ``{param_name: verilog_expr}`` for generated ``param_*``
-            inputs that are driven by pipeline CONTEXT rather than by a register.
-            A Bayer phase is context, not configuration -- one owner, fanned out
-            -- so the composer wires it straight from the context block instead of giving
-            the block a CSR that would be a second copy of it.
+            inputs that are driven by pipeline CONTEXT rather than by a register:
+            the signals a bound input's expression reads, and the frame's size.
+            A Bayer phase a design binds is context, not configuration -- one
+            owner, fanned out -- so the composer wires it straight from its
+            owner instead of giving the block a CSR that would be a second copy.
         latency: pixels of delay from input to output, for pipeline alignment.
         meta: generator detail worth keeping (line buffers, accumulator width).
     """
@@ -161,7 +139,7 @@ class Generated:
 
 
 class _View:
-    """Attribute access over a set of values, for the model's `p` and `ctx`."""
+    """Attribute access over a set of values, for the model's `p`."""
 
     __slots__ = ("_values", "_decl")
 
@@ -182,13 +160,57 @@ class _View:
                 f"{sorted(object.__getattribute__(self, '_values'))}") from None
 
 
+@dataclass(frozen=True)
+class Binding:
+    """One scalar input of a block, bound by a design to an expression.
+
+    A block's model is only math: what feeds a scalar input -- the frame's
+    place in a capture loop, a Bayer phase -- is the design's statement,
+    not the block's. Bound, the input has no register: its value is the
+    expression, over the pipeline context the DESIGN's vocabulary declares
+    and integer constants, evaluated by the design's one expression walker --
+    over integers when the model runs as NumPy, over traced values when it
+    is traced, so the expression IS hardware, folded into the block's core.
+    The core's ports are then the context facts the expression reads.
+    """
+
+    param: object             # the input's declaration (a blocks Param)
+    text: str                 # the expression, as the design wrote it
+    tree: object = field(compare=False, hash=False, repr=False)
+    facts: tuple = ()         # the context signals it reads, in order
+    signals: tuple = ()       # their declarations (Context), in that order
+
+    @property
+    def name(self) -> str:
+        return self.param.name
+
+    def value(self, lookup):
+        """The expression's value, each fact read through ``lookup``."""
+        from np2hw.design.composite import evaluate
+        return evaluate(self.tree, lookup)
+
+    def check(self, lo: int, hi: int, block: str) -> None:
+        """Refuse a value range the input cannot hold: an expression that
+        could leave its input's width says so here, rather than wrapping
+        where nothing wrote a wrap."""
+        p = self.param
+        top = 1 << (p.bits - 1 if p.signed else p.bits)
+        low = -top if p.signed else 0
+        if lo < low or hi > top - 1:
+            raise ValueError(
+                f"block {block!r}: {p.name} = {self.text!r} ranges over "
+                f"[{lo}, {hi}], which a {p.bits}-bit "
+                f"{'signed' if p.signed else 'unsigned'} input cannot hold "
+                f"([{low}, {top - 1}]); state the wrap in the expression")
+
+
 @dataclass
 class Block:
     """A block: one model function, plus what cannot be derived from it.
 
     Produced by :func:`block`. The model is the specification; everything
     here is a declaration the arithmetic cannot supply -- the register set, what
-    the streams MEAN, which context bits the model takes. Notably absent are the
+    the streams MEAN. Notably absent are the
     stream WIDTHS, which np2hw derives from the trace; declaring them here too
     would be a second source of truth free to disagree with the first.
     """
@@ -197,7 +219,6 @@ class Block:
     params: "ParamSet"
     inputs: tuple
     outputs: tuple
-    context: tuple
     # Register-attribute overrides this VARIANT was configured with, empty on
     # the base block. {"gain": {"frac": 12}} -- the same dict the design JSON
     # carries and describe() recovers, so a variant knows its own recipe.
@@ -206,14 +227,18 @@ class Block:
     # on the base block. Part of the variant, because the register file's
     # reset is part of the block's register TYPE.
     resets: dict = field(default_factory=dict)
-    # The pipeline context this block's content may consume: {name: Context},
-    # bound by the content's decorator. A block reads each consumed signal's
-    # declared width and properties from it, never from a list of its own.
-    vocabulary: object = None
+    # The model has a consistent meaning only on a frame whose dimensions
+    # are both even -- it indexes a 2x2 colour tile -- so running it over an
+    # odd frame is refused. A fact about the block's own math.
+    even_frame: bool = False
     # Why this block cannot be traced yet, if it cannot. Empty means it can.
     # Stated as a REASON rather than a flag, because "declared but not built" is
     # a fact about np2hw's current reach and the reader deserves to know which.
     not_traceable: str = ""
+    # The scalar inputs a design bound to expressions (Binding), empty on
+    # the base block. A bound input has left the register set: its value
+    # is its expression, and what the expression reads is consumed.
+    bindings: tuple = ()
 
     @property
     def name(self) -> str:
@@ -343,6 +368,85 @@ class Block:
         cache[key] = variant
         return variant
 
+    def bind(self, bindings: dict | None = None,
+             vocabulary=None) -> "Block":
+        """The variant of this block with scalar inputs bound to expressions.
+
+        ``bindings`` is ``{input: expression}``: an integer, or the text of
+        an expression in the design's language over the context signals
+        ``vocabulary`` declares -- the DESIGN's, which places the block
+        (``"frame_seq & 3"``). Each bound
+        input is a scalar register of the block, and leaves the register
+        set -- a register a design never lets software write would be
+        decoded, mapped and documented while driving nothing. The signals
+        the expressions read are added to what the block consumes, so the
+        composer wires them exactly as it wires any consumed context.
+
+        Variants are cached per binding set, as :meth:`configure`'s are.
+        """
+        import dataclasses
+
+        from np2hw.blocks.params import ParamSet
+        from np2hw.design.composite import CompositionError, parse, references
+
+        if not bindings:
+            return self
+        cache = self.__dict__.setdefault("_bound", {})
+        key = (tuple(sorted((k, str(v)) for k, v in bindings.items())),
+               id(vocabulary))
+        if key in cache:
+            return cache[key]
+        declared = {param.name: param for param in self.params.params}
+        made = []
+        for name, raw in bindings.items():
+            param = declared.get(name)
+            if param is None:
+                raise KeyError(
+                    f"block {self.name!r} has no input {name!r} to bind; its "
+                    f"scalar inputs are "
+                    f"{sorted(p.name for p in self.params.params if not p.shape)}")
+            if param.shape:
+                raise ValueError(
+                    f"block {self.name!r}: {name} is an array of "
+                    f"{param.shape}; only a scalar input is bound to an "
+                    "expression")
+            text = str(raw)
+            where = f"block {self.name!r}: bind {name}"
+            try:
+                tree = parse(text, where)
+            except CompositionError as error:
+                raise ValueError(str(error)) from None
+            facts = tuple(dict.fromkeys(references(tree)))
+            unknown = [f for f in facts if not vocabulary or f not in vocabulary]
+            if unknown:
+                raise ValueError(
+                    f"{where} = {text!r} reads {unknown}, which the pipeline "
+                    f"context does not declare ({sorted(vocabulary or ())})")
+            made.append(Binding(param=param, text=text, tree=tree,
+                                facts=facts,
+                                signals=tuple(vocabulary[f] for f in facts)))
+        bound = {b.name for b in made}
+        kept = [p for p in self.params.params if p.name not in bound]
+        facts = tuple(dict.fromkeys(f for b in made for f in b.facts))
+        clash = sorted({p.name for p in kept} & set(facts))
+        if clash:
+            raise ValueError(
+                f"block {self.name!r}: {clash} name both a context signal a "
+                "binding reads and an input of the block; one name, one port")
+        variant = dataclasses.replace(
+            self,
+            params=ParamSet(block=self.params.block,
+                            version=self.params.version, params=kept,
+                            stats=list(self.params.stats),
+                            consumes=tuple(dict.fromkeys(
+                                (*self.params.consumes, *facts))),
+                            description=self.params.description),
+            bindings=(*self.bindings, *made),
+        )
+        variant.__dict__["_base"] = self.__dict__.get("_base", self)
+        cache[key] = variant
+        return variant
+
     @property
     def variant_signature(self) -> str:
         """A stable, Verilog-safe suffix naming this variant's overrides.
@@ -351,7 +455,7 @@ class Block:
         -- the SystemRDL regfile, the shared-module cache -- because two
         variants merging into one type is the map lying about one of them.
         """
-        if not self.overrides and not self.resets:
+        if not self.overrides and not self.resets and not self.bindings:
             return ""
         parts = []
         for register in sorted(self.overrides):
@@ -366,6 +470,12 @@ class Block:
             digest = hashlib.blake2b(repr(sorted(self.resets.items()))
                                      .encode(), digest_size=4).hexdigest()
             parts.append(f"reset{digest}")
+        if self.bindings:
+            import hashlib
+            digest = hashlib.blake2b(repr([(b.name, b.text) for b in
+                                           self.bindings]).encode(),
+                                     digest_size=4).hexdigest()
+            parts.append(f"bind{digest}")
         return "__" + "_".join(parts)
 
     # -- generation ----------------------------------------------------------- #
@@ -374,13 +484,10 @@ class Block:
             **context):
         """Run the model over a whole frame, validated from the DECLARATIONS.
 
-        The per-block adapters this replaces were three copies of the same
-        function, each re-stating facts the Block already declares: which
-        context registers it consumes, and whether it is CFA-indexed. Now
-        the declaration drives the validation -- a block that consumes
-        ``bayer_phase`` gets the even-dimension check and the phase range
-        check; one that does not, does not -- and a new block gets the whole
-        adapter by existing.
+        The declarations drive the validation -- a block whose math needs an
+        even frame (``even_frame``) gets the even-dimension check, and every
+        context signal a bound input reads its range check -- and a new block
+        gets the whole adapter by existing.
 
         The model is handed the frame as the smallest unsigned NumPy integer
         that holds ``bit_depth`` bits -- the type the trace gives the same
@@ -394,10 +501,10 @@ class Block:
                 arithmetic expects, unsigned, ``bit_depth`` bits.
             values: register values for ``params.bind`` (defaults fill in).
             bit_depth: datapath width.
-            **context: pipeline context by name, e.g. ``bayer_phase=2``.
-                Everything the block consumes defaults to 0; a name the
-                block does not consume is refused, because silently
-                accepting it would be accepting a typo.
+            **context: pipeline context by name, e.g. ``frame_seq=5``: what
+                the block's bound inputs read. Everything it consumes
+                defaults to 0; a name it does not consume is refused, because
+                silently accepting it would be accepting a typo.
         """
         import numpy as np
 
@@ -426,7 +533,7 @@ class Block:
                 f"it consumes {sorted(consumed) or 'no context'}")
         ctx_values = {}
         for name in consumed:
-            declared = self.context_signal(name)
+            declared = self.signal(name)
             value = int(context.get(name, 0))
             lo, hi = 0, (1 << declared.bits) - 1
             if not lo <= value <= hi:
@@ -434,34 +541,48 @@ class Block:
                     f"context {name!r} = {value} outside its declared "
                     f"{declared.bits}-bit range")
             ctx_values[name] = value
-        if any(self.context_signal(bit.context).even_frame
-               for bit in self.context):
+        if self.even_frame:
             height, width = pixel.shape[:2]
             if height % 2 or width % 2:
                 raise ValueError(
                     f"frame {width}x{height} has an odd dimension; a "
                     "CFA-indexed block has no consistent Bayer phase unless "
                     "both dimensions are even")
-        bound = self.params.bind(values or {})
-        return self.model(pixel, bound, self.context_view(ctx_values),
+        return self.model(pixel, self.bound_values(values, ctx_values),
                           bit_depth)
 
-    def context_signal(self, name: str):
-        """The declaration of one consumed context signal, from the
-        vocabulary the block's content bound."""
-        vocabulary = self.vocabulary() if callable(self.vocabulary) \
-            else self.vocabulary
-        if not vocabulary or name not in vocabulary:
-            raise KeyError(
-                f"block {self.name!r} consumes {name!r}, which its content's "
-                f"context vocabulary does not declare "
-                f"({sorted(vocabulary or ())})")
-        return vocabulary[name]
+    def bound_values(self, values: dict | None, context: dict):
+        """The model's `p` for a NumPy run: the registers' values, and each
+        bound input's expression over the context's."""
+        from np2hw.blocks.params import ParamSet
 
-    def context_view(self, values: dict):
-        """The `ctx` argument for a NumPy run, from context register values."""
-        return _View({bit.name: (int(values[bit.context]) >> bit.bit) & 1
-                      for bit in self.context})
+        if not self.bindings:
+            return self.params.bind(values or {})
+        values = dict(values or {})
+        for binding in self.bindings:
+            if binding.name in values:
+                raise KeyError(
+                    f"block {self.name!r}: {binding.name} is bound to "
+                    f"{binding.text!r} and has no register to set")
+            value = int(binding.value(lambda fact: int(context[fact])))
+            binding.check(value, value, self.name)
+            values[binding.name] = value
+        every = ParamSet(block=self.params.block, version=self.params.version,
+                         params=[*self.params.params,
+                                 *(b.param for b in self.bindings)],
+                         description=self.params.description)
+        return every.bind(values)
+
+    def signal(self, name: str):
+        """The declaration of one context signal a bound input reads, as the
+        design that bound it declared it."""
+        for binding in self.bindings:
+            for signal in binding.signals:
+                if signal.name == name:
+                    return signal
+        raise KeyError(f"block {self.name!r} reads no context signal "
+                       f"{name!r}; its bindings read "
+                       f"{sorted(self.params.consumes) or 'nothing'}")
 
     def generate(self, spec, width: int, height: int, module_name: str,
                  clk_ns: float | None = None,
@@ -496,29 +617,46 @@ class Block:
         # 3-channel block sees channels side by side in one value and
         # unpacks them itself, exactly as the wire carries them.
         image = Image2D("pixel", width, height, bits=spec.data_bits, signed=False)
-        context = [bit.to_np2hw() for bit in self.context]
+        from np2hw import Param as Np2hwParam
+
         registers = [param.to_np2hw() for param in self.params]
+        # What the bindings read, one port each: the context signal as its
+        # vocabulary declares it.
+        facts = list(dict.fromkeys(f for b in self.bindings for f in b.facts))
+        read = [Np2hwParam(f, bits=self.signal(f).bits,
+                           signed=self.signal(f).signed,
+                           description=self.signal(f).description)
+                for f in facts]
 
         def traced(pixel, *traced_args):
             from np2hw.blocks.params import Declarations
 
-            ctx = _View(dict(zip((bit.name for bit in self.context),
-                                 traced_args[:len(context)])))
-            values = _View(dict(zip((param.name for param in self.params),
-                                    traced_args[len(context):])))
+            given = dict(zip((param.name for param in self.params),
+                             traced_args[:len(registers)]))
+            by_fact = dict(zip(facts, traced_args[len(registers):]))
+            for binding in self.bindings:
+                # A signal bound as it is stays the register it is, which a
+                # slice may start at; in an expression each signal is the
+                # traced value it reads as, so the arithmetic is the trace's
+                # -- exact, and refused where the trace cannot do it.
+                lookup = (by_fact.__getitem__ if binding.facts == (binding.text,)
+                          else lambda f: by_fact[f]._traced())
+                given[binding.name] = value = binding.value(lookup)
+                binding.check(*_value_range(value), self.name)
+            values = _View(given)
             # The same declaration access the NumPy run has: a model whose
             # arithmetic depends on a declared attribute (a Q format's shift)
             # reads it from the ONE configured Param, in both modes.
-            object.__setattr__(values, "_decl",
-                               Declarations(self.params.params))
-            return self.model(pixel, values, ctx, spec.bit_depth)
+            object.__setattr__(values, "_decl", Declarations(
+                [*self.params.params, *(b.param for b in self.bindings)]))
+            return self.model(pixel, values, spec.bit_depth)
 
         # The channel count is the SPEC's -- threaded forward by the composer
         # from whatever the driving block's trace published, starting from the
         # pipeline input. Nothing here re-declares it; if the arithmetic
         # cannot digest the stream it is given (a 3-channel unpack of a
         # 1-channel word), the trace itself is where that surfaces.
-        _, result = to_ir(traced, image, *context, *registers,
+        _, result = to_ir(traced, image, *registers, *read,
                           channels=spec.channels)
         core = np2hw_generate(result, module_name=module_name,
                               clk_ns=clk_ns, label=self.name,
@@ -535,7 +673,7 @@ class Block:
             modules=((module_name, verilog),),
             params=tuple((r.name, r.param.bits) for r in self.params.registers),
             consumes=self.params.consumes,
-            context_map={**{bit.name: bit.expression for bit in self.context},
+            context_map={**{f: f"ctx_{f}" for f in facts},
                          "frame_width": frame[0], "frame_height": frame[1]},
             core=core,
             latency=1,
@@ -547,6 +685,19 @@ class Block:
                   # macros needs, published rather than grepped for
                   "memories": list(core.get("memories", ()))},
         )
+
+def _value_range(value) -> tuple:
+    """The range a bound input's value covers: a constant's own, a
+    context signal's declared width, a traced value's exact range."""
+    from np2hw import Param as Np2hwParam
+
+    if isinstance(value, Np2hwParam):
+        top = 1 << (value.bits - 1 if value.signed else value.bits)
+        return (-top, top - 1) if value.signed else (0, top - 1)
+    if isinstance(value, int):
+        return value, value
+    return value.v.type.lo, value.v.type.hi
+
 
 def _with_resets(param, flat):
     """``param`` with a design's reset values, which replace its derived
@@ -607,34 +758,33 @@ def configblock(name, *, version, description, params=(), stats=()):
         model=None,
         params=ParamSet(block=name, version=version, params=list(params),
                         stats=list(stats), description=description),
-        inputs=(), outputs=(), context=(),
+        inputs=(), outputs=(),
         not_traceable="it owns configuration and has no datapath to trace",
     )
 
 
 def block(*, version, description, name=None, params=(), stats=(),
-          consumes=(), inputs=(), outputs=(), context=(), not_traceable="",
-          vocabulary=None):
+          inputs=(), outputs=(), not_traceable="", even_frame=False):
     """Declare a block. The decorated function IS the block's model.
 
-    Content binds the pipeline context its blocks may consume once, in its
-    own decorator over this one (``functools.partial(block,
-    vocabulary=...)``).
+    A block is its model, its inputs and registers, and its stream ports;
+    it knows nothing of the pipeline it is placed in. ``even_frame`` says its
+    math indexes a 2x2 tile, so an odd frame is refused.
 
         @block(
             version=(1, 0),
             description="Per-CFA-colour black level offset with saturation.",
             inputs=(StreamPort("in"),),
             outputs=(StreamPort("out"),),
-            consumes=("bayer_phase",),
-            context=(ContextBit("phase_row", "bayer_phase", bit=1), ...),
-            params=[Param("offset", ...)],
+            params=[Param("offset", ...), Param("bayer_phase", bits=2)],
+            even_frame=True,
         )
-        def blacklevel(pixel, p, ctx, bit_depth):
+        def blacklevel(pixel, p, bit_depth):
+            row, col = p.bayer_phase >> 1, p.bayer_phase & 1
             ...
 
     The block's name is the function's name. The model takes the pixel stream,
-    a parameter view, a context view and the datapath width, and it is called
+    its inputs (``p``) and the datapath width, and it is called
     with real arrays when it is the reference and with traced values when it is
     the hardware -- one function, both roles.
 
@@ -650,12 +800,11 @@ def block(*, version, description, name=None, params=(), stats=(),
             model=function,
             params=ParamSet(block=name or function.__name__, version=version,
                             params=list(params), stats=list(stats),
-                            consumes=tuple(consumes), description=description),
+                            description=description),
             inputs=tuple(inputs),
             outputs=tuple(outputs),
-            context=tuple(context),
             not_traceable=not_traceable,
-            vocabulary=vocabulary,
+            even_frame=even_frame,
         )
 
     return decorate

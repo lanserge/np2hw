@@ -102,7 +102,7 @@ def pixel_chain(pipeline, start: str | None = None, stop: str | None = None):
                 f"{stop_port!r}; its outputs are "
                 f"{list(stage.block.ports.outputs)}")
 
-    chain = [first]
+    chain = Chain([first], compose.vocabulary(pipeline))
     while True:
         stage = chain[-1]
         if stage.path == stop_instance:
@@ -254,14 +254,17 @@ def parse_context(entries, pipeline) -> dict[str, int]:
     return out
 
 def _vocabulary(chain):
-    """The context vocabulary of a chain's blocks: the one every block that
-    has one was declared with."""
-    found = {id(s.block.vocabulary): s.block.vocabulary for s in chain
-             if getattr(s.block, "vocabulary", None) is not None}
-    if len(found) != 1:
-        raise ValueError(f"the chain's blocks bring {len(found)} context "
-                         "vocabularies; a run is built around one")
-    return next(iter(found.values()))
+    """The pipeline context a chain was cut from: its design's."""
+    return chain.vocabulary
+
+
+class Chain(list):
+    """The stages of a run, in order, with the pipeline context of the
+    design they were cut from -- what a twin of them is built around."""
+
+    def __init__(self, stages, vocabulary):
+        super().__init__(stages)
+        self.vocabulary = vocabulary
 
 
 def explain(chain, values, origin) -> str:
@@ -531,7 +534,8 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
         "chain", {stage.path: stage.block for stage in chain}, edges,
         inputs=("chain_in",), outputs=("chain_out",),
         stream={"bits": bit_depth, "max_width": width, "max_height": height,
-                "channels": in_channels, "context": from_stream})
+                "channels": in_channels, "context": from_stream},
+        vocabulary=chain.vocabulary)
     generated = compose.generate(twin, control=False)
     verilog = "\n".join(text for _, text in generated.modules)
 

@@ -26,16 +26,19 @@ from designs import build, chain, describe
 
 from np2hw.design.composite import assemble
 from np2hw.pipeline import compose
-from toylib.blocks import bias, toyblock
+from toylib.blocks import VOCABULARY, bias, toyblock
+
+# bias reads the pipeline's phase: one owner, every bias bound to it
+PHASE = {"bias": {"phase": "phase"}}
 
 
 @pytest.fixture
 def stereo():
     return build(describe(
         "stereo",
-        chain("bias", "meter", prefix="left",
+        chain("bias", "meter", prefix="left", bind=PHASE,
               source="left_in", sink="left_out"),
-        chain("bias", "meter", prefix="right",
+        chain("bias", "meter", prefix="right", bind=PHASE,
               source="right_in", sink="right_out"),
         inputs=("left_in", "right_in"), outputs=("left_out", "right_out")))
 
@@ -51,7 +54,8 @@ def test_the_same_block_twice_gets_two_bases(stereo):
 
     assert left.instance.base != right.instance.base
     # One declaration, shared by both instances -- not a copy.
-    assert left.paramset is right.paramset is bias.params
+    assert left.paramset is right.paramset is \
+        bias.bind(PHASE["bias"], VOCABULARY).params
 
 
 def test_both_instances_have_identical_local_layouts(stereo):
@@ -59,8 +63,9 @@ def test_both_instances_have_identical_local_layouts(stereo):
     left = compose.stage(stereo, "left.bias").instance
     right = compose.stage(stereo, "right.bias").instance
 
-    for register in bias.params.registers:
-        local = bias.params.offset_of(register.name)
+    bound = bias.bind(PHASE["bias"], VOCABULARY)
+    for register in bound.params.registers:
+        local = bound.params.offset_of(register.name)
         assert left.address_of(register.name) == left.base + local
         assert right.address_of(register.name) == right.base + local
         assert (right.address_of(register.name)
@@ -228,7 +233,7 @@ def test_each_instance_generates_its_own_modules(stereo):
 
 def test_generated_top_carries_parameter_descriptions():
     """Rule 4: the description written once must appear in the output."""
-    pipeline = build(describe("isp", chain("bias")))
+    pipeline = build(describe("isp", chain("bias", bind=PHASE)))
     verilog = compose.generate(pipeline).verilog
     # Each register port carries its declared description as a comment,
     # tagged with what that element of a shaped register means -- which the
@@ -243,12 +248,13 @@ def test_generated_top_carries_parameter_descriptions():
 
 
 def test_context_is_fanned_out_not_duplicated():
-    """One width register per pipeline, not one per block."""
+    """One phase register per pipeline, not one per block: the design binds
+    each block's input to it."""
     pipeline = build(describe(
         "stereo",
-        chain("bias", "meter", prefix="left",
+        chain("bias", "meter", prefix="left", bind=PHASE,
               source="left_in", sink="left_out"),
-        chain("bias", "meter", prefix="right",
+        chain("bias", "meter", prefix="right", bind=PHASE,
               source="right_in", sink="right_out"),
         inputs=("left_in", "right_in"), outputs=("left_out", "right_out")))
     mapping = compose.register_map(pipeline)
@@ -264,19 +270,16 @@ def test_context_is_fanned_out_not_duplicated():
 
 
 def test_unknown_context_signal_is_rejected():
-    """A block cannot consume context the context block does not provide."""
+    """A block's input cannot be bound to context the vocabulary does not
+    declare."""
     from np2hw.blocks import StreamPort
 
     @toyblock(version=(1, 0), description="placeholder",
-              consumes=("no_such_signal",),
               inputs=(StreamPort("in"),),
               outputs=(StreamPort("out"),),
               params=[Param("x", bits=8, description="placeholder")])
-    def broken(pixel, p, ctx, bit_depth):
+    def broken(pixel, p, bit_depth):
         return pixel
 
-    design = assemble("t", {"broken": broken},
-                      [("in", "broken.in"), ("broken.out", "out")],
-                      stream={"bits": 8, "max_width": 64, "max_height": 32})
-    with pytest.raises(KeyError, match="no_such_signal"):
-        compose.stages(design)
+    with pytest.raises(ValueError, match="no_such_signal"):
+        broken.bind({"x": "no_such_signal"}, VOCABULARY)

@@ -91,7 +91,42 @@ def splits(g: Graph) -> Splits:
 
 
 def affine(g: Graph, v: Value) -> Affine | None:
-    """The affine form of an index expression, or None when it is data."""
+    """The affine form of an index expression, or None when it is data.
+
+    A value computed from registers alone -- `p.phase >> 1`, a register's
+    low bit -- is one more register term where no finer form is found: it
+    is the same at every position, so to the index math it is a register,
+    held in the graph's symbols under its structural key."""
+    form = _affine(g, v)
+    if form is None and _of_registers(v):
+        key = f"~{g.skey(v)}"
+        g.symbols.setdefault(key, {"object": None, "read": v})
+        form = Affine(regs=((key, 1),))
+    return form
+
+
+def _of_registers(v: Value) -> bool:
+    """Whether `v` is the same at every position and reads registers: no
+    axis, and nothing beneath it but registers and constants."""
+    if any(a is not None for a in v.type.axes):
+        return False
+    seen, stack, reads = set(), [v.node], False
+    while stack:
+        n = stack.pop()
+        if id(n) in seen:
+            continue
+        seen.add(id(n))
+        if n.kind == "model.param":
+            reads = True
+        elif n.kind != "model.const":
+            if not n.operands or n.kind in ("model.var", "model.table",
+                                            "model.source", "model.access"):
+                return False
+            stack.extend(o.node for o in n.operands)
+    return reads
+
+
+def _affine(g: Graph, v: Value) -> Affine | None:
     n, k = v.node, v.node.kind
     if k == "model.var":
         return _norm(g, {n.attr("name"): 1}, {}, 0)

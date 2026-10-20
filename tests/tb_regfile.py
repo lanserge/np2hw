@@ -33,7 +33,10 @@ from cocotb.clock import Clock
 from np2hw.blocks.stream import StreamSpec, frame_to_beats
 from np2hw.testing import (OKAY, SLVERR, AxiLiteMaster, check_framing,
                            load_case, reset_stream, run_frame)
-from toylib.blocks import bias
+from toylib.blocks import VOCABULARY, bias
+
+# as the design binds it: the bias reads the pipeline's phase
+bias = bias.bind({"phase": "phase"}, VOCABULARY)
 
 # The wrapper consumes the full framing, unlike a bare core: its commit pulse
 # is derived from in_last, so the flags are load-bearing at this boundary.

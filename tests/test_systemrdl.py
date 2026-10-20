@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 from np2hw.pipeline import compose
+from toylib.blocks import VOCABULARY, bias
 
 from designs import build, chain, describe
 
@@ -31,8 +32,10 @@ def stereo():
     """Two eyes: the design where hierarchy has something to prove."""
     return build(describe(
         "stereo",
-        chain("bias", "meter", prefix="left", source="l_in", sink="l_out"),
-        chain("bias", "meter", prefix="right", source="r_in", sink="r_out"),
+        chain("bias", "meter", prefix="left", source="l_in", sink="l_out",
+              bind={"bias": {"phase": "phase"}}),
+        chain("bias", "meter", prefix="right", source="r_in", sink="r_out",
+              bind={"bias": {"phase": "phase"}}),
         bit_depth=BIT_DEPTH, width=WIDTH, height=HEIGHT,
         inputs=("l_in", "r_in"), outputs=("l_out", "r_out")))
 
@@ -83,9 +86,10 @@ def test_the_two_eyes_share_one_component_definition(stereo):
     """
     text = compose.write_systemrdl(
         stereo, __import__("tempfile").mkdtemp() + "/map.rdl").read_text()
-    assert text.count("regfile bias_rf {") == 1
-    assert text.count("bias_rf left_bias") == 1
-    assert text.count("bias_rf right_bias") == 1
+    name = f"bias{bias.bind({'phase': 'phase'}, VOCABULARY).variant_signature}_rf"
+    assert text.count(f"regfile {name} {{") == 1
+    assert text.count(f"{name} left_bias") == 1
+    assert text.count(f"{name} right_bias") == 1
 
 
 def test_q_format_survives_as_a_declared_property(elaborated):
