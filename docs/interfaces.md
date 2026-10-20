@@ -77,11 +77,11 @@ production, connect `param_*` to Switchboard's `umi_endpoint`/`umi_regif`.
 top = control_top(core, ctrl="axil", frame_sync=True)   # or ctrl="umi"
 ```
 Emits a top module that instances the register file **and** the core and connects them:
-each `Param` → its register, and for a **dynamic-resolution** core
-([framing-and-resolution.md](framing-and-resolution.md)) it adds an **`active_width`**
-register and wires `param_active_width → core.active_width`. So software sets the line
-length over AXI-Lite/UMI like any tuning register. Returns the top Verilog (regfile +
-top), the register-file `offsets`, etc. (See `examples/active_width.py`.)
+each register port → its register, the frame's `frame_width` and `frame_height` among
+them ([framing-and-resolution.md](framing-and-resolution.md)). So software sets the
+frame's size over AXI-Lite/UMI like any tuning register, and a register file left at
+its defaults runs the size the core was traced at. Returns the top Verilog (regfile +
+top), the register-file `offsets`, etc.
 
 > Note: with `frame_sync=True` a written value goes live at the **next frame boundary**,
 > so the first frame uses the register's `default`. Use `frame_sync=False` for immediate
@@ -127,8 +127,7 @@ Both `axil_regfile` and `umi_regfile` take either form.
 wrap = control_wrap(core, registers, bind={"gain": "param_gain"},
                     commit="out_valid && out_ready && out_last")
 ```
-`control_top` knows one generated core's port names and its `active_width`
-convention. `control_wrap` knows nothing: it reads `core["interface"]` for the
+`control_top` knows one generated core's port names. `control_wrap` knows nothing: it reads `core["interface"]` for the
 clock, the reset, the streams and the parameter ports, so it wraps a **composed
 multi-block design** exactly as it wraps a single core.
 

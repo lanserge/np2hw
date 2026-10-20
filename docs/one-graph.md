@@ -1,39 +1,29 @@
 # One graph: indexes, access, data
 
-Status: in progress, its decisions settled (see the end). The graph core,
-the tracer, canonicalising, the pointwise family's lowering, windows,
-stages cut to a clock, and reads across a video's frames are built in
-`np2hw.core`, and `to_ir` hands every
-model to it first; a model it does not reach yet is lowered by np2hw's
-present compiler, the reference it is measured against -- except a video,
-which the reference has no frame axis for. `NP2HW_CORE=off` forces the reference, `NP2HW_CORE=strict`
-refuses the fallback, and `NP2HW_CORE_LOG` names a file recording which
-path each model took.
+Status: built, its decisions settled (see the end). The graph core, the
+tracer, canonicalising, and the lowering of pointwise models, windows,
+stages cut to a clock and reads across a video's frames are `np2hw.core`,
+which `to_ir` and `generate` drive; a model it does not reach is refused,
+by name.
 
 np2hw compiles in two stages. **Tracing** records a NumPy model as ONE graph
 -- what the model computed, nothing decided. **Lowering** rewrites that graph,
 pass by pass, into a hardware graph, which is printed as Verilog. This note
 is the model the graph expresses, the shape of the graph, what lowering does,
-and how the new compiler is built and judged.
+and how the compiler is built and judged.
 
 ## Why
 
-np2hw's present compiler traces a model into one of six representations --
-a linear chain, an expression DAG, a phase canvas, a channel stack, a mux,
-a line IR -- chosen at the operator that produced each value, and
-`generate()` dispatches on which. Each works; the defects live in the SEAMS
-between them. Every recent one was a value that had taken the wrong form for
-what came next: a constant bias the chain could not hold; a shift refused
-where the equal division worked, because a register multiply had been
-committed early to a tap coefficient; a table index accepted by one form
-converter and refused by another; window expressions possible only under a
-phase select; register taps and edge handling meeting in one emitter only.
-
-Moving the compiler onto a graph in place was tried, and kept bending the
-graph around the old forms. So the new compiler, `np2hw.core`, is written
-from this model; the present one, whose tracer already records a model as
-a graph (`np2hw.trace`) and lowers it through the older forms, serves as
-its reference until nothing needs it.
+A compiler that traces a model into one of several representations -- a
+linear chain, an expression DAG, a phase canvas, a channel stack, a mux, a
+line IR -- chosen at the operator that produced each value, and dispatches
+on which, has its defects in the SEAMS between them: a value that took the
+wrong form for what came next. A constant bias the chain cannot hold; a
+shift refused where the equal division works, because a register multiply
+was committed early to a tap coefficient; a table index accepted by one
+form converter and refused by another; window expressions possible only
+under a phase select. One graph has no seams: every value is a node, and
+what it becomes is lowering's decision, made once with everything in view.
 
 ## The model: three layers
 
@@ -357,13 +347,10 @@ writes the nine-term sum gets eight adders over narrow ones (worked example
 
 ## Building it
 
-**From this model, not from the present compiler.** What carries over: the
-examples, which are the specification -- NumPy in, bit-exact results
-expected; the stream contract, which revela and every testbench are built
-against; the device cost model, which is hardware knowledge; the gate.
-Everything else -- the graph core, the tracer, lowering, the printer -- is
-written new. The present compiler stays as the reference, and is deleted
-when nothing needs it.
+**The examples are the specification**: NumPy in, bit-exact results
+expected. Beside them stand the stream contract, which revela and every
+testbench are built against, and the device cost model, which is hardware
+knowledge.
 
 **Examples first.** Before code, the key cases are written out by hand as
 graphs at both levels -- a pointwise gain, a 3x3 stencil, a CFA phase plane
@@ -379,8 +366,8 @@ implements those rules -- every defect found while building it was code
 that broke a sound rule (axes read before unification, a canonical index
 that changed an access's shape, operands paired across planes in the
 wrong order), which no argument about the design would have caught. So a
-model moves to the new compiler when its example passes, its generated
-Verilog simulated against NumPy (`scripts/snapshot.py`). The check moves
+model is supported when its example passes, its generated Verilog simulated
+against NumPy (`scripts/snapshot.py`). The check moves
 as early as it can: each graph level is evaluated against NumPy before any
 Verilog exists, and simulation is left for the printer, the one step a
 Python check cannot reach -- formal equivalence of the printed Verilog
@@ -394,8 +381,7 @@ design's timing is decided, as it always was. A port width that changes is
 called out. Compile time is reported, not gated.
 
 **Families one at a time**: pointwise, stencils, phase planes, channel
-words, frame reads. Each is complete when its examples are on the new
-compiler; the present one goes when all are.
+words, frame reads, each complete when its examples pass.
 
 ## Prior art
 

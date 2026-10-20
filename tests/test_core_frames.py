@@ -1,11 +1,11 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""A video's frames, read across time, on the new compiler.
+"""A video's frames, read across time.
 
 A model handed (T, H, W) reads past frames by slicing the frame axis, and
 the store that keeps them is derived from those reads: its depth is the
 spread of their starts (docs/one-graph.md, decision 6). Each model here is
-compiled with NP2HW_CORE=strict and its Verilog driven with a run of
+compiled and its Verilog driven with a run of
 frames through ONE elaboration, under random backpressure on both sides,
 and compared with the model run on the same frames -- every output frame,
 and no output at all for the frames the history is still filling.
@@ -26,11 +26,6 @@ W, H, BITS = 7, 5, 10
 FRAMES = 7
 
 
-@pytest.fixture(autouse=True)
-def strict(monkeypatch):
-    monkeypatch.setenv("NP2HW_CORE", "strict")
-
-
 def _compile(fn, params=(), frames=FRAMES, bits=BITS, channels=1, name="m"):
     _, mod = to_ir(fn, Image2D("v", W, H, bits=bits, frames=frames), *params,
                    channels=channels)
@@ -44,17 +39,21 @@ def _sim(tmp_path, core, video, seed=0, values=None):
     context arrives with it. Returns every output beat as
     (data, sof, eol, last)."""
     in_bits, out_bits = core["in_bits"], core["out_bits"]
-    values = values or [{} for _ in video]
+    h, w = video.shape[1:3]
+    # each frame its size -- the frames streamed, which may be smaller than
+    # the core was traced at -- and whatever registers the caller sets
+    values = [dict({"frame_width": w, "frame_height": h}, **v)
+              for v in (values or [{} for _ in video])]
     regs = "".join(f"    reg [{b - 1}:0] param_{n} = 0;\n"
                    for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n"
                     for n, _ in core["params"])
-    sets = ["".join(f"            param_{n} = {int(v.get(n, 0)) & ((1 << b) - 1)};\n"
+    sets = ["".join(f"            param_{n} = {int(v.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
                     for n, b in core["params"]) for v in values]
     per_frame = "".join(f"            if (k == {k}) begin\n{sets[k]}            end\n"
                         for k in range(len(values)))
     words = [int(v) for v in video.ravel()]
-    per = W * H
+    per = w * h
     (tmp_path / "in.hex").write_text("".join(f"{v:x}\n" for v in words))
     (tmp_path / "core.v").write_text(core["verilog"])
     (tmp_path / "tb.v").write_text(f"""`timescale 1ns/1ps
@@ -108,7 +107,8 @@ def _beats(out):
     beats = []
     for frame in out:
         flat = frame.ravel()
-        beats += [(int(v), int(i == 0), int(i % W == W - 1),
+        cols = frame.shape[-1]
+        beats += [(int(v), int(i == 0), int(i % cols == cols - 1),
                    int(i == flat.size - 1)) for i, v in enumerate(flat)]
     return beats
 
@@ -237,3 +237,12 @@ def test_the_phase_routes_by_each_frames_place_in_the_loop(tmp_path):
                     + (res[..., 1].astype(np.int64) << field))
     assert _sim(tmp_path, core, video, seed=11, values=values) == \
         _beats(np.array(want))
+
+
+def test_a_video_at_a_frame_smaller_than_it_was_traced_at(tmp_path):
+    """The store is as deep as the traced frame, the most it holds; a
+    smaller frame's positions run to its own last pixel, and the history
+    is the same history."""
+    core = _compile(average, name="average_small")
+    video = _video(6)[:, :3, :4]
+    assert _sim(tmp_path, core, video, seed=13) == _beats(average(video))

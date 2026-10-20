@@ -8,7 +8,7 @@ all four, a sequential HDR sensor alternates exposures, a temporal filter
 averages. A NumPy model says that with a time axis: ``pixel[..., k]`` is the
 pixel from frame ``n - k``. A trace cannot say it, because a traced model sees
 one frame; the time axis is storage, not arithmetic. So the storage is this
-generator's, exactly as the line buffers behind a stencil are the emitter's,
+generator's, exactly as the line buffers behind a window are the compiler's,
 and the model keeps only the arithmetic.
 
 What leaves the core
@@ -59,8 +59,8 @@ the pixel's position in the frame, and the same position recurs only a frame
 later, so the write that follows a read can never meet a read it disturbs.
 
 The read is REGISTERED, because that is the only kind a memory macro
-implements, and it costs no schedule for the reason the stencil emitter's line
-buffers give: the address is a counter. The core presents the position it
+implements, and it costs no schedule for the reason a window's line buffers
+give: the address is a counter. The core presents the position it
 will want NEXT, from the counter's own next state, and the word lands exactly
 when that pixel arrives. While the stream stalls, the read is not enabled and
 the word holds.

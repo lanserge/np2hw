@@ -1,13 +1,13 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""One core, any frame up to the size it was traced at: frame="runtime".
+"""One core, any frame up to the size it was traced at, each frame's size given at run time.
 
 Each core is traced at a maximum size and then driven, in ONE elaboration,
 with frames of several sizes -- the size changing between frames as a mode
 change changes it -- and every pixel and every frame end is compared with
-the model run at that frame's own size, its line ends with it. The phase cores, the expression
-cores and the phase stencil each carry their framing differently, so each
-kind has its model here.
+the model run at that frame's own size, its line ends with it. A pointwise
+model, phase planes, a window and a kept window each meet the frame's edges
+differently, so each has its model here.
 """
 import shutil
 import subprocess
@@ -21,16 +21,6 @@ from np2hw.ir import Param
 pytestmark = pytest.mark.skipif(shutil.which("iverilog") is None,
                                 reason="needs iverilog")
 
-
-@pytest.fixture(params=["default", "reference"], autouse=True)
-def compiler(request, monkeypatch):
-    """Each model on np2hw's own choice of compiler, and on the reference:
-    the run-time frame is printed by both."""
-    if request.param == "reference":
-        monkeypatch.setenv("NP2HW_CORE", "off")
-    else:
-        monkeypatch.delenv("NP2HW_CORE", raising=False)
-    return request.param
 
 BITS = 10
 FULL = (1 << BITS) - 1
@@ -108,7 +98,7 @@ def cross(img, py, px):
     return out.astype(np.uint16)
 
 
-def _sim(tmp_path, core, frames, values):
+def _sim(tmp_path, core, frames, values, blank=None):
     """Drive `frames` through one elaboration of `core`, each frame with its
     own frame_width/frame_height, honouring the handshake, with a vertical
     blank between frames long enough for a stencil's bottom flush. Returns
@@ -120,7 +110,7 @@ def _sim(tmp_path, core, frames, values):
     conns = "".join(f"        .param_{n}(param_{n}),\n" for n in names)
     sets = "".join(f"        param_{n} = {int(values.get(n, 0))};\n"
                    for n in names if not n.startswith("frame_"))
-    blank = core.get("vdrain", 8) + 8
+    blank = core.get("vdrain", 8) + 8 if blank is None else blank
     feed, words = [], []
     for k, frame in enumerate(frames):
         h, w = frame.shape
@@ -140,7 +130,7 @@ module tb;
     reg [{in_bits-1}:0] img [0:{len(words)-1}];
     integer f, i;
     always #5 clk = ~clk;
-    {core["module"]} #(.WIDTH({MAX_W}), .HEIGHT({MAX_H})) dut (
+    {core["module"]} dut (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in_ready(in_ready),
         .in_sof(in_sof), .in_data(in_data),
 {conns}        .out_valid(out_valid), .out_ready(out_ready), .out_sof(out_sof),
@@ -167,7 +157,8 @@ module tb;
         param_frame_height = {frames[0].shape[0]};
         repeat (3) @(negedge clk); rst = 0;
         @(negedge clk);
-{"".join(feed)}        $fclose(f); $finish;
+{"".join(feed)}        repeat ({core.get("vdrain", 8) + 8}) @(negedge clk);
+        $fclose(f); $finish;
     end
 endmodule
 """
@@ -182,17 +173,18 @@ endmodule
     return [r[:3] for r in rows], [r[3:] for r in rows if r[2]]
 
 
-def _check(tmp_path, fn, params, values, model_args, name, channels=1):
+def _check(tmp_path, fn, params, values, model_args, name, channels=1,
+           sizes=SIZES, blank=None):
     bits = BITS if channels == 1 else 8 * channels
     _, line = to_ir(fn, Image2D("img", MAX_W, MAX_H, bits=bits), *params,
                     channels=channels)
-    core = generate(line, module_name=name, frame="runtime")
+    core = generate(line, module_name=name)
     assert {"frame_width", "frame_height"} <= {n for n, _ in core["params"]}
     rng = np.random.default_rng(7)
     top = FULL if channels == 1 else (1 << bits) - 1
     frames = [rng.integers(0, top + 1, (h, w)).astype(np.int64)
-              for w, h in SIZES]
-    beats, sizes = _sim(tmp_path, core, frames, values)
+              for w, h in sizes]
+    beats, sizes = _sim(tmp_path, core, frames, values, blank)
     want, shapes = [], []
     for frame in frames:
         if channels == 1:
@@ -254,20 +246,6 @@ def test_a_mux_core_follows_the_frame_it_is_given(tmp_path):
            "rt_mux")
 
 
-def test_a_window_cropped_to_a_stated_extent_refuses(compiler):
-    if compiler != "reference":
-        pytest.skip("a stated extent is the reference's window")
-
-    from np2hw import make_coords
-
-    def crop(img):
-        y2, x2 = make_coords(img, 8, 8)
-        return img[y2 + 1, x2 + 1]
-    _, line = to_ir(crop, Image2D("img", MAX_W, MAX_H, bits=8))
-    with pytest.raises(NotImplementedError, match="stated extent"):
-        generate(line, module_name="rt_crop", frame="runtime")
-
-
 WINDOW = {"y0": 3, "x0": 5, "h": 9, "w": 14}
 
 
@@ -275,19 +253,96 @@ def _window_params():
     return [Param(n, bits=16) for n in ("y0", "x0", "h", "w")]
 
 
-def test_a_window_keeps_what_its_registers_place(tmp_path, compiler):
+def test_a_window_keeps_what_its_registers_place(tmp_path):
     """The source streams through and the window is kept: each frame's
     window, ends and all, as NumPy's own slicing has it -- a frame smaller
     than the window ending at its own edges."""
-    if compiler == "reference":
-        pytest.skip("a window is the new compiler's; the reference refuses")
     args = tuple(WINDOW[n] for n in ("y0", "x0", "h", "w"))
     _check(tmp_path, crop, _window_params(), WINDOW, args, "rt_crop")
 
 
-def test_a_window_passes_a_packed_word_whole(tmp_path, compiler):
-    if compiler == "reference":
-        pytest.skip("a window is the new compiler's; the reference refuses")
+def test_a_window_passes_a_packed_word_whole(tmp_path):
     args = tuple(WINDOW[n] for n in ("y0", "x0", "h", "w"))
     _check(tmp_path, crop, _window_params(), WINDOW, args, "rt_crop3",
            channels=3)
+
+
+def test_a_window_takes_frames_taller_than_it_was_traced_at(tmp_path):
+    """A window keeps lines, not frames: the traced width is what its line
+    buffers hold, and its height bounds nothing it builds."""
+    _check(tmp_path, gauss, [], {}, (), "rt_tall",
+           sizes=[(24, 40), (12, 25), (24, 16)])
+
+
+def short(img):
+    """Two reads at offsets that stop short of the frame: the rows and
+    columns past them are taken and never read, and the output is the
+    slice's own size, whatever the frame's."""
+    x = img.astype(np.int32)
+    return ((x[1:9, 2:14] + x[2:10, 3:15]) >> 1).astype(np.uint16)
+
+
+def test_a_crop_short_of_the_frame_hands_on_its_own_size(tmp_path):
+    _check(tmp_path, short, [], {}, (), "rt_short",
+           sizes=[(24, 16), (20, 14), (16, 11), (24, 16)])
+
+
+def test_a_new_size_waits_behind_the_last_frames_flush(tmp_path):
+    """Frames of different sizes, back to back: each waits while the frame
+    before it is flushed, and that flush runs at the size of the frame it
+    finishes, not the size now waiting."""
+    _check(tmp_path, gauss, [], {}, (), "rt_back",
+           sizes=[(24, 16), (10, 6), (20, 12), (8, 4)], blank=0)
+
+
+def unpadded(img):
+    x = img.astype(np.int32)
+    return ((x[:-2, 1:-1] + x[2:, 1:-1]) >> 1).astype(np.uint16)
+
+
+@pytest.mark.parametrize("fn, want", [(gauss, (12, 8)), (unpadded, (10, 6))])
+def test_out_of_reset_a_core_hands_on_the_size_its_ports_say(tmp_path, fn,
+                                                             want):
+    """Before any frame, a core's size follows its ports: what it hands on
+    is the size coming, less its border -- not the most it can hold, which
+    a display placing the picture would refuse as too large."""
+    _, line = to_ir(fn, Image2D("img", MAX_W, MAX_H, bits=BITS))
+    core = generate(line, module_name=f"rst_{fn.__name__}")
+    ports = "".join(f"    reg [{b-1}:0] param_{n} = 0;\n" for n, b in core["params"])
+    conns = "".join(f"        .param_{n}(param_{n}),\n" for n, _ in core["params"])
+    (tmp_path / "core.v").write_text(core["verilog"])
+    (tmp_path / "tb.v").write_text(f"""`timescale 1ns/1ps
+module tb;
+    reg clk = 0, rst = 1;
+{ports}    wire in_ready, out_valid, out_sof, out_eol, out_last;
+    wire [{core["out_bits"]-1}:0] out_data;
+    wire [15:0] out_frame_width, out_frame_height;
+    always #5 clk = ~clk;
+    {core["module"]} dut (
+        .clk(clk), .rst(rst), .in_valid(1'b0), .in_ready(in_ready),
+        .in_sof(1'b0), .in_data({core["in_bits"]}'d0),
+{conns}        .out_valid(out_valid), .out_ready(1'b1), .out_sof(out_sof),
+        .out_eol(out_eol), .out_last(out_last), .out_data(out_data),
+        .out_frame_width(out_frame_width),
+        .out_frame_height(out_frame_height));
+    initial begin
+        param_frame_width = 12; param_frame_height = 8;
+        repeat (3) @(negedge clk); rst = 0;
+        repeat (4) @(negedge clk);
+        $display("%0d %0d", out_frame_width, out_frame_height);
+        $finish;
+    end
+endmodule
+""")
+    subprocess.run(["iverilog", "-g2012", "-o", "sim.vvp", "core.v", "tb.v"],
+                   cwd=tmp_path, check=True, capture_output=True, text=True)
+    out = subprocess.run(["vvp", "sim.vvp"], cwd=tmp_path, check=True,
+                         capture_output=True, text=True).stdout.split()
+    assert tuple(map(int, out[:2])) == want
+
+
+def test_an_axis_read_to_its_end_follows_the_frame(tmp_path):
+    """`x[:, 1:-1]` reads to one before the end: its last input column is
+    unread, and its output is the frame less two columns at every size,
+    as a slice counted from the end says -- not the traced count."""
+    _check(tmp_path, unpadded, [], {}, (), "rt_rel")

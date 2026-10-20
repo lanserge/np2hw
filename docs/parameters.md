@@ -61,8 +61,7 @@ irrelevant — add/remove registers freely.
 ## Defaults (reset / power-on value)
 
 `Param(..., default=N)` sets the register's **reset value**. Without it, registers
-reset to **0** — often useless at boot (`gain=0` → black, `active_width=0` → no
-output). With a default the IP comes up in a sane state before any software write.
+reset to **0** — often useless at boot (`gain=0` → black). With a default the IP comes up in a sane state before any software write.
 The default also seeds the live-view slider and the register-file reset
 ([interfaces.md](interfaces.md)).
 
@@ -100,8 +99,9 @@ including through the actual RTL. See [view.md](view.md).
 
 Generate a register file so software sets these over a bus, with frame-synchronized
 updates (shadow → live at the frame boundary). See [interfaces.md](interfaces.md)
-(`axil_regfile`, `umi_regfile`, `control_top`). The geometry register `active_width`
-for dynamic resolution rides the same mechanism
+(`axil_regfile`, `umi_regfile`, `control_top`). A frame's size rides the same
+mechanism where no stream states it: `frame_width` and `frame_height` are register
+ports of every core, their defaults the size it was traced at
 ([framing-and-resolution.md](framing-and-resolution.md)).
 
 ## A note on faithfulness

@@ -3,7 +3,8 @@
 For driving the compiler directly (the CLI is a thin wrapper over this). Public exports:
 
 ```python
-from np2hw import Param, Params, Const, Image2D, Indexer, PhaseRef, to_ir, generate
+from np2hw import Param, Params, Image2D, PhaseRef, Rom, to_ir, generate
+from np2hw import coords, make_coords, saturate                    # in a model
 from np2hw import compose, Instance, Connection, Port, StreamType   # composition
 from np2hw import Netlist, Node, Endpoint                          # graph, pre-emission
 from np2hw import Reg, RegBlock, RegInstance, AddrMap, systemrdl   # register maps
@@ -28,7 +29,7 @@ from np2hw.verilog import (switchboard_wrap, axis_video_wrap,
 Image2D(name, width, height, bits=8, signed=False)     # the streamed image input
 Param(name, dtype=None, *, bits=8, signed=False, shape=(), default=0)
 Params([Param(...), ...])                               # named register set (namespace)
-Const(value)                                            # compile-time constant
+Rom(data, name="rom")                                   # a constant table
 ```
 `Param` with `shape=` is a matrix of registers; indexing returns scalar `Param`s. See
 [parameters.md](parameters.md).
@@ -36,13 +37,16 @@ Const(value)                                            # compile-time constant
 ## Trace: `to_ir`
 
 ```python
-_, out = to_ir(fn, image, *params, out_bits=None, channels=1)
+_, module = to_ir(fn, image, *params, channels=1)
 ```
 - `fn` — the model function. `to_ir(fn, image, *param_objs)` (list form) or
   `to_ir(fn, image, params_namespace)` (single `Params`).
-- Returns `(None, module)` when the new compiler (`np2hw.core`) takes the model
-  -- the pointwise family today -- `(None, Mux | PhaseCanvas | ChannelStack)` for
-  those shapes, else `(stream, out_line)`. Pass the second element to `generate`.
+- `image` is the largest frame the core must hold (see
+  [framing-and-resolution.md](framing-and-resolution.md)).
+- Returns `(None, module)`: the model lowered by the compiler (`np2hw.core`).
+  Pass the second element to `generate`. A model the compiler does not reach is
+  refused here by name (`NotImplementedError`), one that cannot be built -- an
+  index that can leave its table -- by its reason (`ValueError`).
 
 ```python
 _, out = to_ir(model, Image2D("img", 1920, 1080, 8), Param("gain", np.uint8))
@@ -51,16 +55,20 @@ _, out = to_ir(model, Image2D("img", 1920, 1080, 8), Param("gain", np.uint8))
 ## Generate RTL: `generate`
 
 ```python
-core = generate(out_line, module_name="np2hw_top", framing="height",
-                max_width=None, clk_ns=None, label=None, dev=None,
-                sync_memory=False)
+core = generate(module, module_name="np2hw_top", clk_ns=None, label=None,
+                dev=None, sync_memory=False)
 ```
 
 | arg | meaning |
 |---|---|
-| `framing="height"` | default: self-frame by counting to HEIGHT |
-| `framing="eof"` | height-agnostic: `in_eof`/VSYNC drives the flush ([framing-and-resolution.md](framing-and-resolution.md)); edge core only |
-| `max_width=N` | runtime-variable width: `MAX_WIDTH` param + `active_width` register |
+| `clk_ns` | the clock budget: the datapath is cut into stages that meet it, or refused, naming the operation deeper than the clock |
+| `label` | the name a refusal uses (the module name when None) |
+| `dev` | the device family the core is timed and built for (`np2hw.timing.Device`; 7-series by default) |
+| `sync_memory` | the promise a core bound for silicon makes: every memory reads through a register ([memories.md](memories.md)) |
+
+Every core takes each frame's size on its `frame_width`/`frame_height` register
+ports and hands its own on `out_frame_width`/`out_frame_height`
+([framing-and-resolution.md](framing-and-resolution.md)).
 
 Returns a `Core`. It is a `dict` subclass, so the detail keys np2hw's own
 wrappers read are still there, but the **public surface is the typed one**:
@@ -71,7 +79,8 @@ wrappers read are still there, but the **public surface is the typed one**:
 | `core.module` | its name |
 | `core.interface` | its ports — see below |
 | `core.line_buffers` / `core.shift_depth` | delay-line cost (`M` / `N` are the emitter's private spelling) |
-| `core.out_bits`, `core.params` | output width; `(name, bits)` per parameter port |
+| `core.out_bits`, `core.params` | output width; `(name, bits)` per register port, the frame's size among them |
+| `core.registers` | the model's own registers: `core.params` less the frame's size |
 
 ### `core.interface` — a module describing itself
 
@@ -86,7 +95,7 @@ conventions:
 ```
 
 `input.flags` is what the module ACCEPTS (a core self-frames from its
-WIDTH/HEIGHT and only needs `sof` to re-anchor); `output.flags` is what it
+frame's size and only needs `sof` to re-anchor); `output.flags` is what it
 regenerates. `output` is `None` for a SINK — a module that consumes a stream and
 produces none, and therefore never stalls its source.
 
@@ -224,8 +233,8 @@ meta["module"]          # module name
 meta["in_bits"], meta["out_bits"], meta["signed"]
 meta["params"]          # [(name, bits)] — config register ports
 meta["param_defaults"]  # {name: reset_value}
-meta["out_rows"], meta["out_cols"]
-# edge cores also: meta["edge"], meta["eof"], meta["dynamic"], meta["max_width"], ...
+meta["out_rows"], meta["out_cols"]   # the output at the traced size
+meta["memories"]        # every memory, behind its seam
 ```
 
 ## Adapters (from `np2hw.verilog`)

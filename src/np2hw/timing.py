@@ -1,10 +1,10 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""Timing as a TRACED property: stage depth from the expression DAG.
+"""Timing as a TRACED property: stage depth from the lowered graph.
 
-Every pointwise datapath np2hw emits is a PExpr DAG whose nodes carry
-exact value ranges -- so the logic each node becomes is arithmetic the
-generator can do: an add is a carry chain as wide as its widest
+Every datapath np2hw builds is a graph whose nodes carry exact value
+ranges -- so the logic each node becomes is arithmetic the generator can
+do: an add is a carry chain as wide as its widest
 argument, a clip is a compare and a mux, a gather is a mux tree as
 deep as its table demands, a mul is a DSP block. Summing a stage's
 worst path is therefore a generation-time computation, not a
@@ -20,14 +20,14 @@ builds a mux tree of a different depth, and a family without a DSP
 column does not multiply the same way at all. A bag of constants can
 only misdescribe such a device; a subclass can override the method.
 
-Nothing outside this file may contain a device constant. The emitters
-ask the device for a shape and for nanoseconds, and adding a family is
+Nothing outside this file may contain a device constant. The compiler
+asks the device for a shape and for nanoseconds, and adding a family is
 subclassing `Device` -- not editing np2hw.
 
-The same arithmetic drives automatic pipelining: `assign_stages()`
-walks the DAG in dependency order and starts a new pipeline stage the
-moment the accumulated path would exceed the budget, so the emitters
-can place the registers mechanically. The streams are elastic, so the
+The same arithmetic drives automatic pipelining: the compiler's schedule
+(np2hw.core.lower) walks the graph in dependency order and starts a new
+pipeline stage the moment the accumulated path would exceed the budget,
+so the registers are placed mechanically. The streams are elastic, so the
 added latency is free by construction; the values are untouched, so
 the twin stays bit-exact by construction. The one thing a register
 cannot fix is a single operation deeper than the clock -- that is the
@@ -37,14 +37,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .ir import PExpr, _clog2
-
-
-def _bits(node: PExpr) -> int:
-    lo, hi = int(node.lo), int(node.hi)
-    span = max(abs(lo), abs(hi))
-    width = max(1, span.bit_length())
-    return width + (1 if lo < 0 else 0)
+def _clog2(n: int) -> int:
+    """Bits to count n things: ceil(log2(n)), 0 for one."""
+    return (n - 1).bit_length() if n > 1 else 0
 
 
 @dataclass
@@ -211,11 +206,6 @@ class Device:
         in front of it can share the cycle."""
         return Depth(mems=1)
 
-    def gather(self, size: int) -> Depth:
-        """A read from a register array: a select tree, whose depth the
-        table's size and this device's LUT width decide together."""
-        return Depth(levels=self.mux_levels(size))
-
     def gather_is_read(self, size: int) -> bool:
         """Is a table this big a memory READ rather than a mux?
 
@@ -238,52 +228,6 @@ class Device:
         tools put in distributed RAM and the path did not appear at all.
         """
         return self.mux_levels(size) > 1
-
-    def adder_tree(self, terms: int, bits: int) -> Depth:
-        """A balanced tree summing `terms` values: log2 levels, each one
-        a carry chain."""
-        lv = max(terms - 1, 0).bit_length()
-        return Depth(levels=lv, carry_bits=lv * bits, carries=lv)
-
-    def adder_chain(self, terms: int, bits: int) -> Depth:
-        """A linear accumulation of `terms` values -- what a tap chain
-        becomes before its post ops. A position select in front of it is
-        `phase_select`, added by the emitter that builds one: an adder
-        chain that also priced a mux could only ever price one shape."""
-        n = max(terms - 1, 0)
-        return Depth(levels=n, carry_bits=bits * n, carries=n)
-
-    def phase_select(self, ways: int) -> Depth:
-        """Turning a pixel's POSITION into the coefficient that applies.
-
-        Three levels where it is tempting to write one, because it is
-        three pieces of logic and each was measured on the path:
-
-          the position a pixel is AT, which is the counter except at a
-          frame start, where it is zero -- a mux;
-          the plane it belongs to, which is that position's low bit
-          against the phase register -- an XOR;
-          the coefficient for that plane -- an n:1 select, whose depth
-          is the same law every other read here obeys.
-
-        Charging one level for all three is not a small error: it is the
-        difference between a stage the clock holds and one it does not.
-        A design measured here estimated 5.5ns against a 6.7ns budget and
-        arrived at 7.1ns, and the whole gap was the two levels missing
-        from this method -- the select was counted, the position and the
-        plane were free. Nothing downstream can notice, because the glue
-        is emitted structurally and never reaches the traced DAG.
-        """
-        return Depth(levels=2 + self.mux_levels(ways))
-
-    def window(self, has_line_buffers: bool) -> Depth:
-        """The read cone of a stencil's window: a registered memory read
-        plus the edge selects. A CONSTANT in the line's width -- that is
-        the whole point of reading line buffers through a register, and
-        the reason this is not a select tree that deepens with the
-        picture."""
-        return Depth(mems=1 if has_line_buffers else 0, levels=2)
-
 
 class Series7(Device):
     """Xilinx 7-series, speed grade -1.
@@ -359,200 +303,3 @@ def device(spec) -> Device:
 # -- np2hw's vocabularies, mapped onto the device's shapes ----------------
 # These carry NO numbers. They translate an op name into a request the
 # device answers, so every hardware shape has exactly one owner.
-
-def power_of_two(value) -> int | None:
-    """k where `value` is the integer 2**k (k >= 0), else None."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return None
-    return value.bit_length() - 1 if value & (value - 1) == 0 else None
-
-
-def as_shift(node):
-    """``(operand, k, negated)`` where `node` multiplies by the constant
-    2**k or -2**k -- a left shift, negated for the second: a wire, or a
-    subtraction from zero, and no multiplier either way -- else None.
-    The one question the scheduler and every emitter ask of a multiply, so
-    a shift can never be timed as one shape and built as another."""
-    if node.op != "mul":
-        return None
-    a, b = node.args
-    for x, c in ((a, b), (b, a)):
-        if isinstance(c, PExpr) and c.op == "const" and c.lo == c.hi:
-            k = power_of_two(abs(c.lo))
-            if k is not None:
-                return x, k, c.lo < 0
-    return None
-
-
-def node_cost(node, dev: Device) -> Depth:
-    """The hardware shape of ONE PExpr node: what it adds to any path
-    through it. Leaves cost nothing -- they are registers, constants, or
-    the wires of a register array."""
-    op = node.op
-    if op in ("acc", "const", "param", "tap", "row", "col"):
-        # registers, constants, window taps, and the position counters
-        # every core already keeps: wires into the stage
-        return dev.wire()
-    if op in ("shr", "mask"):
-        return dev.wire()
-    if op == "gather":
-        parent, _index = node.args
-        size = int(parent.shape[0])
-        # Past one LUT a table is a memory, and a memory read owns its
-        # stage. One question, asked of the device, so the scheduler and
-        # the emitter cannot answer it differently.
-        return dev.mem() if dev.gather_is_read(size) else dev.gather(size)
-    if op == "rom":
-        return dev.mem()
-    if op in ("add", "sub"):
-        return dev.add(_bits(node))
-    if op == "mul":
-        shift = as_shift(node)
-        if shift is None:
-            return dev.mul()
-        return dev.add(_bits(node)) if shift[2] else dev.wire()
-    if op == "clip":
-        return dev.clip(_bits(node))
-    if op == "lt":
-        return dev.compare(_bits(node.args[0])
-                           if isinstance(node.args[0], PExpr) else 0)
-    if op == "abs":
-        return dev.absolute(_bits(node))
-    if op == "sel":
-        return dev.select()
-    raise ValueError(f"no depth rule for PExpr op {op!r} -- a new op "
-                     "needs a hardware shape here before it ships")
-
-
-def post_op_cost(op, bits: int, dev: Device) -> Depth:
-    """The same question for the POST-CHAIN vocabulary the tap emitters
-    speak (shr/trunc/clip/addp/mulc/mulp). One device, one set of
-    shapes: a clip costs here exactly what it costs above."""
-    kind = op[0]
-    if kind in ("shr", "trunc"):
-        return dev.wire()
-    if kind == "clip":
-        return dev.clip(bits)
-    if kind == "addp":
-        return dev.add(bits)
-    if kind == "mulc" and power_of_two(op[1]) is not None:
-        return dev.wire()                # a shift: see as_shift
-    if kind in ("mulc", "mulp"):
-        return dev.mul()
-    raise ValueError(f"no depth rule for post op {kind!r} -- a new op "
-                     "needs a hardware shape here before it ships")
-
-
-def expr_depth(node, dev: Device) -> Depth:
-    """Worst-path structural depth of a PExpr DAG: node_cost summed
-    along the worst path, sibling branches compared by the device's own
-    nanosecond ratios."""
-    if not isinstance(node, PExpr):
-        return Depth()
-    below = Depth()
-    for a in node.args:
-        if isinstance(a, PExpr):
-            below = dev.worst(below, expr_depth(a, dev))
-    return below + node_cost(node, dev)
-
-
-# param and const leaves FLOAT: a register port is stable across a
-# pixel's flight through the pipeline and a literal is wiring, so both
-# feed any stage directly and never ride a delay line. acc, tap, row
-# and col are PINNED to stage 0 -- they describe THIS pixel (its input
-# word, its position), so a later stage must see them through the
-# delay line, not as the counter's current value.
-FLOATING = ("const", "param")
-
-
-def assign_stages(roots, clk_ns: float, dev, label: str = "stage"):
-    """Cut a PExpr DAG into pipeline stages that each fit the budget.
-
-    Walks in dependency order with ONE memo shared across all roots
-    (lanes sharing subexpressions must agree on where the registers
-    go). A node lands in the latest stage any of its arguments lives
-    in; when the accumulated path there would exceed the budget, the
-    node starts the next stage instead -- its arguments arrive through
-    the boundary registers, which is exactly the greedy cut the depth
-    arithmetic recommends, and it falls naturally around the DSPs.
-
-    Returns ({id(node): stage}, n_stages, device). The device comes
-    back with the plan because the emitter has to ask it the same
-    questions this did -- whether a gather is a memory read, above
-    all -- and an address captured in a different stage from the one
-    its read lands in is wrong without being visibly wrong.
-
-    Raises when one operation ALONE exceeds the budget: that is the
-    floor -- a pipeline register cannot land inside one operation.
-    """
-    fam = device(dev)
-    stage_of = {}
-    depth_in = {}
-
-    def visit(node):
-        key = id(node)
-        if key in stage_of:
-            return
-        args = [a for a in node.args if isinstance(a, PExpr)]
-        for a in args:
-            visit(a)
-        cost = node_cost(node, fam)
-        if fam.ns(cost) > clk_ns:
-            raise ValueError(
-                f"{label}: operation {node.op!r} alone estimates "
-                f"{fam.ns(cost):.1f} ns against the {clk_ns:.1f} ns budget "
-                f"on {fam.name} -- a pipeline register cannot land inside "
-                "one operation. Slow the clock or restructure the model.")
-        staged = [a for a in args if a.op not in FLOATING]
-        s = max((stage_of[id(a)] for a in staged), default=0)
-        if node.op == "gather" and fam.gather_is_read(int(node.args[0].shape[0])):
-            # Same shape as a rom, and for the same reason -- see
-            # `gather_is_read`. The emitter asks the device the identical
-            # question, so the stage the address is captured in and the
-            # stage the data lands in cannot disagree.
-            stage_of[key] = s + 1
-            depth_in[key] = fam.mem()
-            return
-        if node.op == "rom":
-            # A memory read is registered by construction: its address
-            # is captured at the end of the previous stage and its data
-            # appears in this one. So it ALWAYS starts a stage, budget
-            # or no budget -- that is what makes it a block RAM instead
-            # of a mux tree as deep as the table.
-            stage_of[key] = s + 1
-            depth_in[key] = cost
-            return
-        below = Depth()
-        for a in staged:
-            if stage_of[id(a)] == s:
-                below = fam.worst(below, depth_in[id(a)])
-        d = below + cost
-        if fam.ns(d) > clk_ns:
-            s += 1            # cut here: every argument arrives registered
-            d = cost
-        stage_of[key] = s
-        depth_in[key] = d
-
-    for root in roots:
-        visit(root)
-    n_stages = max((stage_of[id(root)] for root in roots), default=0) + 1
-    return stage_of, n_stages, fam
-
-
-def check(root, clk_ns: float, dev, label: str = "stage") -> Depth:
-    """The budget verdict for one stage, named and in nanoseconds.
-
-    Raises when the estimate exceeds the clock: at generation time,
-    in microseconds, instead of after place-and-route, in despair.
-    """
-    fam = device(dev)
-    depth = expr_depth(root, fam)
-    est = fam.ns(depth)
-    if est > clk_ns:
-        raise ValueError(
-            f"{label}: estimated {est:.1f} ns ({depth.levels} levels, "
-            f"{depth.carry_bits} carry bits, {depth.dsps} DSP) exceeds the "
-            f"{clk_ns:.1f} ns budget on {fam.name}. Split the stage (the "
-            "streams are elastic; a register here is free) or slow the "
-            "clock island.")
-    return depth

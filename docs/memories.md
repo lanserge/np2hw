@@ -96,13 +96,12 @@ the fact instead of grepping for it:
 
 ```python
 core["memories"]
-# [{"instance": "u_linebuf1", "module": "blur_linebuf",
-#   "bits": 12, "depth": "WIDTH", "read": "sync"}, ...]
+# [{"instance": "u_lb0_1", "module": "blur_linebuf",
+#   "bits": 12, "depth": 1920, "read": "sync"}, ...]
 ```
 
-`read` is `"sync"` (behind the seam) or `"async"` (a combinational read;
-`module` is then `None`, because there is nothing to bind to). A
-composition can gather these into its build report; revela does.
+`read` is `"sync"`: every memory is behind its seam, its `module` the one to
+bind. A composition can gather these into its build report; revela does.
 
 ## What this does not cover
 

@@ -3,8 +3,9 @@
 
 > **Design rationale** (the *why* behind this part). For current usage and the
 > implemented API, see [`docs/`](../docs/). The tracing front-end described here
-> is implemented as `Traced` in `frontend.py` — the early `StreamArray` / `core.py`
-> prototypes have been removed; the design approach they describe lives on in `Traced`.
+> is implemented by `np2hw.core`'s tracer (`src/np2hw/core/trace.py`), which
+> records a model as one graph ([`docs/one-graph.md`](../docs/one-graph.md)); the
+> approach described here lives on in it.
 
 ## The three pieces
 

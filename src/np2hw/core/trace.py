@@ -221,7 +221,12 @@ class Array:
             count, start = len(range(s0, s1, s2)), t.const(s0)
         if count < 1:
             raise Unsupported("an empty slice")
-        v = g.op("model.var", name=g.vars.declare(count, f"slice {k}", "s"))
+        # how the slice ends: at the axis's end -- no stop, a stop counted
+        # back from the end, or one at or past it -- or at a fixed index
+        stop = k.stop if isinstance(k.stop, (int, np.integer)) else None
+        ends = "end" if stop is None or stop < 0 or stop >= dim else "fixed"
+        v = g.op("model.var", name=g.vars.declare(count, f"slice {k}", "s",
+                                                  ends=ends))
         if step != 1:
             v = g.op("model.mul", v, t.const(step))
         return g.op("model.add", v, start)
@@ -287,8 +292,8 @@ class Array:
         """`make_coords(img, rows, cols)`: a declared output raster's
         variables, shaped (rows, 1) and (1, cols)."""
         g = self.t.g
-        r = g.vars.declare(rows, "output rows", "o")
-        c = g.vars.declare(cols, "output cols", "o")
+        r = g.vars.declare(rows, "output rows", "o", ends="fixed")
+        c = g.vars.declare(cols, "output cols", "o", ends="fixed")
         y = g.op("model.expand", g.op("model.var", name=r), axes=(r, None))
         x = g.op("model.expand", g.op("model.var", name=c), axes=(None, c))
         return Array(self.t, y), Array(self.t, x)
@@ -565,3 +570,80 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
     if not isinstance(out, Array):
         raise Unsupported(f"a model returning {type(out).__name__}")
     return Traced(g, src, out.v, image)
+
+
+# --------------------------------------------------------------------------- #
+# what a model calls: position, a declared raster, a saturation
+# --------------------------------------------------------------------------- #
+
+def coords(img):
+    """Pixel POSITION as values: (row, col).
+
+    On real arrays these are ordinary NumPy ramps, so a model that uses
+    them stays runnable and stays its own oracle. Traced, they are the
+    variables of the input raster's row and column axes -- the indexes the
+    core already counts, because its framing depends on them -- so position
+    costs no logic, and an overlay, a lens-shading profile or a windowed
+    statistic can be written as plain arithmetic on where the pixel is.
+
+    The ramps are BROADCAST-SHAPED -- ``(H, 1)`` and ``(1, W)`` rather than
+    ``np.indices``' two full grids. Every elementwise use is identical by
+    NumPy's broadcasting rules, and the shapes say what matters about
+    position: a row-only value is constant along a line, and a column-only
+    value repeats every line.
+    """
+    if hasattr(img, "_coords"):              # a value that traces itself
+        return img._coords()
+    height, width = np.asarray(img).shape[:2]
+    return (np.arange(height, dtype=np.int64).reshape(height, 1),
+            np.arange(width, dtype=np.int64).reshape(1, width))
+
+
+def make_coords(img, rows, cols):
+    """Declare an OUTPUT raster and return its position, as `coords` does
+    for the input's.
+
+    `coords(img)` says where a pixel is in the frame arriving. This says
+    where a pixel is in the frame LEAVING, which is a different raster the
+    moment a model stops emitting one pixel per pixel. Indexing the input
+    with these coordinates states the map from output position to input
+    position:
+
+        y2, x2 = make_coords(img, H - 4, W - 4)
+        return img[y2 + 2, x2 + 2]          # a crop, offset by (2, 2)
+
+    On real arrays these are ordinary ramps of the declared size, so a
+    model using them stays runnable and stays its own oracle -- the same
+    bargain `coords` makes.
+    """
+    rows, cols = int(rows), int(cols)
+    if rows < 1 or cols < 1:
+        raise ValueError(f"make_coords: an output raster of {rows}x{cols} "
+                         "has no pixels in it")
+    if hasattr(img, "_make_coords"):         # a value that traces itself
+        return img._make_coords(rows, cols)
+    return (np.arange(rows, dtype=np.int64).reshape(rows, 1),
+            np.arange(cols, dtype=np.int64).reshape(1, cols))
+
+
+def saturate(value, bits: int):
+    """Saturate to what fits in ``bits`` unsigned: the range [0, 2**bits - 1].
+
+    ``clip`` takes a lo and a hi, which is the general operation and the
+    honest one for an arbitrary bound. A DATAPATH bound is not arbitrary:
+    it is a width, and writing it as ``clip(0, (1 << bits) - 1)`` states a
+    width in the vocabulary of values. Stated as bits, the range is exact:
+    a saturation in bits can only ever produce ``2**bits - 1``, so the
+    width IS the scale, and a consumer downstream can derive one from the
+    other without being told.
+
+    Runs on real arrays as readily as on traced ones -- both have ``clip``
+    with NumPy's semantics -- so a model using it stays its own oracle.
+
+    Not for signed intermediates. A difference stream (sharpening, chroma)
+    is bounded by a magnitude on both sides, which is a different
+    statement; write that ``clip`` out.
+    """
+    if bits < 1:
+        raise ValueError(f"saturate to {bits} bits: need at least 1")
+    return value.clip(0, (1 << int(bits)) - 1)

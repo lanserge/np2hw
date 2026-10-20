@@ -181,7 +181,7 @@ def _two_frames(meta, W, H, frames, values):
     a("    integer i, fh; integer r, c, fr;")
     a(f"    reg [{meta['in_bits']-1}:0] img [0:{len(frames)*W*H-1}];")
     a("    always #5 clk = ~clk;")
-    a(f"    {mod} #(.WIDTH({W}), .HEIGHT({H})) dut (")
+    a(f"    {mod} dut (")
     a("        .clk(clk), .rst(rst), .in_valid(in_valid),")
     a("        .in_ready(in_ready), .in_sof(in_sof), .in_data(in_data),")
     for name, _ in meta["params"]:
@@ -195,7 +195,7 @@ def _two_frames(meta, W, H, frames, values):
     a("        $readmemh(\"in.hex\", img);")
     a("        fh = $fopen(\"out.txt\", \"w\");")
     for name, _ in meta["params"]:
-        a(f"        param_{name} = {int(values.get(name, 0))};")
+        a(f"        param_{name} = {int(values.get(name, meta["param_defaults"][name]))};")
     a("        @(negedge clk); rst = 0;")
     a(f"        for (fr = 0; fr < {len(frames)}; fr = fr + 1) begin")
     a(f"            for (r = 0; r < {H}; r = r + 1) begin")
@@ -308,8 +308,12 @@ def main():
     result("stencil: window snapshot at 6.73 ns, bit-exact w/ edges", ok,
            f"{meta_s['pipeline_stages']} stages")
 
+    # a clock the single stage fits: its own estimate, rounded up
+    from np2hw.core.pipeline import stage_ns
+    from np2hw.timing import device
+    fits_ns = float(int(stage_ns(outs, device(None))) + 1)
     plain_s = generate(outs, module_name="dm_easy")["verilog"]
-    easy_s = generate(outs, module_name="dm_easy", clk_ns=15.0)
+    easy_s = generate(outs, module_name="dm_easy", clk_ns=fits_ns)
     result("stencil: a fitting clock generates identically",
            easy_s["pipeline_stages"] == 1 and easy_s["verilog"] == plain_s)
 

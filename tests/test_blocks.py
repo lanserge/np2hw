@@ -217,22 +217,30 @@ def _shifts_are_built_as_shifts(block):
 @pytest.mark.parametrize("block", [quadruple, negquadruple, edge],
                          ids=lambda b: b.name)
 def test_a_multiply_by_a_power_of_two_is_a_shift(block):
-    """Pointwise (the compiler's lowering) and in a window (the shift the
-    scheduler and the emitter both ask timing.as_shift about): no
-    multiplier, and the RTL still the model's, word for word."""
+    """Pointwise and in a window: no multiplier, and the RTL still the
+    model's, word for word."""
     _shifts_are_built_as_shifts(block)
 
 
-def test_the_schedule_times_a_shift_as_the_emitters_build_it():
-    """A multiply by 2**k costs a wire, by -2**k a subtraction, by
-    anything else the device's multiplier: what the emitters write."""
-    from np2hw.ir import PExpr
-    from np2hw.timing import SERIES7 as dev, _bits, node_cost
-    x = PExpr("tap", (0, 0, 0, None), 0, 255)
+def test_the_schedule_times_a_shift_as_the_printer_builds_it():
+    """A multiply by 2**k is built as a shift and costs a wire, by -2**k a
+    shift and a negation, which costs an adder, by anything else the
+    device's multiplier: the kinds lowering builds, costed as built."""
+    import numpy as np
+    from np2hw import Image2D, to_ir
+    from np2hw.core.graph import walk
+    from np2hw.core.pipeline import _cost
+    from np2hw.timing import SERIES7 as dev
 
-    def times(k):
-        return PExpr("mul", (x, PExpr("const", (k,), k, k)),
-                     min(0, 255 * k), max(0, 255 * k))
-    assert node_cost(times(4), dev) == dev.wire()
-    assert node_cost(times(-4), dev) == dev.add(_bits(times(-4)))
-    assert node_cost(times(3), dev) == dev.mul()
+    def built(k):
+        _, mod = to_ir(lambda img: img.astype(np.int32) * k,
+                       Image2D("img", 8, 4, bits=8))
+        values = list(mod.unit.roots.values()) + [
+            o for r in mod.unit.regs for o in r.operands]
+        return {n.kind: n for n in walk(values)}
+
+    four, minus, three = built(4), built(-4), built(3)
+    assert "hw.mul" not in four and _cost(four["hw.shl"], dev) == dev.wire()
+    assert "hw.mul" not in minus and _cost(minus["hw.neg"], dev) == \
+        dev.add(minus["hw.neg"].value.type.bits)
+    assert _cost(three["hw.mul"], dev) == dev.mul()

@@ -1,13 +1,13 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""Windows on the new compiler: line buffers, the lag, the flush, the edges.
+"""Windows: line buffers, the lag, the flush, the edges.
 
 A model that reads a padded buffer, or the source at an offset, reads a
 WINDOW, and the spread of its reads is storage: line buffers for the rows,
 a shift register for the columns (docs/one-graph.md, the window rule). The
 output trails the input by the lag the reads give and is finished, past the
-input's end, in flush steps; the edges replicate. Each model is compiled with
-NP2HW_CORE=strict and its Verilog driven with a run of frames through ONE
+input's end, in flush steps; the edges are the pad's. Each model is compiled
+and its Verilog driven with a run of frames through ONE
 elaboration under random backpressure on both sides, and compared with the
 model on every pixel -- the corners, where the edge rule meets the flush,
 above all.
@@ -28,11 +28,6 @@ W, H, BITS = 10, 6, 8
 FRAMES = 3
 
 
-@pytest.fixture(autouse=True)
-def strict(monkeypatch):
-    monkeypatch.setenv("NP2HW_CORE", "strict")
-
-
 def _compile(fn, params=(), clk_ns=None, bits=BITS, channels=1, name="m"):
     _, mod = to_ir(fn, Image2D("img", W, H, bits=bits), *params,
                    channels=channels)
@@ -48,7 +43,7 @@ def _sim(tmp_path, core, frames, values=None, seed=0, gap=True):
     regs = "".join(f"    reg [{b - 1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n"
                     for n, _ in core["params"])
-    sets = "".join(f"        param_{n} = {int(values.get(n, 0)) & ((1 << b) - 1)};\n"
+    sets = "".join(f"        param_{n} = {int(values.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
                    for n, b in core["params"])
     words = [int(v) for v in np.asarray(frames).ravel()]
     per = W * H

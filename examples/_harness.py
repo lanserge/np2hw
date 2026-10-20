@@ -11,7 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from np2hw.ir import Image2D
-from np2hw.frontend import to_ir
+from np2hw import to_ir
 from np2hw.verilog import (generate, testbench, testbench_handshake,
                            switchboard_wrap, axis_video_wrap, testbench_sb_packed,
                            axil_regfile, umi_regfile, testbench_ctrl)
@@ -211,10 +211,14 @@ def check_ctrl(name, fn, A, params, param_values, ctrl="axil", bits=8,
     reg = mk(pspec, module_name=f"{name}_{ctrl}", frame_sync=frame_sync,
              defaults=core.get("param_defaults"))
     # register values keyed by scalar name (handles matrix Params transparently)
-    pv = {n: int(param_values[n]) for n, _ in pspec}
+    # the frame's size is the frame this bench streams; every other port the
+    # value the example sets
+    defaults = core.get("param_defaults", {})
+    pv = {n: int(param_values.get(n, defaults.get(n, 0))) for n, _ in pspec}
 
     if frame_sync:
-        zero_pv = {n: 0 for n, _ in pspec}                # reset/live value, frame 1
+        # frame 1 runs on the register file's reset values: each port's default
+        zero_pv = {n: int(defaults.get(n, 0)) for n, _ in pspec}
         exp1 = _oracle(fn, A, params, zero_pv)
         exp2 = _oracle(fn, A, params, param_values)       # frame 2, after update
         expected = np.concatenate([exp1, exp2])

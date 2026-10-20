@@ -154,7 +154,6 @@ def _verify_reg(g, n):
 _P = frozenset({PURE})
 for _k in (
     Kind("hw.port", _P, 0, _port),
-    Kind("hw.parameter", _P, 0, _port),
     Kind("hw.const", frozenset({PURE, CONSTANT}), 0, _const),
     Kind("hw.param", frozenset({PURE, READS_REGISTER}), 0, _param),
     Kind("hw.add", frozenset({PURE, COMMUTATIVE}), 2,

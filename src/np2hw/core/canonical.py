@@ -40,10 +40,9 @@ class Canonical:
 
 def registers_in_order(output: Value) -> tuple:
     """The model's registers and register arrays by name, in the order the
-    generated module lists their ports -- the order the reference's
-    expression generators list them in, so a core's interface does not
-    depend on which compiler built it: met walking the FAITHFUL record from
-    the output, depth first, each node's operands in the order the model
+    generated module lists their ports, so a core's interface depends on
+    what the model computes and not on the order its statements ran in: met
+    walking the FAITHFUL record from the output, depth first, each node's operands in the order the model
     wrote them -- a table read by its index -- each name at its first
     meeting. Read from the record, not the canonical graph, which orders
     commutative operands for recognising. (A register's ADDRESS is not

@@ -265,13 +265,19 @@ class Variables:
         self._parent: dict[str, str] = {}
         self._n = 0
 
-    def declare(self, count: int, origin: str, hint: str = "v") -> str:
+    def declare(self, count: int, origin: str, hint: str = "v",
+                ends: str | None = None) -> str:
+        """`ends` says how the axis's extent ends, where the model said: at
+        the end of the axis it reads, whatever that axis's size ("end" --
+        `x[1:-1]`), or after a fixed count ("fixed" -- `x[2:10]`, a declared
+        raster). A count alone cannot tell them apart at the size traced,
+        and a frame of another size can."""
         if count < 1:
             raise GraphError(f"a variable counting {count}")
         name = f"{hint}{self._n}"
         self._n += 1
         self._decl[name] = {"count": int(count), "origin": origin,
-                            "rank": self._n}
+                            "rank": self._n, "ends": ends}
         self._parent[name] = name
         return name
 
@@ -292,6 +298,11 @@ class Variables:
             raise GraphError(f"axes of {ca} and {cb} paired on one position")
         keep, drop = sorted((ra, rb), key=lambda v: self._decl[v]["rank"])
         self._parent[drop] = keep
+        # an axis read up to its end by any of the reads paired on it
+        # follows the end; it is fixed only where every read said fixed
+        said = {self._decl[keep]["ends"], self._decl[drop]["ends"]} - {None}
+        self._decl[keep]["ends"] = ("end" if "end" in said else
+                                    "fixed" if said else None)
         return keep
 
     def count(self, name: str) -> int:
@@ -302,6 +313,12 @@ class Variables:
 
     def origin(self, name: str) -> str:
         return self._decl[self.find(name)]["origin"]
+
+    def ends(self, name: str) -> str | None:
+        """How the variable's extent ends: "end", "fixed", or None (not
+        said). Where reads paired on it said differently, "end" wins: an
+        axis read up to its end anywhere follows the end."""
+        return self._decl[self.find(name)]["ends"]
 
     def names(self) -> list[str]:
         return list(self._decl)

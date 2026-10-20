@@ -84,7 +84,7 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/streaming-and-bitwidths.md](docs/streaming-and-bitwidths.md) | Streaming model, line buffers, edge handling, dtype/bitwidth semantics |
 | [docs/clock-crossings.md](docs/clock-crossings.md) | The `cdc_fifo` crossing: what a timing and CDC flow must be told, and the reset contract |
 | [docs/memories.md](docs/memories.md) | The memory seam: line buffers as a bindable module, the macro contract, `sync_memory` |
-| [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOF framing, continuous frames, parametric & dynamic resolution |
+| [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOL/last framing, continuous frames, each frame's size at run time |
 | [docs/ipxact.md](docs/ipxact.md) | IP-XACT: packaging a component, and the stream's own bus definition |
 | [docs/interfaces.md](docs/interfaces.md) | AXI4-Stream Video, Switchboard, AXI-Lite/UMI register files, `control_top` |
 | [docs/backends.md](docs/backends.md) | numpy / iverilog / cxxrtl / switchboard (verilator, icarus) |
@@ -109,10 +109,9 @@ Design rationale (the "why" behind each mechanism) lives in
   `Params` namespace for many-register ISPs, programmable kernels, `np.where` bypass.
 - **Edges**: same-size output via replicate/zero padding (top/bottom flush during
   blanking, left/right replicate).
-- **Framing**: honors AXI-Video `TUSER` (SOF); EOF-driven *height-agnostic* framing;
-  continuous multi-frame.
-- **Resolution**: WIDTH/HEIGHT as Verilog parameters (per-synthesis), or full
-  **runtime** resolution (`MAX_WIDTH` buffers + `active_width` register + VSYNC).
+- **Framing**: honors AXI-Video `TUSER` (SOF); continuous multi-frame.
+- **Resolution**: every core takes each frame's size at run time and hands its own
+  on; the size it is generated at is the most it holds.
 - **Interfaces**: AXI4-Stream Video, Switchboard (SB + packed gearbox), AXI-Lite and
   UMI register files (with frame-synced shadow registers), and a `control_top` that
   wires geometry/config registers to the core.

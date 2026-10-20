@@ -1,7 +1,9 @@
 # Framing & resolution
 
-How frames are delimited, and how one generated core can handle different image sizes —
-from per-synthesis parameters up to fully runtime-variable resolution.
+How frames are delimited, and how one generated core handles frames of
+different sizes. The rule: **the build fixes capacity, the stream states the
+facts.** A core is generated at the largest frame it must hold; each frame's
+own size arrives with the frame.
 
 ## Frame framing: SOF / EOL / EOF
 
@@ -14,8 +16,8 @@ The core carries frame markers on its streaming interface:
 - **Outputs**: `out_sof`, `out_eol` (End Of Line), `out_last` (End Of Frame). These are
   **derived from the (effective) input position** and registered alongside `out_data`,
   so they re-anchor with SOF — there's no separate output counter to drift.
-  A declared crop (`make_coords`) keeps this: its framing is the input position
-  gated to a window. A block that changes RATE could not, which is the invariant
+  A crop keeps this: its framing is the input position gated to a window. A block
+  that changes RATE could not, which is the invariant
   [`design/08`](../design/08-output-rasters.md) says has to give before an
   upscaler exists.
 
@@ -29,65 +31,57 @@ The cores **re-arm** at the end of a frame (counter wraps to 0) rather than latc
 `done` flag, so they free-run across frames — continuous video, one reset. The cxxrtl
 backend exercises this (60-frame GIF == NumPy with a single reset).
 
-## EOF-driven, height-agnostic framing
+## A frame's size
 
-`generate(out, name, framing="eof")` makes the core **not count to HEIGHT**. Instead an
-`in_eof` input (the sensor's frame-end / VSYNC, pulsed on the last input pixel) triggers
-the bottom flush; the flush drains the line buffers and **`out_last` falls out of the
-flush ending** — no HEIGHT anywhere. The same core then processes **any number of
-lines**:
+Every core takes its frame's size at run time, on two register ports, and hands
+on the size of the frame it puts out:
 
-```python
-core = generate(out, "gcore", framing="eof")     # edge core; needs a vertical edge
-```
-Only `WIDTH` is fixed (it sizes the line buffers); height comes from the stream.
-(See `examples/eof_framing.py` — a core built for HEIGHT=4 runs 6/12/20-row frames,
-each bit-exact.)
-
-## Resolution
-
-### 1. Per-synthesis parameters (default)
-
-`WIDTH`/`HEIGHT` are emitted as **Verilog `parameter`s** (not macros, not registers).
-Every size-dependent expression rides them (line-buffer depth `mem[0:WIDTH-1]`, the
-bounds, the framing thresholds); only kernel constants (`M`, `N`, coefficients) are
-baked. So one generated source handles any resolution **by overriding the parameter at
-instantiation**:
-
-```verilog
-gcore #(.WIDTH(1280), .HEIGHT(720))  hd  ( ... );
-gcore #(.WIDTH(3840), .HEIGHT(2160)) uhd ( ... );
-```
-Resolution is chosen at **elaboration/synthesis** — one RTL, many builds. (Verified: a
-core generated at 8×6 runs correct at 16×12 via parameter override.)
-
-### 2. Runtime-variable resolution (dynamic)
-
-For a **reprogrammable sensor** (resolution changes live, one bitstream),
-`generate(..., framing="eof", max_width=N)` splits WIDTH's two roles:
-
-| role | becomes |
+| port | |
 |---|---|
-| line-buffer depth (must be fixed at synth) | **`MAX_WIDTH`** parameter (`mem[0:MAX_WIDTH-1]`) |
-| where each row ends (wrap / EOL / right-edge) | **`active_width`** register input |
-| frame height | **`in_eof`** / VSYNC (no HEIGHT counter) |
+| `param_frame_width`, `param_frame_height` | the arriving frame's size; it holds from the frame's first pixel (`in_sof`), and the core keeps it for the rest of the frame |
+| `out_frame_width`, `out_frame_height` | the frame this core puts out: the input's size, or less a window's border, or a crop's own size |
 
-So one synthesized core handles **any W×H ≤ MAX_WIDTH**, set at runtime:
+So one generated core serves a sensor whose mode changes live: a new size lands
+at the next frame's start. A frame is at least two pixels wide and two lines
+high, the ports' contract: at a frame's first pixel nothing a core decides
+depends on the size, so the core compares against the size it latched as that
+pixel was taken, and the ports reach only the latch. A window still flushing
+one frame finishes it at that frame's size while the next waits. The size a crop hands on follows from what it reads:
+`img[1:-1, 1:-1]` puts out the frame less its border, whatever the frame;
+`img[2:10, 3:15]` always puts out 8×12, and needs a frame that reaches row 10
+and column 15.
 
-```python
-core = generate(out, "gcore", framing="eof", max_width=1920)
-```
-(See `examples/dynamic_res.py` — one core, MAX_WIDTH=64, runs 10×12, 20×6, 7×9, 64×3.)
+### Capacity: the size it is generated at
 
-`active_width` is a normal config register, so it rides the AXI-Lite/UMI register file
-like any tuning register — frame-synced so a resolution change lands cleanly at the
-frame boundary. The `control_top` generator wires `param_active_width → core.active_width`
-for you; see [interfaces.md](interfaces.md) and `examples/active_width.py`.
+What a core HOLDS is fixed when it is generated, from the size its model is
+traced at:
 
-### Choosing
+- a **window** keeps lines, so the traced width is the depth of its line
+  buffers, and frames may be any width up to it. Its height bounds nothing: a
+  window core takes a frame of any height.
+- a **video's past frames** are kept whole, so the traced width and height are
+  the frame store's depth, and frames may be up to that size.
+- a model that reads its **position** (`coords`, a crop's window registers, a
+  shading profile) has that arithmetic sized for the traced frame, so it is
+  exact for frames up to the traced size.
 
-| You want… | Use |
-|---|---|
-| fixed resolution per build, smallest hardware | parameter override (default) |
-| variable **height** only (line-based pipeline) | `framing="eof"` |
-| variable **width and height** at runtime | `framing="eof", max_width=N` + `active_width` register |
+The generated module has no size parameters to override: a different capacity
+is a different generation, so nothing in the RTL can claim a size the
+arithmetic was not built for.
+
+### Who states the size
+
+- **In a pipeline**, the composer chains it: each block's `frame_width` and
+  `frame_height` are the size the block before it hands on, and the first
+  block's are the frame's own size where the stream carries it (a bayerlink
+  header's width and height, as context signals).
+- **A design whose stream carries no size** ties the first block's ports to the
+  size it is built for. A fixed-size build is the same core with its size tied
+  to constants.
+- **A core with a register file** (`control_top`, `control_wrap`) has the two
+  size ports as registers like any other, their defaults the traced size, so a
+  register file nobody configures runs the frame the model was traced at, and
+  software sets a new size the way it sets any register, landing at a frame
+  boundary.
+- **A testbench** drives the size of the frames it streams;
+  `np2hw.verilog.testbench` and `np2hw.testing.block` do.

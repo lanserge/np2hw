@@ -1,15 +1,12 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""The new compiler's channel words and table reads.
+"""Channel words and table reads.
 
-Every model here is compiled with NP2HW_CORE=strict, so it is np2hw.core
-that builds it or the test fails -- the reference cannot quietly take it
-over -- and its Verilog is simulated against the model: channels of one
-word stacked into another; a register array, and a constant table small
-enough for the device to build as logic, read at an index computed from
-the pixel; the order the register ports are listed in, which must not
-depend on which compiler built the core; and the reads the compiler
-refuses, each with its reason.
+Every model here is compiled and its Verilog simulated against the model:
+channels of one word stacked into another; a register array, and a constant
+table small enough for the device to build as logic, read at an index
+computed from the pixel; the order the register ports are listed in; and
+the reads the compiler refuses, each with its reason.
 """
 import shutil
 import subprocess
@@ -26,11 +23,6 @@ pytestmark = pytest.mark.skipif(shutil.which("iverilog") is None,
 W, H = 12, 6
 
 
-@pytest.fixture(autouse=True)
-def strict(monkeypatch):
-    monkeypatch.setenv("NP2HW_CORE", "strict")
-
-
 def _compile(fn, params=(), bits=10, channels=1, name="m"):
     _, line = to_ir(fn, Image2D("img", W, H, bits=bits), *params,
                     channels=channels)
@@ -43,7 +35,7 @@ def _sim(tmp_path, core, frame, values):
     names = [n for n, _ in core["params"]]
     regs = "".join(f"    reg [{b - 1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n" for n in names)
-    sets = "".join(f"        param_{n} = {int(values[n]) & ((1 << b) - 1)};\n"
+    sets = "".join(f"        param_{n} = {int(values.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
                    for n, b in core["params"])
     words = [int(v) for v in frame.ravel()]
     (tmp_path / "in.hex").write_text("".join(f"{v:x}\n" for v in words))
@@ -138,7 +130,7 @@ def knee(img, knot):
 
 def test_a_register_array_read_at_a_computed_index(tmp_path):
     core = _compile(knee, (KNOTS,), name="knee")
-    names = [n for n, _ in core["params"]]
+    names = [n for n, _ in core["registers"]]
     assert names == [f"knot_{i}" for i in range(9)]
     knots = np.array([0, 40, 150, 330, 520, 700, 850, 960, 1023])
     frame = np.random.default_rng(2).integers(0, 1 << 10, (H, W))
@@ -165,7 +157,7 @@ def test_a_small_constant_table_is_logic(tmp_path):
     """Small enough for the device to build as logic: constants read in the
     stage that uses them -- no memory, no stage of its own, no register."""
     core = _compile(droop, name="droop")
-    assert core["params"] == [] and core["memories"] == []
+    assert core["registers"] == [] and core["memories"] == []
     assert core["pipeline_stages"] == 1
     frame = np.random.default_rng(3).integers(0, 1 << 10, (H, W))
     want = droop(frame.astype(np.uint16)).astype(np.int64)
@@ -245,12 +237,13 @@ def gated(img, gain, floor):
 
 
 def test_register_ports_are_listed_in_the_order_of_the_output_walk(tmp_path):
-    """The order the reference's expression generators list them in -- so a
-    core's interface does not change with the compiler that built it --
-    and not the order the model happened to run in. (Addresses are the
-    block's declaration's, and no compiler's.)"""
+    """The order a walk from the output meets them in -- a property of
+    what the model computes, so a core's interface does not change when
+    the model's statements are reordered -- and not the order the model
+    happened to run in. (Addresses are the block's declaration's, and no
+    compiler's.)"""
     core = _compile(gated, (GAIN, FLOOR), name="gated")
-    assert [n for n, _ in core["params"]] == ["floor", "gain"]
+    assert [n for n, _ in core["registers"]] == ["floor", "gain"]
     frame = np.random.default_rng(4).integers(0, 1 << 10, (H, W))
     want = gated(frame.astype(np.uint16), 20, 300).astype(np.int64)
     assert _sim(tmp_path, core, frame, {"gain": 20, "floor": 300}) == \

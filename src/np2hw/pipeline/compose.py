@@ -798,21 +798,19 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         # block's input. The only declared stream fact in a whole design is
         # the input's own.
         given = _incoming(design, s, built)
-        # The frame as it reaches this block: the design's, less what the
-        # blocks before it took off. Every core that follows a run-time
-        # frame keeps its input's size or loses a constant span (a valid
-        # window's), so the traced difference holds at every size.
         # The frame as it reaches this block: the size the block driving it
-        # hands on, as that block has it in force; or, for a block the
-        # design's input drives, the frame's own context signals.
+        # hands on, as that block has it in force; for a block the design's
+        # input drives, the frame's own context signals, less what any
+        # stage before it took off; and in a design whose frame carries no
+        # size, the size this block is built for, as constants.
         frame = None
-        if signals:
-            driver = _driver(design, s)
-            if driver in built and _hands_frame(built[driver]):
-                frame = _frame_out(design, driver)
-            else:
-                frame = (_frame_at(signals[0], form.width - given.width),
-                         _frame_at(signals[1], form.height - given.height))
+        driver = _driver(design, s)
+        if driver in built and _hands_frame(built[driver]):
+            frame = _frame_out(design, driver)
+        elif signals:
+            frame = (_frame_at(signals[0], form.width - given.width),
+                     _frame_at(signals[1], form.height - given.height))
+        if frame is not None:
             frames[s.path] = frame
         result = s.block.generate(
             form.spec.with_stream(given.channels, given.bit_depth),
@@ -1002,8 +1000,8 @@ def _driver(design, s: Stage):
 
 
 def _hands_frame(result) -> bool:
-    """Whether a generated block hands its frame size on (out_frame_*): a
-    core built for a run-time frame does."""
+    """Whether a block hands its frame size on (out_frame_*): every
+    generated core does; a fixed-structure module may not."""
     return any(n == "frame_width" for n, *_ in result.core.interface["params"])
 
 

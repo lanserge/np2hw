@@ -41,7 +41,7 @@ deadlocks the first time a branch stalls.
 from __future__ import annotations
 
 import textwrap
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 
 
 def arm_capture(req: str) -> str:
@@ -176,6 +176,79 @@ def _net(endpoint: str) -> str:
     return "net_" + endpoint.replace(".", "_")
 
 
+def _size_ports(port: str) -> tuple:
+    """The two scalar ports that carry the frame size of stream `port`,
+    beside it, on a composed module."""
+    return (f"{port}_frame_width", f"{port}_frame_height")
+
+
+def _thread_frame_sizes(instances, connections, ports, assigns):
+    """A frame's size travels with its stream. Each instance's input size
+    ports -- named by its interface, `input.size` -- that the caller left
+    unbound are bound from where its stream comes from: the size the module
+    driving it hands on (`output.size`), or -- for a stream entering this
+    module -- two size inputs beside it (_size_ports). A stream leaving this
+    module gets the size it carries beside it the same way, as outputs. A
+    binding the caller gave wins: the caller may know the size from
+    elsewhere (a header's context, a constant)."""
+    by_name = {inst.name: inst for inst in instances}
+    names = {p.name for p in ports}
+    stream_in = {p.name for p in ports if p.stream is not None
+                 and p.direction == "in"}
+    stream_out = {p.name for p in ports if p.stream is not None
+                  and p.direction == "out"}
+    bind = {i.name: dict(i.bind) for i in instances}
+    outputs = {i.name: dict(i.outputs) for i in instances}
+    ports, assigns = list(ports), dict(assigns or {})
+
+    def size_of(inst, role):
+        stream = inst.core["interface"].get(role) or {}
+        return stream.get("size")
+
+    def handed(src):
+        """The wires the size leaves instance `src` on, as its outputs."""
+        wires = []
+        for port in size_of(by_name[src], "output"):
+            wire = f"{src}_{port}"
+            outputs[src].setdefault(port, (wire, 16))
+            wires.append(wire)
+        return tuple(wires)
+
+    def declare(name, direction, about):
+        if name not in names:
+            names.add(name)
+            ports.append(Port(name, direction, width=16, comment=about))
+
+    for edge in connections:
+        src, _, _ = edge.source.rpartition(".")
+        dst, _, _ = edge.sink.rpartition(".")
+        if dst:
+            want = size_of(by_name[dst], "input")
+            if not want or all(n in bind[dst] for n in want):
+                continue
+            if src and size_of(by_name[src], "output"):
+                wires = handed(src)
+            elif not src and edge.source in stream_in:
+                wires = _size_ports(edge.source)
+                for w in wires:
+                    declare(w, "in", f"the size of each frame arriving on "
+                                     f"{edge.source}")
+            else:
+                continue
+            for n, w in zip(want, wires):
+                bind[dst].setdefault(n, (w, "the frame's size, with its "
+                                            "stream"))
+        elif src and edge.sink in stream_out and size_of(by_name[src],
+                                                          "output"):
+            for out, w in zip(_size_ports(edge.sink), handed(src)):
+                declare(out, "out", f"the size of each frame leaving on "
+                                    f"{edge.sink}")
+                assigns.setdefault(out, w)
+    instances = [dc_replace(i, bind=bind[i.name], outputs=outputs[i.name])
+                 for i in instances]
+    return instances, ports, assigns
+
+
 def compose(module_name: str, instances, connections, ports,
             header=(), notes=(), commit=None, commit_ports=(),
             arm=None, assigns=None) -> dict:
@@ -215,7 +288,13 @@ def compose(module_name: str, instances, connections, ports,
 
     Returns:
         ``{"verilog": str, "module": str, "nets": [...]}``.
+
+    A frame's size travels with its stream (_thread_frame_sizes): an
+    instance's frame_width and frame_height left unbound are bound from the
+    stream that feeds it.
     """
+    instances, ports, assigns = _thread_frame_sizes(instances, connections,
+                                                    ports, assigns)
     by_name = {inst.name: inst for inst in instances}
     stream_ports = {p.name: p for p in ports if p.stream is not None}
 
@@ -616,8 +695,16 @@ def _composed_interface(module_name: str, ports) -> dict:
         if not group:
             return None
         port = group[0]
-        return {"prefix": port.name, "data_bits": port.stream.data_bits,
-                "flags": tuple(port.stream.flags), "domain": port.stream.domain}
+        return stream_of(port)
+
+    names = {p.name for p in ports}
+
+    def stream_of(port):
+        out = {"prefix": port.name, "data_bits": port.stream.data_bits,
+               "flags": tuple(port.stream.flags), "domain": port.stream.domain}
+        if all(n in names for n in _size_ports(port.name)):
+            out["size"] = _size_ports(port.name)
+        return out
 
     return {
         "clock": "clk",
@@ -631,9 +718,7 @@ def _composed_interface(module_name: str, ports) -> dict:
         # there are two of either, because an Instance can only wire one pair --
         # but a wrapper that passes streams through (a register-file top, say)
         # needs them all, and a stereo pipeline has four.
-        "streams": [{"prefix": p.name, "direction": p.direction,
-                     "data_bits": p.stream.data_bits,
-                     "flags": tuple(p.stream.flags), "domain": p.stream.domain}
+        "streams": [dict(stream_of(p), direction=p.direction)
                     for p in ports if p.stream is not None],
         "params": [(p.name, p.width, p.signed) for p in scalars],
         "nestable": len(streams_in) <= 1 and len(streams_out) <= 1,

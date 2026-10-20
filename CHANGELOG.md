@@ -11,6 +11,43 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed
 
+- **One compiler.** `np2hw.core` builds every model; the earlier compiler,
+  its tracer (`np2hw.frontend`, `np2hw.trace`) and its emitters are gone,
+  with the `NP2HW_CORE` switch. `to_ir(fn, image, *params, channels=1)`
+  returns `(None, module)` or refuses, by name (`NotImplementedError`) or by
+  reason (`ValueError`); `generate(module, module_name, clk_ns, label, dev,
+  sync_memory)` builds it, or refuses -- it no longer hands a model to
+  another compiler when its own build misses the clock.
+- **Every core takes each frame's size at run time** -- one kind of core.
+  `param_frame_width` and `param_frame_height` are register ports of every
+  core, latched as a frame's first pixel is taken, their defaults the traced
+  size; `out_frame_width` and `out_frame_height` hand on the size of the
+  frame it puts out, from a register. The size a model is traced at is the
+  most the core holds (a line buffer's depth, a frame store's), and a
+  generated module has no `WIDTH`/`HEIGHT` parameters left to override. A
+  frame is at least 2x2. **Ports change on every core**: the two size inputs
+  and two size outputs are new; a fixed-size use ties the inputs to
+  constants. `core["registers"]` lists the model's own registers,
+  `core["params"]` every register port.
+- **A frame's size travels with its stream.** `compose()` binds an
+  instance's unbound size ports from the stream that feeds it, and gives a
+  composed module `<stream>_frame_width`/`_frame_height` ports beside each
+  stream it passes in or out; `control_wrap` passes them through as context.
+  Each stream in an interface states its `size` ports. In a pipeline each
+  block's size is the size its driver hands on; the first block's is the
+  frame's own where the stream carries it (context signals following
+  `width` and `height`), else the size the block is built for. The RTL twin
+  reads each output's size from the `<output>_frame_width`/`_height` the
+  top publishes.
+- **A window takes frames of any height**: its row steps count at the
+  16-bit geometry width (its column steps stay sized from the traced width,
+  which its line buffers hold). **Emitted widths change** for those step
+  registers.
+- **A video takes frames smaller than it was traced at**: its store's
+  address wraps at the frame's last pixel.
+- **An index that can leave a table is a model error** (`ValueError`,
+  "falls outside the table"), for register arrays and constant tables alike.
+
 - **A window's bounds are registered.** Its last row and column -- the
   registers that place it, added -- are worked out once into a register,
   frame-constant as they are, and compared against; the sum and the
@@ -29,26 +66,6 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   signal nothing in a design reads, and that design no longer carries a
   register for it; the first block that consumes it brings it back. No
   remaining register moves: the allocation is unchanged.
-
-- **A composed pipeline follows the frame it is given.** Where a design's
-  context vocabulary has a signal following `width` and one following
-  `height` that a frame can bring (not a register-only choice), every core
-  is built with `frame="runtime"` and bound to them: one core processes
-  any frame up to the design's `max_width` x `max_height`, the frame's
-  size latched as each frame enters. It used to count to the build's size
-  whatever arrived, so a smaller frame ran its lines together and never
-  ended -- and a batch committed at a frame end was never taken. A stage
-  sees the frame less what the stages before it took off (a valid
-  window's span). A register that follows `width` or `height` now resets
-  to the design's size, not the vocabulary's default.
-- **`generate(..., frame="runtime")`**, on both compilers and every
-  generator: the core takes `frame_width` and `frame_height` parameter
-  ports (defaulting to the traced size, so a testbench driving each port
-  its default runs the traced frame) and keeps `WIDTH`/`HEIGHT` as the
-  most a line buffer holds. A window cropped to a stated extent refuses
-  it; it does not combine with `max_width` or `framing="eof"`, which
-  follow the frame by other means. `frame="build"` (the default) emits
-  what it always did.
 
 - **Fixed modules are Verilog files.** `skid`, `tee` and `cdc_fifo` were
   Verilog printed by Python, the same structure every time. They are
@@ -94,19 +111,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
-- **A frame's size travels with it.** A core built for a run-time frame
-  publishes `out_frame_width`/`out_frame_height`: the frame it hands on --
-  the one it was given, less a valid window's or an unpadded stencil's
-  margin, or the part of a window the frame holds. The composer binds each
-  block's `frame_width`/`frame_height` to its driver's, the first block's
-  to the context, and the top publishes `<output>_frame_width`/`_height`
-  beside each output stream.
-- **A window that registers place**, on the one-graph compiler:
+- **Windows on the compiler**: line buffers behind the `<module>_linebuf`
+  seam, read a column ahead; replicate and zero edges; crops by slice or
+  `make_coords`, the rows and columns past them taken and never read; a
+  filter of a filter's result, as one window over the source.
+- **A window that registers place**:
   `img[p.y0:, p.x0:][:p.h, :p.w]`, NumPy's own slice with register bounds.
   The source streams through and only the beats inside the window go on,
   its lines and frame ending at its edges or the frame's, whichever comes
-  first -- as the slice has it -- and a packed word passes whole. The
-  reference compiler refuses it.
+  first -- as the slice has it -- and a packed word passes whole.
 - **`np2hw_frame_cdc`** (`np2hw.hdl.stream:frame_cdc`): `stream_cdc` for a
   stream that carries its frame's size. Each frame's width and height
   cross beside its samples, published from the moment its first beat is
@@ -272,6 +285,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   costs one more 18 Kb block RAM than `stream_cdc`.
 
 ### Removed
+
+- `generate(framing=, max_width=)`: a run-time size is every core's; the
+  end-of-frame framing and `MAX_WIDTH`/`active_width` cores, and the
+  `eof_framing`, `dynamic_res` and `active_width` examples, go with them.
+- `to_ir(out_bits=)`, `Const`, `Index` and `Indexer` (the earlier
+  compiler's IR), and the `ir_blur`, `verilog_blur`, `index_algebra` and
+  `dtype_refusals` examples.
 
 - **`scanout`, `mode_timing` and `MODES`** (`np2hw.video_out`), and the
   scanout example. **Breaking** for anyone importing them. np2hw compiles

@@ -5,8 +5,9 @@
 Public API for writing model files and driving the compiler:
     from np2hw import Param, Image2D, to_ir, generate
 """
-from .ir import Param, Params, Const, Image2D, Index, Indexer, PhaseRef, Rom
-from .frontend import coords, make_coords, saturate, to_ir
+from .ir import Param, Params, Image2D, PhaseRef, Rom
+from .core.pipeline import to_ir
+from .core.trace import coords, make_coords, saturate
 from .verilog import axil_regfile, control_wrap, generate
 from .regmap import AddrMap, Reg, RegBlock, RegInstance, systemrdl
 from .compose import Connection, Instance, Port, StreamType, compose
@@ -19,8 +20,7 @@ from .video_mem import framebuffer_read
 from .frame_history import frame_history
 
 __all__ = [
-    "Param", "Params", "Const", "Image2D", "Indexer", "PhaseRef",
-    "Rom",
+    "Param", "Params", "Image2D", "PhaseRef", "Rom",
     "to_ir", "generate", "coords", "make_coords", "saturate",
     # Structural composition: instantiate generated cores and wire them.
     "compose", "Instance", "Connection", "Port", "StreamType",

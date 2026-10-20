@@ -1,10 +1,9 @@
 # Copyright 2026 Serge Rabyking
 # SPDX-License-Identifier: MIT
-"""A datapath cut into stages to meet a clock, on the new compiler.
+"""A datapath cut into stages to meet a clock.
 
-Each model is compiled with NP2HW_CORE=strict at a budget tight enough to
-need several stages, so it is np2hw.core's scheduling that meets it or the
-test fails, and its Verilog is driven with a run of frames through ONE
+Each model is compiled at a budget tight enough to need several stages, so
+it is the schedule that meets it or the test fails, and its Verilog is driven with a run of frames through ONE
 elaboration under random backpressure on both sides and compared with the
 model: every value, and every value's pixel -- a position read in a late
 stage must be the pixel's own, carried with it, not where the counters have
@@ -26,11 +25,6 @@ W, H, BITS = 9, 5, 10
 FRAMES = 3
 
 
-@pytest.fixture(autouse=True)
-def strict(monkeypatch):
-    monkeypatch.setenv("NP2HW_CORE", "strict")
-
-
 def _compile(fn, params=(), clk_ns=None, frames=0, bits=BITS, channels=1,
              name="m"):
     _, mod = to_ir(fn, Image2D("img", W, H, bits=bits, frames=frames),
@@ -45,7 +39,7 @@ def _sim(tmp_path, core, frames, values, seed=0):
     regs = "".join(f"    reg [{b - 1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n"
                     for n, _ in core["params"])
-    sets = "".join(f"        param_{n} = {int(values[n]) & ((1 << b) - 1)};\n"
+    sets = "".join(f"        param_{n} = {int(values.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
                    for n, b in core["params"])
     words = [int(v) for v in np.asarray(frames).ravel()]
     per = W * H

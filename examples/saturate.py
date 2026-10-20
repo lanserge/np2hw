@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
 from _harness import check
-from np2hw.frontend import saturate, to_ir
+from np2hw import saturate, to_ir
 from np2hw.ir import Image2D
 from np2hw.verilog import generate
 

@@ -473,10 +473,11 @@ class Block:
         this package. A block is its model plus its declarations, and this turns
         the pair into a module.
 
-        ``frame``, where given, is the pair of expressions that drive the
-        core's run-time frame size -- its width and height as they arrive
-        at this block -- and builds a core for any frame up to ``width`` x
-        ``height``; without it the core is built for that one size.
+        The core holds frames up to ``width`` x ``height`` and takes each
+        frame's own size at run time. ``frame`` is the pair of expressions
+        that drive it -- the width and height as they arrive at this block
+        -- and without it the block's own size, as constants: a block that
+        always sees one size is the same core with its size tied.
         """
         from np2hw import Image2D, to_ir, generate as np2hw_generate
 
@@ -521,8 +522,9 @@ class Block:
                           channels=spec.channels)
         core = np2hw_generate(result, module_name=module_name,
                               clk_ns=clk_ns, label=self.name,
-                              sync_memory=sync_memory,
-                              frame="runtime" if frame else "build")
+                              sync_memory=sync_memory)
+        if frame is None:
+            frame = (f"16'd{width}", f"16'd{height}")
 
         header = model_header(
             self.model, f"{self.name} -- {self.params.description} "
@@ -534,8 +536,7 @@ class Block:
             params=tuple((r.name, r.param.bits) for r in self.params.registers),
             consumes=self.params.consumes,
             context_map={**{bit.name: bit.expression for bit in self.context},
-                         **({"frame_width": frame[0], "frame_height": frame[1]}
-                            if frame else {})},
+                         "frame_width": frame[0], "frame_height": frame[1]},
             core=core,
             latency=1,
             meta={"line_buffers": core.line_buffers,

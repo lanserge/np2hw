@@ -115,10 +115,10 @@ def main():
     # FOUR planes x THREE channels over one 3x3 window: exactly TWO line
     # buffers (one window, shared), whatever the planes and channels. The
     # select is positional and phase-programmable: the phase registers are
-    # the core's only ports, and the ONE build above was bit-exact at every
+    # the model's only registers, and the ONE build above was bit-exact at every
     # phase, its edges included.
     buffers = len(core["memories"])
-    ports = [n for n, _ in core["params"]]
+    ports = [n for n, _ in core["registers"]]
     print(f"  4 planes x {core['channels']} channels -> "
           f"{buffers} line buffer(s), ports {ports}, "
           f"out_bits={core.out_bits}")

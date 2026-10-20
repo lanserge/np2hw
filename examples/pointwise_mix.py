@@ -86,7 +86,7 @@ def main():
 
     _, line = to_ir(mix, Image2D("img", 8, 6, bits=2 * BD), *m_param)
     core = generate(line, module_name="mix2")
-    ports = [name for name, _ in core["params"]]
+    ports = [name for name, _ in core["registers"]]
     arrays = core.verilog.count("_lut [")
     shape_ok = (ports == ["m_0_0", "m_0_1", "m_1_0", "m_1_1"] and arrays == 0)
     print(f"  scalar register ports {ports}, register arrays: {arrays}")

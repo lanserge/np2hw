@@ -42,7 +42,7 @@ import tempfile
 import numpy as np
 
 from .ir import Image2D, Params, np_dtype
-from .frontend import to_ir
+from .core.pipeline import to_ir
 from .verilog import generate, testbench
 
 

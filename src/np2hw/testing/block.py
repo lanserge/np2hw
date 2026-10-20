@@ -90,6 +90,10 @@ async def bit_exact_against_model(dut):
         for bit in block.context:
             getattr(dut, f"param_{bit.name}").value = (
                 int(context[bit.context]) >> bit.bit) & 1
+        # the frame's own size, as a frame arriving states it: the core
+        # latches it as the frame's first pixel enters
+        dut.param_frame_width.value = width
+        dut.param_frame_height.value = height
         await RisingEdge(dut.clk)
 
         # Models speak channels ((h, w, c), the NumPy way); the wire speaks

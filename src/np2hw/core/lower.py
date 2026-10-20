@@ -8,13 +8,13 @@
     materialise  every value crossing a stage -> a register
     (print)      np2hw.core.emit
 
-Each pass takes a unit and returns one; the runner verifies after each.
-Families come one at a time: a model a pass does not take raises
-`Unsupported`, and the reference compiler serves it.
+Each pass takes a unit and returns one; the runner verifies after each. A
+model a pass does not take raises `Unsupported`, naming what it does.
 
-The first family is pointwise: every read is the source's own pixel (or a
-field of it, on the unrolled channel axis), so there is no window and no
-storage but the output stage.
+The families: pointwise, where every read is the source's own pixel (or a
+field of it, on the unrolled channel axis); windows, reads of the source
+at offsets, kept in line buffers and shift registers; and a video's frames,
+reads across time, kept in a frame store.
 """
 from __future__ import annotations
 
@@ -265,8 +265,7 @@ def rewrite(c: Canonical, dev=None):
                             signed=bool(p.signed))
             if k == "model.mul":
                 # by a constant +-2**k: a left shift, negated for the
-                # second, and no multiplier (timing.as_shift's question,
-                # answered once here for this compiler)
+                # second, and no multiplier
                 for i in (0, 1):
                     c = n.operands[i].node
                     if c.kind != "model.const":
@@ -468,14 +467,15 @@ def rewrite(c: Canonical, dev=None):
             for n in walk([c.output]):
                 values[id(n)] = one(n)
             unit = Unit(g, {"data": values[id(c.output.node)]})
-        # register ports in the order the reference lists them
-        # (canonical.registers_in_order); a register array's entries at its
-        # place, by index
+        # register ports in the order canonical.registers_in_order gives; a
+        # register array's entries at its place, by index
         if stencil:
             unit.facts["stencil"] = {
                 "lag": lag, "out": (mg.vars.count(frame_vars[0]),
                                     mg.vars.count(frame_vars[1])),
                 "vars": frame_vars,
+                # how each output axis ends, as the model's slices said
+                "ends": tuple(mg.vars.ends(v) for v in frame_vars),
                 "sources": [{"key": k, "value": st["value"], "K": st["K"],
                              "zero": st["zero"]}
                             for k, st in stencil.items() if "value" in st]}
@@ -544,55 +544,140 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
     GE = lambda x, y: g.op("hw.ge", x, y)
     clip = lambda x, hi: g.op("hw.clip", x, lo=0, hi=hi)
     one = lambda x: g.op("hw.add", x, c(1))
-    # The frame as it arrives: the build's size, or at a run-time size the
-    # frame's own (the printer reads WIDTH and HEIGHT from the frame
-    # registers then), never more than the build's. The steps' last row and
-    # column follow it: the output's frame -- the input's, less any border
-    # an unpadded window drops -- grown by the lag, or with a tail the
-    # input's own. An axis with a tail has the slice's own extent, so its
-    # output ends where the slice does.
-    extent = dict(lo=1, hi=(1 << POS) - 1, bits=POS)
-    fw = g.op("hw.parameter", name="WIDTH", **extent)
-    fh = g.op("hw.parameter", name="HEIGHT", **extent)
-    last_c = g.op("hw.add", fw, c(ws - W - 1))
-    last_r = g.op("hw.add", fh, c(hs - H - 1))
-    out_c = c(lc + wo - 1) if tc > 0 else last_c
-    out_r = c(lr + ho - 1) if tr > 0 else last_r
+    # The frame as it arrives: its size is the frame registers', loaded as
+    # each frame enters, never wider than the traced width a line buffer
+    # holds. The steps' last row and column follow it: the output's frame
+    # grown by the lag, or the input's own where a crop stops short.
+    held, arriving, latches = _frame_size(g, reg_symbol, img)
+    fw, fh = held["cols"], held["rows"]
+    # Frame constants a step is compared against, worked out once per
+    # frame into registers -- loaded with the frame's size, from the size
+    # arriving -- and compared against, not added up again beneath every
+    # step's verdict: the steps' last column and row, and the frame's last
+    # column.
+    constants = []
 
-    cy = reg_symbol("step_r", 0, hs - 1, 0)
+    def per_frame(name, axis, of, traced):
+        node = of(arriving[axis])
+        constants.append((name, node))
+        return reg_symbol(name, node.type.lo, node.type.hi, traced)
+    last_c = per_frame("last_c", "cols",
+                       lambda w: g.op("hw.add", w, c(ws - W - 1)), ws - 1)
+    last_r = per_frame("last_r", "rows",
+                       lambda h: g.op("hw.add", h, c(hs - H - 1)), hs - 1)
+    final_c = per_frame("final_c", "cols", lambda w: g.op("hw.sub", w, c(1)),
+                        W - 1)
+    final_r = per_frame("final_r", "rows", lambda h: g.op("hw.sub", h, c(1)),
+                        H - 1)
+    # The output's extent, one fact per axis, which both its flags and the
+    # size it hands on are made from: a crop that stops short of the frame
+    # has the slice's own count; otherwise the frame less the border an
+    # unpadded window drops. Its last step is the lag plus that extent, one
+    # less -- for a relative extent, the steps' own last.
+    # How each output axis ends is the model's statement (its slices'
+    # stops): after a fixed count, or the frame less the border its reads
+    # drop -- `x[2:10]` against `x[1:-1]`, one graph at the traced size and
+    # two answers at any other.
+    ends = dict(zip(("rows", "cols"), st["ends"]))
+    extent = {"rows": ("fixed", ho) if ends["rows"] == "fixed"
+              else ("less", H - ho),
+              "cols": ("fixed", wo) if ends["cols"] == "fixed"
+              else ("less", W - wo)}
+    # the size handed on is the arriving frame's, loaded as it is taken; the
+    # output's last row and column, where the steps' own last is not it --
+    # a fixed extent, or reads that stop short of the frame's end
+    tail = {"rows": tr > 0, "cols": tc > 0}
+    handed, out_end = {}, {}
+    for axis, lag, last in (("rows", lr, last_r), ("cols", lc, last_c)):
+        kind, k = extent[axis]
+        if kind == "fixed":
+            handed[axis], out_end[axis] = c(k), c(lag + k - 1)
+            continue
+        handed[axis] = (arriving[axis] if k == 0 else g.op(
+            "hw.clip", g.op("hw.sub", arriving[axis], c(k)), lo=0,
+            hi=(1 << POS) - 1))
+        out_end[axis] = (per_frame(f"out_end_{axis[0]}", axis,
+                                   lambda n, k=k, lag=lag: g.op(
+                                       "hw.add", n, c(lag - k - 1)),
+                                   lag + (H if axis == "rows" else W) - k - 1)
+                         if tail[axis] else last)
+    unit.facts["extent"] = extent
+
+    # rows step to the geometry's width: a window keeps lines, not frames,
+    # so the frame's height bounds nothing it builds
+    cy = reg_symbol("step_r", 0, (1 << POS) - 1, 0)
     cx = reg_symbol("step_c", 0, ws - 1, 0)
-    wants = AND(LT(cy, fh), LT(cx, fw))
+    # Whether the step lies inside the input frame, per axis: registers,
+    # worked out from the steps' next values as they advance, so every
+    # control path starts at a flop rather than behind a compare of the
+    # step with the frame's size. Reset to the first step's: inside.
+    in_r = reg_symbol("inside_r", 0, 1, 1)
+    in_c = reg_symbol("inside_c", 0, 1, 1)
+    wants = AND(in_r, in_c)
     anchor = AND(AND(in_valid, in_sof), wants)
     ey, ex = SEL(anchor, c(0), cy), SEL(anchor, c(0), cx)
     valid = reg_symbol("out_valid", 0, 1, 0)
     ready = NOT(AND(valid, NOT(out_ready)))
     take = SEL(wants, in_valid, c(1))            # a pixel, or a flush step
     go = AND(ready, take)
-    line_end = EQ(ex, last_c)
+    # At the anchor the step is (0, 0), and everything worked out from the
+    # step there is a constant: a frame is at least 2x2, so the step ends no
+    # line, the next is column 1, and that column lies inside the frame. So
+    # the steps' next values are worked out from the counters alone and the
+    # anchor picks the constant at the end -- in parallel, not in series,
+    # with what it took to decide the anchor.
+    end_here = EQ(cx, last_c)
+    line_end = AND(NOT(anchor), end_here)
     # past each counter's last step the select takes 0, so the clip changes
     # no value
-    nx = SEL(line_end, c(0), clip(one(ex), ws - 1))
-    ny = SEL(line_end, SEL(EQ(ey, last_r), c(0), clip(one(ey), hs - 1)),
-             ey)
+    nx_on = SEL(end_here, c(0), clip(one(cx), ws - 1))
+    ny_on = SEL(end_here, SEL(EQ(cy, last_r), c(0),
+                              clip(one(cy), (1 << POS) - 1)), cy)
+    nx = SEL(anchor, c(1), nx_on)
+    ny = SEL(anchor, c(0), ny_on)
+    # Inside, at the next step -- LT(ny, fh) and LT(nx, fw), each read off
+    # what the step does, so every compare is of a counter with a frame
+    # constant, side by side: after the anchor the next step is (0, 1),
+    # inside any frame of at least 2x2; a step that ends no line keeps its
+    # row; a line's end wraps the column to 0, inside, and the row to 0 or
+    # to the next, inside while the row is before the frame's last; and
+    # otherwise the next column is inside while this one is before the
+    # frame's last.
+    next_r = SEL(end_here, SEL(EQ(cy, last_r), c(1), LT(cy, final_r)), in_r)
+    next_c = SEL(end_here, c(1), LT(cx, final_c))
+    unit.regs.append(g.node("hw.reg", [SEL(anchor, c(1), next_r), go],
+                            {"name": "inside_r"}))
+    unit.regs.append(g.node("hw.reg", [SEL(anchor, c(1), next_c), go],
+                            {"name": "inside_c"}))
     unit.regs.append(g.node("hw.reg", [nx, go], {"name": "step_c"}))
     unit.regs.append(g.node("hw.reg", [ny, go], {"name": "step_r"}))
 
     emit = AND(GE(ey, c(lr)), GE(ex, c(lc)))
-    if tr > 0:
-        emit = AND(emit, LT(ey, c(lr + ho)))
-    if tc > 0:
-        emit = AND(emit, LT(ex, c(lc + wo)))
-    out_eol = EQ(ex, out_c)
+    for axis, at in (("rows", ey), ("cols", ex)):
+        if extent[axis][0] == "fixed" or tail[axis]:
+            emit = AND(emit, g.op("hw.le", at, out_end[axis]))
+    out_eol = EQ(ex, out_end["cols"])
     flags = {"valid": emit,
              "sof": AND(emit, AND(EQ(ey, c(lr)), EQ(ex, c(lc)))),
              "eol": AND(emit, out_eol),
-             "last": AND(emit, AND(EQ(ey, out_r), out_eol))}
+             "last": AND(emit, AND(EQ(ey, out_end["rows"]), out_eol))}
 
     taps, mems = {}, []
     aw = max(1, (W - 1).bit_length())
     # the column the next step reads: a column ahead, the next line's first
-    # after the last
-    ahead = SEL(LT(nx, fw), clip(nx, W - 1), c(0))
+    # after the last -- column 1 after the anchor; otherwise the next step's
+    # column while it lies inside the frame (the step before the frame's
+    # last column), the line's first once past it
+    ahead = SEL(anchor, c(1),
+                SEL(end_here, c(0), SEL(LT(cx, final_c),
+                                        clip(one(cx), W - 1), c(0))))
+    # the step inside the frame's rows and columns -- LT(ey, fh) and
+    # LT(ex, fw), which at the anchor, (0, 0), hold
+    inside_r = g.op("hw.or", anchor, in_r)
+    inside_c = g.op("hw.or", anchor, in_c)
+    # past the frame's first k rows / columns: GE(ey, k) and GE(ex, k),
+    # which at the anchor, (0, 0), fail for every k > 0
+    past = lambda at, k: AND(NOT(anchor), GE(at, c(k)))
     for j, src in enumerate(st["sources"]):
         val = src["value"]
         kr, kc = src["K"]
@@ -605,17 +690,17 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
                  for a in range(1, kr)]
         # the newest row: this pixel's value, or past the frame's last row
         # the last row again
-        cur = val if kr == 1 else SEL(LT(ey, fh), val,
+        cur = val if kr == 1 else SEL(inside_r, val,
                                       c(0) if zero else reads[0])
         rows_v = [cur]
         for a in range(1, kr):
             # a row before the frame's first reads the first
-            rows_v.append(SEL(GE(ey, c(a)), reads[a - 1],
+            rows_v.append(SEL(past(cy, a), reads[a - 1],
                               c(0) if zero else rows_v[a - 1]))
         for a in range(1, kr):
             name = f"lb{j}_{a}"
             unit.roots.update({
-                f"mem_{name}_we": AND(go, LT(ex, fw)),
+                f"mem_{name}_we": AND(go, inside_c),
                 f"mem_{name}_wa": g.op("hw.bits", ex, lo=0, width=aw),
                 f"mem_{name}_wd": cur if a == 1 else reads[a - 2],
                 f"mem_{name}_re": go, f"mem_{name}_ra": ahead})
@@ -627,7 +712,7 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
             regs = [reg_symbol(n, 0, (1 << bits) - 1, None) for n in names]
             # the newest column: the row's word here, or past the line's
             # last column the last again
-            col = rows_v[a] if kc == 1 else SEL(LT(ex, fw), rows_v[a],
+            col = rows_v[a] if kc == 1 else SEL(inside_c, rows_v[a],
                                                  c(0) if zero else regs[0])
             for b, n in enumerate(names, start=1):
                 unit.regs.append(g.node(
@@ -636,7 +721,7 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
             cols_v = [col]
             for b in range(1, kc):
                 # a column before the line's first reads the first
-                cols_v.append(SEL(GE(ex, c(b)), regs[b - 1],
+                cols_v.append(SEL(past(cx, b), regs[b - 1],
                                   c(0) if zero else cols_v[b - 1]))
             for b in range(kc):
                 taps[(src["key"], a, b)] = cols_v[b]
@@ -658,14 +743,82 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
         return None
 
     roots = _substitute(g, unit.roots, substitute)
-    unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()}}
+    load = _size_load(g, unit, reg_symbol, AND(go, anchor))
+    unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
+                  **_handed(g, unit, reg_symbol, handed, load,
+                            {"rows": H, "cols": W})}
+    unit.regs.extend(latches(load))
+    unit.regs.extend(g.node("hw.reg", [node, load], {"name": n})
+                     for n, node in constants)
     unit.facts.update(go=go, ready=ready, in_valid=in_valid, take=take,
                       in_ready=AND(ready, wants), memories=mems,
-                      out_size=(ho, wo), border=(H - ho, W - wo),
+                      out_size=(ho, wo),
                       # cycles past a frame's last pixel taken until its
                       # output is out: the flush steps left, and a margin
                       drain=(lr + 1) * ws + 8)
     return unit
+
+
+def _frame_size(g, reg_symbol, img):
+    """The frame's width and height: registers, latched from the size ports
+    as a frame's first pixel is taken, and reset to the traced size.
+
+    The latch is a frame's first beat late for that beat -- and need not be
+    early: a frame is at least two pixels wide and two lines high, and at a
+    frame's first pixel nothing a core decides depends on the size then.
+    It is inside the frame, it ends no line, a window wants it and reads a
+    column ahead that exists. So the datapath compares against flops, with
+    nothing in front of them, and a size taken from the ports reaches only
+    the latch. The ports' range states the contract, which also keeps
+    `size - 1` unsigned.
+    Returns ({"cols", "rows"}: the latched size, {...}: the arriving size,
+    latches(taken)), `latches` the two registers, enabled by the first
+    pixel being taken."""
+    size = dict(lo=2, hi=(1 << POS) - 1, bits=POS)
+    held, arriving = {}, {}
+    for axis, port, traced in (("cols", "frame_width", img.width),
+                               ("rows", "frame_height", img.height)):
+        arriving[axis] = g.op("hw.port", name=f"param_{port}", **size)
+        held[axis] = reg_symbol(f"{port}_held", 2, (1 << POS) - 1,
+                                max(2, traced))
+
+    def latches(taken):
+        return [g.node("hw.reg", [arriving[axis], taken],
+                       {"name": f"{port}_held"})
+                for axis, port in (("cols", "frame_width"),
+                                   ("rows", "frame_height"))]
+    return held, arriving, latches
+
+
+def _size_load(g, unit, reg_symbol, taken):
+    """When the registers made from the frame's size load: as a frame's
+    first pixel is taken -- and, until the core has taken one, every
+    cycle, so a core out of reset holds the size its ports say is coming
+    rather than the most it can hold, and hands that on."""
+    started = reg_symbol("started", 0, 1, 0)
+    unit.regs.append(g.node("hw.reg", [g.op("hw.const", value=1), taken],
+                            {"name": "started"}))
+    return g.op("hw.or", taken, g.op("hw.not", started))
+
+
+def _handed(g, unit, reg_symbol, handed: dict, starts, traced: dict) -> dict:
+    """The size a core hands on, as two registers loaded as a frame's first
+    beat is taken (`starts`, _size_load) -- from the size arriving with it,
+    so they are current from the next cycle, when the next core can first
+    take that frame -- and so they leave a flop: a size taken straight from
+    the ports would run one combinational path through every core of a
+    pipeline. Their reset value is the size handed on at the traced frame
+    (0 for a window placed by registers), which the ports replace a cycle
+    out of reset."""
+    out = {}
+    for axis, port in (("cols", "out_frame_width"), ("rows", "out_frame_height")):
+        kind, *rest = unit.facts["extent"][axis]
+        init = (traced[axis] - rest[0] if kind == "less" else
+                rest[0] if kind == "fixed" else 0)
+        out[port] = reg_symbol(port, 0, (1 << POS) - 1, init)
+        unit.regs.append(g.node("hw.reg", [handed[axis], starts],
+                                {"name": port}))
+    return out
 
 
 def control() -> Pass:
@@ -682,12 +835,6 @@ def control() -> Pass:
         port = lambda name: g.op("hw.port", name=name, **one_bit)
         in_valid, in_sof, out_ready = (port("in_valid"), port("in_sof"),
                                        port("out_ready"))
-        # a raster has at least one row and one column: so `limit - 1` is
-        # never negative, and comparing a counter with it is unsigned, in
-        # the counter's own width
-        extent = dict(pos, lo=1)
-        limit = {cols: g.op("hw.parameter", name="WIDTH", **extent),
-                 rows: g.op("hw.parameter", name="HEIGHT", **extent)}
         c = lambda v: g.op("hw.const", value=v)
         AND = lambda x, y: g.op("hw.and", x, y)
         NOT = lambda x: g.op("hw.not", x)
@@ -701,6 +848,13 @@ def control() -> Pass:
         if "stencil" in unit.facts:
             return _stencil_control(unit, g, c, AND, NOT, EQ, SEL,
                                     reg_symbol, in_valid, in_sof, out_ready)
+        # the frame's size, latched (_frame_size): `limit - 1` is never
+        # negative, so comparing a counter with it is unsigned, in the
+        # counter's own width
+        held, arriving, latches = _frame_size(g, reg_symbol,
+                                              unit.facts["image"])
+        limit = {cols: held["cols"], rows: held["rows"]}
+        incoming = {cols: arriving["cols"], rows: arriving["rows"]}
         cnt = {v: reg_symbol(f"cnt_{v}", 0, (1 << POS) - 1, 0)
                for v in (rows, cols)}
         valid = reg_symbol("out_valid", 0, 1, 0)
@@ -757,6 +911,26 @@ def control() -> Pass:
                      "sof": AND(inside, AND(first(rows), first(cols))),
                      "eol": AND(inside, final(cols)),
                      "last": AND(inside, AND(final(rows), final(cols)))}
+        # The output's extent, per axis, and the size handed on made from
+        # it: the frame itself, or the window's part of it -- a window
+        # running past the frame's edge ends there, one starting past it
+        # holds nothing.
+        if "window" in unit.facts:
+            y0, x0, h, w = unit.facts["window"]
+            unit.facts["extent"] = {"rows": ("window", y0, h),
+                                    "cols": ("window", x0, w)}
+
+            def kept(frame_n, at, n):
+                room = g.op("hw.sub", frame_n, at)
+                held = SEL(g.op("hw.lt", room, n), room, n)
+                return g.op("hw.clip", SEL(g.op("hw.ge", at, frame_n),
+                                           c(0), held),
+                            lo=0, hi=(1 << POS) - 1)
+            handed = {"rows": kept(incoming[rows], y0, h),
+                      "cols": kept(incoming[cols], x0, w)}
+        else:
+            unit.facts["extent"] = {"rows": ("less", 0), "cols": ("less", 0)}
+            handed = {"rows": incoming[rows], "cols": incoming[cols]}
         fr = unit.facts.get("frames")
         if fr is not None:
             # how many frames have been taken, up to the number the output
@@ -780,6 +954,9 @@ def control() -> Pass:
                 # word back SHIFTED -- its own sample in, the oldest out --
                 # and the read runs a position ahead, from the address's
                 # next state, so the next pixel's word lands as it arrives.
+                # Its depth is the traced frame's, the most it holds; a
+                # frame's positions run from its first pixel to its last,
+                # so the address wraps where the frame ends.
                 img = unit.facts["image"]
                 size = img.width * img.height
                 aw = max(1, (size - 1).bit_length())
@@ -787,7 +964,7 @@ def control() -> Pass:
                 here = SEL(in_sof, c(0), addr)
                 # past the last position the select takes 0, so the clip
                 # changes no value
-                ahead = SEL(EQ(here, c(size - 1)), c(0),
+                ahead = SEL(AND(final(rows), final(cols)), c(0),
                             g.op("hw.clip", g.op("hw.add", here, c(1)), lo=0,
                                  hi=size - 1))
                 unit.regs.append(g.node("hw.reg", [ahead, go],
@@ -818,7 +995,13 @@ def control() -> Pass:
             return g.op("hw.bits", epos[n.attr("var")], lo=0, width=w)
 
         roots = _substitute(g, unit.roots, position)
-        unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()}}
+        img = unit.facts["image"]
+        load = _size_load(g, unit, reg_symbol, AND(go, in_sof))
+        unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
+                      **_handed(g, unit, reg_symbol, handed,
+                                load,
+                                {"rows": img.height, "cols": img.width})}
+        unit.regs.extend(latches(load))
         unit.facts.update(go=go, ready=ready, in_valid=in_valid)
         return unit
 
@@ -834,7 +1017,7 @@ def control() -> Pass:
 # and never rides with a pixel. Everything else that is this pixel's -- its
 # word, its position, its stored past -- is pinned to the stage it arrives
 # in, and a later stage sees it through the registers that carry it.
-_FLOATING = ("hw.const", "hw.param", "hw.parameter")
+_FLOATING = ("hw.const", "hw.param")
 
 
 def schedule(clk_ns=None, dev=None) -> Pass:
@@ -998,9 +1181,11 @@ def materialise() -> Pass:
                                         {"name": name}))
                 outputs[name] = g.op("hw.regread", name=name)
         outputs["out_data"] = g.op("hw.regread", name="out_data")
-        # a memory's ports, wired to its instance by the printer
+        # a memory's ports, wired to its instance by the printer; and the
+        # size the module hands on, a fact of the frame made from the frame
+        # registers, not of a pixel, so no stage carries it
         outputs.update({k: v for k, v in unit.roots.items()
-                        if k.startswith("mem_")})
+                        if k.startswith(("mem_", "out_frame_"))})
         unit.roots = outputs
         f.update(out_bits=data.type.bits, out_signed=data.type.lo < 0)
         return unit

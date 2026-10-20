@@ -68,9 +68,9 @@ Scattered state is what turns banking into a rewrite.
   commit already uses, with N live sets instead of one. `axil_regfile` today
   has exactly one `live_` bank; `banks=N` plus a select input is an additive
   parameter.
-- **Geometry is runtime, not build-time.** `active_width` registers, EOF
-  (height-agnostic) framing, phase registers: one bitstream already serves
-  every width, height and CFA order it was sized for. Per-context geometry is
+- **Geometry is runtime, not build-time.** Every core takes each frame's
+  size at run time, and the phase is a register: one bitstream already serves
+  every frame size and CFA order it was generated to hold. Per-context geometry is
   the same machinery, selected per ID. This is the standing rule — per-sensor
   facts are registers, never trace-time constants — and context switching is
   the second independent reason for it.
@@ -104,8 +104,8 @@ super-resolution). Never implemented at the time; kept buildable here.
 
 What it needs, in np2hw terms:
 
-- **Per-frame mode switching: already in.** Geometry is runtime registers
-  (`active_width`, EOF framing), commits happen at frame boundaries, and the
+- **Per-frame mode switching: already in.** Geometry is a frame's own size,
+  taken as each frame enters, commits happen at frame boundaries, and the
   host control loop already writes sensor registers per frame. A key/binned
   cadence is software policy over existing mechanism.
 - **Frame TYPE is in-band, or it is wrong.** "Is this beat from a key frame or

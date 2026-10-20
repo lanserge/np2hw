@@ -64,7 +64,7 @@ def _run_one(example: str, out_json: str) -> int:
     sys.path.insert(0, os.path.join(ROOT, "src"))
     sys.path.insert(0, EXAMPLES)
     import np2hw
-    import np2hw.frontend as frontend
+    import np2hw.core.pipeline as pipeline
     import np2hw.verilog as verilog
 
     written: list[list[str]] = []            # [basename, text], in order
@@ -131,9 +131,9 @@ def _run_one(example: str, out_json: str) -> int:
                 depth[0] -= 1
         return wrapper
 
-    t_ir = timed(frontend.to_ir, "to_ir")
+    t_ir = timed(pipeline.to_ir, "to_ir")
     t_gen = timed(verilog.generate, "generate")
-    frontend.to_ir = np2hw.to_ir = t_ir
+    pipeline.to_ir = np2hw.to_ir = t_ir
     verilog.generate = np2hw.generate = t_gen
 
     old_cwd = os.getcwd()
