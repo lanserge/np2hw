@@ -187,6 +187,19 @@ def rewrite(c: Canonical, dev=None):
         whole = False
         if tsrc is not None:
             whole = c.output.node is src.node
+            # A read across time is a read of the STREAM's frames: those are
+            # what a store keeps. A value computed from the history and then
+            # sliced on its frames is not a stream a store can keep, and
+            # read as one it would be the live frame at every offset.
+            for n in walk([c.output]):
+                if n.kind != "model.access" or n.operands[0].node is src.node:
+                    continue
+                base = n.operands[0]
+                if any(a and find(a) == tsrc for a in base.type.axes):
+                    raise Unsupported(
+                        "a read across time of a value computed from the "
+                        "stream's history: slice the history first -- "
+                        "video[1:], video[:-1] -- then compute on each frame")
             for n in walk([c.output]):
                 for i, o in enumerate(n.operands):
                     if o.node is not src.node:

@@ -243,3 +243,40 @@ def test_a_frames_context_stays_with_the_frame_through_the_stages():
         StreamSpec(bit_depth=8, channels=1), 16, 8, module_name="late",
         clk_ns=5.0)
     assert built.core["pipeline_stages"] > 2, "one stage: nothing in flight"
+
+
+@requires_iverilog
+def test_a_value_computed_from_the_history_reads_its_frames(tmp_path):
+    """A value computed from the whole history and then sliced on time is
+    that value at each frame read: the slices are the stream's frames at
+    their offsets, kept as any history is -- not the live frame at every
+    offset."""
+    @block(version=(1, 0), description="computed, then sliced",
+           inputs=(StreamPort("in", history=True),),
+           outputs=(StreamPort("out"),))
+    def late(video, p, bit_depth):
+        v = video.astype(np.uint16) << 1
+        return ((v[1:] >> 1) - (v[:-1] >> 1) + 1024).astype(np.uint16)
+
+    core = late.generate(SPEC, W, H, module_name="late").core
+    [store] = core["memories"]
+    assert store["bits"] == BITS
+    video = _video(3)
+    model = late.run(video, bit_depth=BITS)
+    assert (model != 1024).any(), "the frames differ: no test"
+    assert _sim(tmp_path, core, video) == _beats(model)
+
+
+def test_a_read_across_time_through_a_non_pointwise_value_is_refused():
+    """Where the value cannot be pushed through to the stream -- a stack of
+    two of it -- a slice on time is no read a store can serve, and it is
+    refused, saying how to write it."""
+    @block(version=(1, 0), description="stacked, then sliced",
+           inputs=(StreamPort("in", history=True),),
+           outputs=(StreamPort("out"),))
+    def stacked(video, p, bit_depth):
+        v = np.stack([video, video], axis=-1)
+        return (v[1:, ..., 0] >> 1).astype(np.uint16)
+
+    with pytest.raises(NotImplementedError):
+        stacked.generate(SPEC, W, H, module_name="stacked")

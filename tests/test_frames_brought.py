@@ -96,3 +96,25 @@ def test_frames_on_an_output_are_refused(library):
     name = library({"pipes": files})
     with pytest.raises(composite.CompositionError, match="output out states"):
         pipeline.load(f"{name}.pipes:brought")
+
+
+def test_a_design_asks_whether_a_node_has_a_port(library):
+    """The store's memory port exists only where it keeps its frames in
+    external memory: a design reads its outputs to wire it only there."""
+    def files(name):
+        return {"lib": {"top": {
+            "description": "a store, its memory asked after",
+            "parameters": {"impl": {"default": "'bram'",
+                                    "description": "where the frames live"},
+                           "external": {"default": "'mem' in store.outputs",
+                                        "description": "whether it has one"}},
+            "inputs": [], "outputs": [],
+            "nodes": {"store": {"block": "np2hw.hdl.frames:frame_store",
+                                "build": {"implementation": "impl",
+                                          "FRAMES": 2, "BITS": 10,
+                                          "PIXELS": 32}}},
+            "connections": []}}}
+    name = library(files)
+    for impl, external in (("'bram'", False), ("'axi'", True)):
+        design = composite.load(f"{name}.lib:top", {"impl": impl})
+        assert bool(design.parameters["external"]) is external

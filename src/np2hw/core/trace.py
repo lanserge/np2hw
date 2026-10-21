@@ -551,6 +551,12 @@ def _reshape(a: Array, shape: tuple) -> Array:
 def _where(t: Tracer, cond, a, b, **kw):
     if kw:
         raise Unsupported(f"np.where options {sorted(kw)}")
+    if isinstance(cond, (bool, np.bool_)):
+        # a condition known when the model is traced -- a build parameter, a
+        # bound constant: NumPy picks one operand, and so does the trace
+        chosen = a if cond else b
+        return chosen if isinstance(chosen, Array) else \
+            Array(t, t.operand(chosen))
     vals = [t.operand(x) for x in (cond, a, b)]
     if any(v is None for v in vals):
         raise Unsupported("np.where of those operands")

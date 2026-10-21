@@ -11,6 +11,10 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **`np.where` on a condition the trace already knows picks its operand,**
+  as NumPy does: a bound constant or a build parameter choosing between two
+  values is the one chosen, in the core as in the run -- wires, where a
+  register's would be a select.
 - **The frame store keeps its frames in external memory**
   (`implementation: "axi"`): an AXI4 master, its port `mem`, slots from
   `BASE` a frame apart rounded up to 4K. A frame is whole once its writes

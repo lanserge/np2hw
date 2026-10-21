@@ -288,3 +288,50 @@ def test_the_rtl_reads_a_view_and_a_left_shift_as_numpy_does():
     model = runner.run_model(chain, frame, values, {}, 12)
     rtl = runner.run_rtl(chain, frame, values, {}, 12)
     assert np.array_equal(model, rtl)
+
+
+@block(version=(1, 0), description="a shift a build constant chooses",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
+       params=[Param("up", bits=1, description="shift one place or none")])
+def chosen_shift(pixel, p, bit_depth):
+    return np.where(((p.up >> 0) & 1) > 0, pixel << 1, pixel) & 0xFF
+
+
+def test_a_condition_known_at_trace_picks_its_operand():
+    """np.where with a condition the trace already knows -- a bound
+    constant -- is NumPy's choice of one operand, in the core as in the
+    run; as a register it is a select."""
+    from toylib.blocks import VOCABULARY as TOY
+    frame = np.arange(16).reshape(2, 8)
+    bound = chosen_shift.bind({"up": "1"}, TOY)
+    assert (bound.run(frame, bit_depth=8) == (frame << 1) & 0xFF).all()
+    core = bound.generate(StreamSpec(bit_depth=8), 8, 2, "chosen").core
+    assert "param_up" not in core.verilog
+    free = chosen_shift.generate(StreamSpec(bit_depth=8), 8, 2, "free").core
+    assert "param_up" in free.verilog
+
+
+@block(version=(1, 0), description="a computed frame, sliced in space",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),), params=[])
+def computed_rows(pixel, p, bit_depth):
+    """A value computed from the frame, then read a row apart: each slice
+    is the value at its own rows -- a window over the source -- never the
+    value at the output's position twice."""
+    v = pixel.astype(np.uint16) * 2
+    return (v[1:, :] - v[:-1, :] + 512).astype(np.uint16)
+
+
+@pytest.mark.skipif(__import__("shutil").which("verilator") is None,
+                    reason="verilator not on PATH")
+def test_a_computed_value_sliced_in_space_is_read_at_its_rows():
+    from np2hw.design.composite import assemble
+    from np2hw.pipeline import run as runner
+    design = assemble("t", {"c": computed_rows},
+                      [("in", "c.in"), ("c.out", "out")], vocabulary=TOY,
+                      stream={"bits": 8, "max_width": 8, "max_height": 6})
+    chain = runner.pixel_chain(design, "in", None)
+    frame = np.random.default_rng(4).integers(0, 256, (6, 8))
+    values = {"c": {}, "ctxblock": {}}
+    model = runner.run_model(chain, frame, values, {}, 8)
+    assert (model != 512).any(), "the rows differ: no test"
+    assert np.array_equal(model, runner.run_rtl(chain, frame, values, {}, 8))

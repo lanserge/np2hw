@@ -56,9 +56,12 @@ class Stage:
 @dataclass
 class Run:
     """A run of a design: the frames out, and for each the values of the
-    design's other outputs as it went out."""
+    design's other outputs as it went out; a Verilog run's frames are the
+    words its stream carried, `word_bits` wide (:func:`words` packs a
+    model's frames the same way)."""
     frames: list = field(default_factory=list)
     ports: list = field(default_factory=list)
+    word_bits: int = 0
 
 
 class ProofError(ValueError):
@@ -290,7 +293,9 @@ def run_rtl(design, frames, ports, stimulus: Stimulus,
         if done.returncode:
             raise RuntimeError(f"the design's Verilog did not finish: "
                                f"{done.stdout.strip()} {done.stderr.strip()}")
-        return _parse(scratch / "out.txt", pins[f"{sout}_data"][1])
+        run = _parse(scratch / "out.txt", pins[f"{sout}_data"][1])
+        run.word_bits = pins[f"{sout}_data"][1]
+        return run
 
 
 def _stimulus_files(scratch, frames, ports, stimulus, pins, sin, side_in):

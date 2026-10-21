@@ -743,6 +743,8 @@ class _Loader:
                 fact = self.port_fact(target, where)
             if fact is None:
                 fact = self.window_fact(target, where)
+            if fact is None:
+                fact = self.ports_fact(target, where)
             if fact is not None:
                 return fact
             if self.classify(target, where) != "build":
@@ -859,6 +861,16 @@ class _Loader:
                 raise CompositionError(
                     f"{where}: {target}: {fact} is declared where a stream "
                     "enters; an output's is not traced yet")
+            if not self.models_only(node.path):
+                # not built whole: the output is what drives it inside --
+                # a node's port, whose fact it has
+                driver = self.inside(node, port, where)
+                if driver is None:
+                    raise CompositionError(
+                        f"{where}: {target}: nothing inside "
+                        f"{node.found.ref} drives {port}")
+                return self.port_fact(_join(node.path, f"{driver}.{fact}"),
+                                      where)
             _, generated = self.elaborate(node.path, where)
             out = generated.meta["boundary"]["outputs"][port]
             return {"data_bits": out["data_bits"],
@@ -871,6 +883,57 @@ class _Loader:
     #: The smallest register window a bus gives a slave: one page, so a host
     #: maps each slave apart from its neighbours.
     PAGE = 0x1000
+
+    def models_only(self, path: str) -> bool:
+        """Whether every leaf inside the composite at `path` is a model
+        block: what is built whole."""
+        inside = [n for p, n in self.nodes.items()
+                  if p.startswith(path + ".") and n.kind != "composite"
+                  and p not in self.inactive]
+        return bool(inside) and all(n.kind == "block" for n in inside)
+
+    def inside(self, node: _Node, port: str, where: str):
+        """``child.port`` that composite `node`'s own `port` is wired to, as
+        its connections say -- what drives an output, what an input drives
+        -- or None."""
+        for entry in node.found.obj.get("connections", []):
+            if isinstance(entry, dict):
+                if "when" in entry and not self.evaluate_build(
+                        entry["when"], node.path, where):
+                    continue
+                source, sink = entry["from"], entry["to"]
+            else:
+                source, sink = entry
+            if sink == port and "." in source:
+                return source
+            if source == port and "." in sink:
+                return sink
+        return None
+
+    def ports_fact(self, target: str, where: str):
+        """``node.inputs`` / ``node.outputs`` -- the names of a node's ports
+        as this build has them, a port's `when` read; or None where `target`
+        names no such thing. A design asks whether a node it was handed has
+        a port -- ``'mem' in isp.outputs`` -- and wires it only where it
+        does, so one design takes nodes that differ in what they need."""
+        try:
+            node, rest = self.split(target, where)
+        except CompositionError:
+            return None
+        if rest not in ("inputs", "outputs"):
+            return None
+        obj = node.found.obj
+        if node.kind == "composite":
+            return [p["name"] for p in obj.get(rest, [])
+                    if self.port_built(node, p)]
+        if isinstance(obj, dict):
+            return [p["name"] for p in obj.get(rest, [])
+                    if "when" not in p or self.evaluate_build(
+                        p["when"], node.path, f"{where}: {p['name']}: when")]
+        ports = getattr(obj, "ports", None)
+        if ports is None:
+            return None
+        return list(ports.inputs if rest == "inputs" else ports.outputs)
 
     def window_fact(self, target: str, where: str):
         """``node.port.window`` -- the address window an AXI4-Lite slave
@@ -885,6 +948,13 @@ class _Loader:
         if not dot or fact != "window":
             return None
         width = None
+        if node.kind == "composite" and not self.models_only(node.path):
+            # not built whole: the window is the slave's its port is wired to
+            inner = self.inside(node, port, where)
+            if inner is None:
+                return None
+            return self.window_fact(_join(node.path, f"{inner}.window"),
+                                    where)
         if node.kind == "composite":
             ports = self.built_whole(node.path).leaf["ports"]
         else:
@@ -1443,7 +1513,12 @@ class _Loader:
         if node.kind == "block":
             return set(node.found.obj.ports.inputs), \
                 set(node.found.obj.ports.outputs)
-        if node.path in self.opaque:
+        # built whole -- or to be, where a build setting asks after a port
+        # before the design has said which composites are: the same answer,
+        # all its leaves model blocks inside a design that holds more
+        if node.path in self.opaque or (
+                not self.opaque and node.kind == "composite"
+                and node.path in self.opaque_composites()):
             # built whole: wired by the ports its build published -- and,
             # where nothing is generated, wired unchecked, like a leaf
             # generator that has not been called

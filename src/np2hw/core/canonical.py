@@ -265,12 +265,31 @@ class _Selects:
             n = x.node
             if id(n) in memo:
                 return memo[id(n)]
-            if n.kind in _BUFFERS or n.kind == "model.const":
-                out = x                      # re-indexed only by its access
+            if n.kind == "model.const":
+                out = x
+            elif n.kind in _BUFFERS:
+                # a buffer read whole is read at its own variables: replaced,
+                # it is read at the index -- the source used as a value and
+                # sliced on time is its frames at those offsets, not the live
+                # one at every offset
+                axes = [find(a) if a is not None else None
+                        for a in x.type.axes]
+                if any(a in sub for a in axes if a is not None) \
+                        and None not in axes:
+                    out = self.access([x, *(
+                        sub[a] if a in sub else g.op("model.var", name=a)
+                        for a in axes)])
+                else:
+                    out = x                  # re-indexed only by its access
             elif n.kind == "model.var":
                 out = sub.get(find(n.attr("name")), x)
             elif n.kind == "model.access":
-                ops = [go(o) for o in n.operands]
+                # the buffer an access reads is read at the access's own
+                # index, which is what is replaced: re-indexed as a value
+                # too, it would be read at an index twice over
+                buf, *idx = n.operands
+                ops = [buf if buf.node.kind in _BUFFERS else go(buf),
+                       *(go(o) for o in idx)]
                 out = None if None in ops else self.access(ops)
             elif n.kind in _POINTWISE:
                 ops = [go(o) for o in n.operands]
