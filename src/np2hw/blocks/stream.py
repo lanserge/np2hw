@@ -69,25 +69,32 @@ class StreamSpec:
         signed: two's complement components. False everywhere in the pixel
             datapath; available because intermediate difference streams
             (sharpening, chroma) are signed.
+        frames: frames the stream brings side by side -- each beat the
+            pixel of the newest `frames` frames, the frame k before the
+            newest in the k-th group of `channels` components -- for a
+            block that reads the stream's history; 0 for one frame.
     """
 
     bit_depth: int
     channels: int = 1
     name: str = "video"
     signed: bool = False
+    frames: int = 0
 
     def __post_init__(self) -> None:
         if not 1 <= self.bit_depth <= 32:
             raise ValueError(f"bit_depth {self.bit_depth} outside 1..32")
         if self.channels < 1:
             raise ValueError(f"channels {self.channels} must be >= 1")
+        if self.frames < 0:
+            raise ValueError(f"frames {self.frames} must be >= 0")
 
     # -- widths ---------------------------------------------------------------- #
 
     @property
     def data_bits(self) -> int:
         """Width of the packed ``data`` bus."""
-        return self.bit_depth * self.channels
+        return self.bit_depth * self.channels * max(1, self.frames)
 
     @property
     def max_value(self) -> int:
@@ -107,9 +114,11 @@ class StreamSpec:
     def with_depth(self, bit_depth: int) -> "StreamSpec":
         """This stream at a different component width (a block that grows bits)."""
         return StreamSpec(bit_depth=bit_depth, channels=self.channels,
-                          name=self.name, signed=self.signed)
+                          name=self.name, signed=self.signed,
+                          frames=self.frames)
 
-    def with_stream(self, channels: int, bit_depth: int) -> "StreamSpec":
+    def with_stream(self, channels: int, bit_depth: int,
+                    frames: int = 0) -> "StreamSpec":
         """This stream as some block's model actually packed it.
 
         Both numbers are consequences of arithmetic, not declarations: a
@@ -119,7 +128,7 @@ class StreamSpec:
         consumer, so a block is told the stream it is really given.
         """
         return StreamSpec(bit_depth=bit_depth, channels=channels,
-                          name=self.name, signed=self.signed)
+                          name=self.name, signed=self.signed, frames=frames)
 
     # -- packing --------------------------------------------------------------- #
 

@@ -146,6 +146,10 @@
             "$ref": "#/$defs/value",
             "description": "The tallest frame the stream entering may carry; what a block that stores frames sizes its store from."
           },
+          "frames": {
+            "$ref": "#/$defs/value",
+            "description": "Frames the stream entering brings side by side, the frame k before the newest in the k-th sample of each beat -- a frame store upstream keeps them -- so a block reading the stream's history reads them as they come and keeps none. 0, or absent: one frame."
+          },
           "description": {
             "type": "string"
           },

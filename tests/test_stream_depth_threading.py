@@ -40,7 +40,8 @@ def _depths(design):
     seen, built = {}, {}
     spec = compose.shape(design).spec
     for stage in compose.datapath(design):
-        channels, depth, _, _ = compose._incoming(design, stage, built)
+        given = compose._incoming(design, stage, built)
+        channels, depth = given.channels, given.bit_depth
         result = stage.block.generate(
             spec.with_stream(channels, depth), WIDTH, HEIGHT,
             module_name=f"probe_{stage.module_prefix}")
@@ -160,8 +161,9 @@ def test_geometry_is_threaded_from_the_driver_not_broadcast():
 
     built, seen = {}, []
     for stage in compose.datapath(pipeline):
-        channels, depth, width, height = compose._incoming(pipeline, stage,
-                                                          built)
+        given = compose._incoming(pipeline, stage, built)
+        channels, depth = given.channels, given.bit_depth
+        width, height = given.width, given.height
         with redirect_stdout(io.StringIO()):
             result = stage.block.generate(
                 compose.shape(pipeline).spec.with_stream(channels, depth),

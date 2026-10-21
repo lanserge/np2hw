@@ -751,7 +751,7 @@ class _Loader:
 
     # -- the streams entering ----------------------------------------------- #
 
-    STREAM_FACTS = ("bits", "max_width", "max_height", "context")
+    STREAM_FACTS = ("bits", "max_width", "max_height", "context", "frames")
 
     def streams(self, forward: dict, root: str = "") -> dict:
         """For each top input, the facts of the stream entering it,
@@ -812,7 +812,7 @@ class _Loader:
     # -- facts of a node's ports, and composites built whole --------------- #
 
     FACTS = ("bits", "channels", "data_bits", "max_width", "max_height",
-             "context")
+             "context", "frames")
 
     def port_fact(self, target: str, where: str):
         """``node.port.fact`` -- a fact of the stream at a composite's port,
@@ -840,13 +840,16 @@ class _Loader:
                 # the facts that ride with the stream entering: a design
                 # wires one to the port only where it is in this list
                 return list(facts.get("context", ()))
+            frames = int(facts.get("frames", 0))
+            if fact == "frames":
+                return frames
             channels = int(facts.get("channels", 1))
             return channels if fact == "channels" else \
-                int(facts["bits"]) * channels
+                int(facts["bits"]) * channels * max(1, frames)
         if port in outputs:
-            if fact in ("max_width", "max_height"):
+            if fact in ("max_width", "max_height", "frames"):
                 raise CompositionError(
-                    f"{where}: {target}: geometry is declared where a stream "
+                    f"{where}: {target}: {fact} is declared where a stream "
                     "enters; an output's is not traced yet")
             _, generated = self.elaborate(node.path, where)
             out = generated.meta["boundary"]["outputs"][port]

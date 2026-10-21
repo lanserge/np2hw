@@ -204,22 +204,29 @@ def rewrite(c: Canonical, dev=None):
         live = max(starts) if starts else 0
         stores = live - min(starts) if starts else 0
         word = img.bits                         # one sample's word, kept
+        delivered = img.delivered
+        if delivered and stores >= delivered:
+            raise Unsupported(f"a read {stores} frames back, of a stream "
+                              f"that brings {delivered} side by side")
         history = (g.op("hw.memread", name="hist", lo=0,
-                        hi=(1 << (stores * word)) - 1) if stores else None)
+                        hi=(1 << (stores * word)) - 1)
+                   if stores and not delivered else None)
 
         def past(depth: int, lo: int, width: int) -> Value:
             """A field of the sample `depth` frames before the live one:
-            the live word itself, or the store's word for this position."""
-            if depth == 0:
-                return g.op("hw.bits", port_in(), lo=lo, width=width)
+            the live word itself, or the store's word for this position --
+            or, where the stream brings its history, the word's own field."""
+            if depth == 0 or delivered:
+                return g.op("hw.bits", port_in(), lo=depth * word + lo,
+                            width=width)
             return g.op("hw.bits", history, lo=(depth - 1) * word + lo,
                         width=width)
         params: dict = {}
         values: dict = {}
 
         def port_in():
-            return g.op("hw.port", name="in_data", bits=img.bits,
-                        lo=0, hi=(1 << img.bits) - 1)
+            return g.op("hw.port", name="in_data", bits=img.word_bits,
+                        lo=0, hi=(1 << img.word_bits) - 1)
 
         def one(n) -> Value:
             k = n.kind
@@ -486,8 +493,13 @@ def rewrite(c: Canonical, dev=None):
         if tsrc is not None:
             # frames the output waits for (the live read's start), and the
             # store: how many, and the word it keeps per position
-            unit.facts["frames"] = {"skip": live, "stores": stores,
-                                    "word": word, "history": history}
+            # (a history the stream brings is whole from its first frame:
+            # nothing waits, and nothing is kept)
+            unit.facts["frames"] = (
+                {"skip": 0, "stores": 0, "word": word, "history": None}
+                if delivered else
+                {"skip": live, "stores": stores, "word": word,
+                 "history": history})
         order = list(c.registers)
         ordered = [p for key, p in sorted(
             params.values(), key=lambda kp: (order.index(kp[0][0]),

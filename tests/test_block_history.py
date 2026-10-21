@@ -114,6 +114,66 @@ def test_a_read_past_the_traced_history_is_refused():
         ancient.generate(SPEC, W, H, module_name="ancient")
 
 
+def _side_by_side(video, frames):
+    """Each frame from the `frames`-th on, with those before it, as a frame
+    store hands them on: one word a pixel, the frame k back in the k-th
+    field."""
+    v = video.astype(np.int64)
+    return np.stack([sum(v[t - k] << (k * BITS) for k in range(frames))
+                     for t in range(frames - 1, len(v))])
+
+
+def test_a_history_the_stream_brings_keeps_no_frames():
+    core = average.generate(StreamSpec(bit_depth=BITS, frames=4), W, H,
+                            module_name="hist_brought").core
+    assert core["memories"] == [] and core["in_bits"] == 4 * BITS
+
+
+@requires_iverilog
+def test_a_history_the_stream_brings_is_read_as_it_comes(tmp_path):
+    """Four frames side by side, from a frame store: every window an output
+    frame, the model's own for the frame the window ends at."""
+    core = average.generate(StreamSpec(bit_depth=BITS, frames=4), W, H,
+                            module_name="hist_brought").core
+    video = _video(1)
+    assert _sim(tmp_path, core, _side_by_side(video, 4)) == \
+        _beats(average.run(video, bit_depth=BITS))
+
+
+@requires_iverilog
+def test_a_history_brought_takes_the_newest_frames_context(tmp_path):
+    """The place bound to the count is the newest frame's: a frame store
+    hands on the context of the frame its window ends at."""
+    bound = quadrature.bind({"pos": "(tick + 2) & 3"}, VOCABULARY)
+    core = bound.generate(StreamSpec(bit_depth=BITS, frames=4), W, H,
+                          module_name="hist_quad_brought").core
+    order = (0, 2, 1, 3)
+    tags = {f"tag_{i}": order[i] for i in range(4)}
+    ticks = [(9 + n) % 16 for n in range(FRAMES)]
+    video = _video(5)
+    model = bound.run(video, tags, bit_depth=BITS, tick=ticks)
+    got = _sim(tmp_path, core, _side_by_side(video, 4), seed=11,
+               values=[dict(tags, tick=t) for t in ticks[3:]])
+    assert got == _beats(_packed(core, model))
+
+
+def test_a_read_further_back_than_the_stream_brings_is_refused():
+    with pytest.raises(NotImplementedError, match="brings 3 side by side"):
+        average.generate(StreamSpec(bit_depth=BITS, frames=3), W, H,
+                         module_name="short")
+
+
+def test_frames_side_by_side_into_a_block_of_one_frame_are_refused():
+    @block(version=(1, 0), description="one frame",
+           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),))
+    def same(pixel, p, bit_depth):
+        return pixel
+
+    with pytest.raises(ValueError, match="reads no history"):
+        same.generate(StreamSpec(bit_depth=BITS, frames=4), W, H,
+                      module_name="same")
+
+
 requires_verilator = pytest.mark.skipif(shutil.which("verilator") is None,
                                         reason="needs verilator")
 

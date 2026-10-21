@@ -11,6 +11,14 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **A stream may bring its history.** An input port's `frames` says the
+  stream entering carries that many frames side by side -- a frame store
+  upstream keeps them -- and a block reading the stream's history then
+  reads them as fields of its input word and keeps no frames of its own.
+  A read further back than the stream brings is refused, and so is a
+  block of one frame fed several. A design reads it as `node.port.frames`,
+  which is what it sets its frame store's depth from. `StreamSpec` carries
+  `frames`; **the input word of such a block is `frames` samples wide**.
 - **A frame store: a stream's recent frames, for a consumer at its own
   pace** (`np2hw.hdl.frames:frame_store`). Every frame that comes in is
   kept, in a ring of `SLOTS`, and the consumer is handed the newest

@@ -247,7 +247,7 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
             "    input  wire in_valid,",
             "    output wire in_ready,",
             "    input  wire in_sof,",
-            f"    input  wire [{img.bits - 1}:0] in_data,"]
+            f"    input  wire [{img.word_bits - 1}:0] in_data,"]
     for name, bits, signed, _, doc in params:
         if doc:
             head.append(f"    // {doc}")
@@ -316,7 +316,8 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
     decls += [line for rom in p.roms.values() for line in rom]
     verilog = "\n".join(head + decls + p.lines + body + assigns +
                         ["endmodule"] + seams)
-    interface = _interface(img.bits, f["out_bits"], f["out_signed"], params)
+    interface = _interface(img.word_bits, f["out_bits"], f["out_signed"],
+                           params)
     # which ports carry each stream's frame size: the input's are register
     # ports, the output's are outputs
     sizes = {"in": ("frame_width", "frame_height"),
@@ -341,7 +342,7 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
         "verilog": verilog,
         "interface": interface,
         "channels": f.get("out_channels", f.get("channels", 1)),
-        "in_bits": img.bits,
+        "in_bits": img.word_bits,
         "out_bits": f["out_bits"],
         "signed": f["out_signed"],
         # every register port, the frame's size among them; and the model's

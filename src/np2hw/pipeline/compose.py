@@ -201,6 +201,7 @@ def shape(design) -> Shape:
                 "stream enters")
         here = {f: stream[f] for f in ("bits", "max_width", "max_height")}
         here["channels"] = stream.get("channels", 1)
+        here["frames"] = int(stream.get("frames", 0))
         here["context"] = tuple(stream.get("context", ()))
         if facts is not None and here != facts[1]:
             raise CompositionError(
@@ -216,7 +217,8 @@ def shape(design) -> Shape:
                 "choice, not a fact a transport carries, so it stays a "
                 "register")
     result = Shape(spec=StreamSpec(bit_depth=int(stream["bits"]),
-                                   channels=int(stream.get("channels", 1))),
+                                   channels=int(stream.get("channels", 1)),
+                                   frames=stream["frames"]),
                    width=int(stream["max_width"]),
                    height=int(stream["max_height"]),
                    context=frozenset(stream["context"]))
@@ -807,7 +809,8 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         if frame is not None:
             frames[s.path] = frame
         result = s.block.generate(
-            form.spec.with_stream(given.channels, given.bit_depth),
+            form.spec.with_stream(given.channels, given.bit_depth,
+                                  given.frames),
             given.width, given.height, module_name=name, clk_ns=clk_ns,
             sync_memory=sync_memory, frame=frame)
         modules.extend(result.modules)
@@ -957,6 +960,9 @@ class Handed(NamedTuple):
     bit_depth: int
     width: int
     height: int
+    # frames side by side: a stream that brings its history, as it enters
+    # a design; what a block hands on is one frame
+    frames: int = 0
 
 
 def handed_on(result) -> Handed:
@@ -1019,7 +1025,7 @@ def _incoming(design, s: Stage, built: dict) -> Handed:
     a stage that changes size hands on its own frame."""
     form = shape(design)
     entering = Handed(form.spec.channels, form.spec.bit_depth,
-                      form.width, form.height)
+                      form.width, form.height, form.spec.frames)
     if not s.block.ports.inputs:
         return entering
     source = netlist(design).driver(Endpoint(s.path, s.block.ports.inputs[0]))

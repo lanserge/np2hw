@@ -77,6 +77,17 @@ class Image2D:
     # reads across time. The stream has no end; only the reads' spread on
     # the frame axis is hardware.
     frames: int = 0
+    # A history the STREAM brings, when set: each beat holds the pixel of
+    # the newest `delivered` frames side by side, the frame k before the
+    # newest in the k-th `bits` of the word -- a frame store upstream keeps
+    # them -- so the reads across time are fields of the word, and the core
+    # keeps no frames of its own.
+    delivered: int = 0
+
+    @property
+    def word_bits(self) -> int:
+        """The input word: one sample, or one of each frame delivered."""
+        return self.bits * max(1, self.delivered)
 
 
 class Param:

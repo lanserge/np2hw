@@ -661,8 +661,14 @@ class Block:
         # 3-channel block sees channels side by side in one value and
         # unpacks them itself, exactly as the wire carries them.
         history = self.inputs[0].history
-        image = Image2D("pixel", width, height, bits=spec.data_bits,
-                        signed=False, frames=HISTORY_TRACE if history else 0)
+        if spec.frames and not history:
+            raise ValueError(
+                f"block {self.name!r} reads no history, and is fed "
+                f"{spec.frames} frames side by side")
+        image = Image2D("pixel", width, height,
+                        bits=spec.bit_depth * spec.channels, signed=False,
+                        frames=HISTORY_TRACE if history else 0,
+                        delivered=spec.frames)
         from np2hw import Param as Np2hwParam
 
         registers = [param.to_np2hw() for param in self.params]
