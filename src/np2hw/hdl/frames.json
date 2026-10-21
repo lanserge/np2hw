@@ -1,0 +1,45 @@
+{
+  "blocks": {
+    "frame_store": {
+      "description": "A stream's recent frames, delivered together at the pace their consumer takes them. Every frame that comes in is kept, in a ring of SLOTS, and the consumer is handed the newest FRAMES whole ones side by side -- channel k the frame k before the newest -- as often as it asks, each with the size and context of the newest. The input never waits for the output: a consumer slower than the source repeats frames of frames, a faster one skips some, neither tears one. A source that reaches a slot being read is never stopped, and `overrun` says so.",
+      "parameters": {
+        "implementation": {"default": "'bram'", "description": "Where the frames live."},
+        "BITS": {"description": "One sample of the stream in."},
+        "FRAMES": {"description": "Frames delivered together: how far back the consumer reads."},
+        "SLOTS": {"default": 16, "description": "Frames kept, FRAMES and the slack: the frames a source may begin, past the newest whole one, while a frame of frames is read."},
+        "CTX_BITS": {"default": 32, "description": "The context carried with each frame: whatever rides beside its pixels."},
+        "PIXELS": {"description": "The largest frame kept, in samples."}
+      },
+      "inputs": [
+        {"name": "clk"},
+        {"name": "rst", "description": "Active high."},
+        {"name": "in", "stream": ["sof", "eol", "last"], "width": "BITS", "description": "The frames, as their source sends them."},
+        {"name": "in_frame_width", "width": 16, "description": "The width of the frame whose first beat is going in."},
+        {"name": "in_frame_height", "width": 16, "description": "Its height."},
+        {"name": "in_ctx", "width": "CTX_BITS", "description": "Its context, taken with its first beat."}
+      ],
+      "outputs": [
+        {"name": "out", "stream": ["sof", "eol", "last"], "width": "FRAMES * BITS", "description": "The newest FRAMES frames side by side, newest in the low bits."},
+        {"name": "out_frame_width", "width": 16, "description": "The width of the frames being put out: the newest's."},
+        {"name": "out_frame_height", "width": 16, "description": "Their height."},
+        {"name": "out_ctx", "width": "CTX_BITS", "description": "The newest's context."},
+        {"name": "out_source", "width": 16, "description": "Which input frame the frames out are computed at, counted from reset: a repeat shows as the same number."},
+        {"name": "cold", "description": "Fewer than FRAMES frames of one history are whole: nothing goes out."},
+        {"name": "overrun", "description": "Sticky until reset: the source reached a frame being read."}
+      ],
+      "model": "np2hw.hdl.models:frame_store",
+      "implementations": {
+        "bram": {
+          "description": "The frames in block RAM, one memory a slot, PIXELS samples deep.",
+          "vivado": {"module": "np2hw_frame_store_bram"},
+          "config": {"BITS": "BITS", "FRAMES": "FRAMES", "SLOTS": "SLOTS",
+                     "CTX_BITS": "CTX_BITS", "PIXELS": "PIXELS"},
+          "sources": ["np2hw.hdl:np2hw_frame_store_bram.v",
+                      "np2hw.hdl:np2hw_frame_store.v",
+                      "np2hw.hdl:np2hw_frame_mem_bram.v"],
+          "facts": {"latency": 4}
+        }
+      }
+    }
+  }
+}

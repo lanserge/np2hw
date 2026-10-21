@@ -11,6 +11,23 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **A frame store: a stream's recent frames, for a consumer at its own
+  pace** (`np2hw.hdl.frames:frame_store`). Every frame that comes in is
+  kept, in a ring of `SLOTS`, and the consumer is handed the newest
+  `FRAMES` whole ones side by side, as often as it asks, with the size and
+  context of the newest; the input never waits for the output. A frame cut
+  short, or a frame of a new size, starts the history over, and a source
+  that reaches a frame being read is told, sticky (`overrun`). The frames
+  live behind a sequential seam; `bram` keeps them in block RAM.
+- **A leaf brings its NumPy model** (`"model": "module:function"` in its
+  library description), called with the frames, the stimulus that drives
+  them and the node's parameters by the description's names. A timed
+  leaf's implementation states the one fact of its hardware the model
+  needs, its `latency`. The frame store's model computes, from frames and
+  timing alone, every frame the Verilog must put out; random stimuli hold
+  the two to it frame for frame.
+- **A leaf's implementations are checked against its ports**, each module
+  elaborated as the block's ports say.
 - **A model reads a value's bits as another integer, and shifts left, as
   NumPy does.** `x.view(np.int16)` on a 16-bit unsigned value is the same
   bits read signed -- the container's wrap, which np2hw already models --

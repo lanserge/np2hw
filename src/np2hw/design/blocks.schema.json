@@ -355,6 +355,11 @@
           },
           "description": "HDL files of a module leaf that a build step generates into <build dir>/hdl."
         },
+        "model": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "The NumPy model of what this leaf's Verilog does, as module:function: called with the frames in, the stimulus that drives them, and this node's parameters by their names here. A design holding a leaf with no model can be built but not proved from its models."
+        },
         "implementations": {
           "type": "object",
           "minProperties": 1,
