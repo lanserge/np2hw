@@ -100,8 +100,9 @@ including through the actual RTL. See [view.md](view.md).
 Generate a register file so software sets these over a bus, with frame-synchronized
 updates (shadow → live at the frame boundary). See [interfaces.md](interfaces.md)
 (`axil_regfile`, `umi_regfile`, `control_top`). A frame's size rides the same
-mechanism where no stream states it: `frame_width` and `frame_height` are register
-ports of every core, their defaults the size it was traced at
+mechanism where no stream states it: a wrapper offers each field of a core's
+context -- `width` and `height` among them -- as a register, its default the size
+the core was traced at, and packs them into the core's `in_ctx`
 ([framing-and-resolution.md](framing-and-resolution.md)).
 
 ## A note on faithfulness

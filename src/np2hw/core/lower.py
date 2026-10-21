@@ -542,6 +542,45 @@ def _substitute(g: Graph, roots: dict, fn) -> dict:
     return {k: go(v) for k, v in roots.items()}
 
 
+def _ctx_port(g, img) -> Value:
+    """The stream's context, as each frame's first beat brings it."""
+    bits = img.context_bits
+    return g.op("hw.port", name="in_ctx", bits=bits, lo=0, hi=(1 << bits) - 1)
+
+
+def _ctx_field(g, img, want) -> Value | None:
+    """The field of the context `want(name, follows)` picks, or None."""
+    lo = 0
+    for name, bits, follows in img.context:
+        if want(name, follows):
+            return g.op("hw.bits", _ctx_port(g, img), lo=lo, width=bits)
+        lo += bits
+    return None
+
+
+def _out_ctx(g, unit, reg_symbol, handed: dict, load) -> Value:
+    """The context a core hands on with its frame: the frame's size where a
+    field follows it -- the size this core puts out -- and every other
+    field as the frame brought it, each in a register loaded with the
+    frame's first beat, like the size it sits beside."""
+    img = unit.facts["image"]
+    parts = []
+    for name, bits, follows in img.context:
+        if follows == "width":
+            v = handed["out_frame_width"]
+        elif follows == "height":
+            v = handed["out_frame_height"]
+        else:
+            field = _ctx_field(g, img, lambda n, f: n == name)
+            v = reg_symbol(f"ctx_{name}", 0, (1 << bits) - 1, 0)
+            unit.regs.append(g.node("hw.reg", [field, load],
+                                    {"name": f"ctx_{name}"}))
+        parts.append(v)
+    # the fields side by side, each leaving its own flop: wiring, no logic
+    return g.op("hw.cat", *parts,
+                fields=tuple(bits for _, bits, _ in img.context))
+
+
 def _frame_values(g, unit, reg_symbol, SEL, load):
     """A substitution for each value a frame brings (``Param(frame=True)``):
     its port as the frame's first pixel is taken, and the copy held from
@@ -555,9 +594,14 @@ def _frame_values(g, unit, reg_symbol, SEL, load):
     def substitute(n):
         if n.kind != "hw.frameparam":
             return None
-        name, bits, signed = n.attr("name"), n.attr("bits"), n.attr("signed")
+        name = n.attr("name")
         if name not in made:
-            port = g.op("hw.param", name=name, bits=bits, signed=signed)
+            img = unit.facts["image"]
+            port = _ctx_field(g, img, lambda f, _: f == name)
+            if port is None:
+                raise Unsupported(
+                    f"{name} is read from each frame, and the stream's "
+                    "context carries no such field")
             held = reg_symbol(f"frame_{name}", port.type.lo, port.type.hi, 0)
             unit.regs.append(g.node("hw.reg", [port, load],
                                     {"name": f"frame_{name}"}))
@@ -809,9 +853,10 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
     load = _size_load(g, unit, reg_symbol, AND(go, anchor))
     roots = _substitute(g, unit.roots, _either(
         substitute, _frame_values(g, unit, reg_symbol, SEL, load)))
+    sizes = _handed(g, unit, reg_symbol, handed, load, {"rows": H, "cols": W})
     unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
-                  **_handed(g, unit, reg_symbol, handed, load,
-                            {"rows": H, "cols": W})}
+                  **sizes}
+    unit.roots["out_ctx"] = _out_ctx(g, unit, reg_symbol, sizes, load)
     unit.regs.extend(latches(load))
     unit.regs.extend(g.node("hw.reg", [node, load], {"name": n})
                      for n, node in constants)
@@ -825,25 +870,30 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
 
 
 def _frame_size(g, reg_symbol, img):
-    """The frame's width and height: registers, latched from the size ports
-    as a frame's first pixel is taken, and reset to the traced size.
+    """The frame's width and height: registers, latched from the context's
+    size fields as a frame's first pixel is taken, and reset to the traced
+    size.
 
     The latch is a frame's first beat late for that beat -- and need not be
     early: a frame is at least two pixels wide and two lines high, and at a
     frame's first pixel nothing a core decides depends on the size then.
     It is inside the frame, it ends no line, a window wants it and reads a
     column ahead that exists. So the datapath compares against flops, with
-    nothing in front of them, and a size taken from the ports reaches only
-    the latch. The ports' range states the contract, which also keeps
-    `size - 1` unsigned.
+    nothing in front of them, and a size taken from the context reaches
+    only the latch. The fields are clipped to the contract, which also
+    keeps `size - 1` unsigned.
     Returns ({"cols", "rows"}: the latched size, {...}: the arriving size,
     latches(taken)), `latches` the two registers, enabled by the first
     pixel being taken."""
-    size = dict(lo=2, hi=(1 << POS) - 1, bits=POS)
     held, arriving = {}, {}
     for axis, port, traced in (("cols", "frame_width", img.width),
                                ("rows", "frame_height", img.height)):
-        arriving[axis] = g.op("hw.port", name=f"param_{port}", **size)
+        # the context's field that follows this axis, at least two as the
+        # contract has it -- or, where none does, the traced size
+        field = _ctx_field(g, img, lambda _, f, a=port[6:]: f == a)
+        arriving[axis] = (
+            g.op("hw.clip", field, lo=2, hi=(1 << POS) - 1)
+            if field is not None else g.op("hw.const", value=traced))
         held[axis] = reg_symbol(f"{port}_held", 2, (1 << POS) - 1,
                                 max(2, traced))
 
@@ -858,7 +908,7 @@ def _frame_size(g, reg_symbol, img):
 def _size_load(g, unit, reg_symbol, taken):
     """When the registers made from the frame's size load: as a frame's
     first pixel is taken -- and, until the core has taken one, every
-    cycle, so a core out of reset holds the size its ports say is coming
+    cycle, so a core out of reset holds the size its context says is coming
     rather than the most it can hold, and hands that on."""
     started = reg_symbol("started", 0, 1, 0)
     unit.regs.append(g.node("hw.reg", [g.op("hw.const", value=1), taken],
@@ -871,10 +921,10 @@ def _handed(g, unit, reg_symbol, handed: dict, starts, traced: dict) -> dict:
     beat is taken (`starts`, _size_load) -- from the size arriving with it,
     so they are current from the next cycle, when the next core can first
     take that frame -- and so they leave a flop: a size taken straight from
-    the ports would run one combinational path through every core of a
+    the context would run one combinational path through every core of a
     pipeline. Their reset value is the size handed on at the traced frame
-    (0 for a window placed by registers), which the ports replace a cycle
-    out of reset."""
+    (0 for a window placed by registers), which the context replaces a
+    cycle out of reset. They are the size fields of `out_ctx`."""
     out = {}
     for axis, port in (("cols", "out_frame_width"), ("rows", "out_frame_height")):
         kind, *rest = unit.facts["extent"][axis]
@@ -1063,10 +1113,11 @@ def control() -> Pass:
         roots = _substitute(g, unit.roots, _either(
             position, _frame_values(g, unit, reg_symbol, SEL, load)))
         img = unit.facts["image"]
+        sizes = _handed(g, unit, reg_symbol, handed, load,
+                        {"rows": img.height, "cols": img.width})
         unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
-                      **_handed(g, unit, reg_symbol, handed,
-                                load,
-                                {"rows": img.height, "cols": img.width})}
+                      **sizes}
+        unit.roots["out_ctx"] = _out_ctx(g, unit, reg_symbol, sizes, load)
         unit.regs.extend(latches(load))
         unit.facts.update(go=go, ready=ready, in_valid=in_valid)
         return unit
@@ -1248,10 +1299,11 @@ def materialise() -> Pass:
                 outputs[name] = g.op("hw.regread", name=name)
         outputs["out_data"] = g.op("hw.regread", name="out_data")
         # a memory's ports, wired to its instance by the printer; and the
-        # size the module hands on, a fact of the frame made from the frame
-        # registers, not of a pixel, so no stage carries it
+        # context the module hands on, the size its fields -- a fact of the
+        # frame made from the frame registers, not of a pixel, so no stage
+        # carries it
         outputs.update({k: v for k, v in unit.roots.items()
-                        if k.startswith(("mem_", "out_frame_"))})
+                        if k.startswith("mem_") or k == "out_ctx"})
         unit.roots = outputs
         f.update(out_bits=data.type.bits, out_signed=data.type.lo < 0)
         return unit

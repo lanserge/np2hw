@@ -77,8 +77,9 @@ production, connect `param_*` to Switchboard's `umi_endpoint`/`umi_regif`.
 top = control_top(core, ctrl="axil", frame_sync=True)   # or ctrl="umi"
 ```
 Emits a top module that instances the register file **and** the core and connects them:
-each register port → its register, the frame's `frame_width` and `frame_height` among
-them ([framing-and-resolution.md](framing-and-resolution.md)). So software sets the
+each register port → its register, and each field of the core's context too -- the
+frame's `width` and `height` among them -- packed into the core's `in_ctx`
+([framing-and-resolution.md](framing-and-resolution.md)). So software sets the
 frame's size over AXI-Lite/UMI like any tuning register, and a register file left at
 its defaults runs the size the core was traced at. Returns the top Verilog (regfile +
 top), the register-file `offsets`, etc.

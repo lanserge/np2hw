@@ -48,8 +48,9 @@ def test_where_the_stream_delivers_it_the_pipeline_has_it():
     they are in a pipeline without the signal."""
     design = _ticked(("tick",))
     assert "tick" in {c.name for c in compose.contexts(design)}
+    assert compose.carried_layout(design) == (("tick", 4, ""),)
     generated = compose.generate(design, control=True)
-    assert "ctx_tick" in dict(generated.modules)[generated.top]
+    assert "input  wire [3:0]  in_ctx" in dict(generated.modules)[generated.top]
     without = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
                        vocabulary=VOCABULARY, stream=STREAM)
     assert _offsets(design) == _offsets(without)
@@ -60,3 +61,25 @@ def test_elsewhere_the_pipeline_does_not_have_it():
     design = assemble("t", {"g": gain}, [("in", "g.in"), ("g.out", "out")],
                       vocabulary=VOCABULARY, stream=STREAM)
     assert "tick" not in {c.name for c in compose.contexts(design)}
+
+
+def test_a_layout_puts_the_size_first_whatever_the_vocabulary_order():
+    """The CTX member's one order: the fact following the width, the one
+    following the height, then the rest as the vocabulary declares them --
+    so a module reading the size alone finds it in the low 32 bits, and
+    no port's listing order changes the word."""
+    from np2hw.blocks.params import Context, Vocabulary
+    from np2hw.stream import pack_context, unpack_context
+    late = Vocabulary((Context(name="seq", bits=8, default=0,
+                               description="a count"),
+                       Context(name="rows", bits=16, default=8,
+                               follows="height", description="its rows"),
+                       Context(name="cols", bits=16, default=8,
+                               follows="width", description="its columns")))
+    layout = late.layout(["seq", "rows", "cols"])
+    assert [f[0] for f in layout] == ["cols", "rows", "seq"]
+    assert late.layout(["rows", "seq", "cols"]) == layout
+    word = pack_context(layout, {"cols": 640, "rows": 480, "seq": 7})
+    assert word & 0xFFFF == 640 and (word >> 16) & 0xFFFF == 480
+    assert unpack_context(layout, word) == {"cols": 640, "rows": 480,
+                                            "seq": 7}

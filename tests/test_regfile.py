@@ -10,7 +10,6 @@ generated Verilog and comparing them with the map.
 from __future__ import annotations
 
 import re
-
 import shutil
 
 import numpy as np
@@ -144,19 +143,21 @@ def test_context_reaches_the_datapath_from_its_block_not_from_a_copy(
         pipeline, generated):
     """Rule 2: one width register in a pipeline, fanned out.
 
-    The context ports of the datapath top are driven by the context block's
-    registers, so a resolution change is one write. A per-block copy would
-    show up here as a context port driven by a register belonging to the
-    consuming block.
+    The context the datapath's first block reads with each frame is packed
+    from the context block's registers, so a resolution change is one
+    write. A per-block copy would show up here as a context field driven
+    by a register belonging to the consuming block.
     """
     bind = compose.control_bind(pipeline, {})
-    assert bind["ctx_width"] == "param_ctxblock_width"
-    assert bind["ctx_phase"] == "param_ctxblock_phase"
-    for port, driver in bind.items():
-        if port.startswith("ctx_"):
-            assert driver.startswith("param_ctxblock_"), (
-                f"{port} is driven by {driver}, which is not the context "
-                "block; context has one owner")
+    assert bind["param_ctxblock_width"] == "param_ctxblock_width"
+    assert bind["param_ctxblock_phase"] == "param_ctxblock_phase"
+    datapath = dict(generated.modules)[pipeline.name]
+    packed = re.findall(r"\.in_ctx\s*\(\{([^}]*)\}\)", datapath)
+    assert packed, "the entering block's context is not packed at the entry"
+    for field in (f.strip() for word in packed for f in word.split(",")):
+        assert field.startswith("param_ctxblock_"), (
+            f"a context field is driven by {field}, which is not the "
+            "context block; context has one owner")
 
 
 def test_the_map_describes_the_commit_contract_the_rtl_implements(pipeline, generated):

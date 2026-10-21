@@ -57,6 +57,13 @@ every conforming module to carry all six wires; optional lets a tool
 connect the three that are always there and match whichever flags are
 present.
 
+**So is `CTX`, the frame's context.** A stream that carries one holds
+each frame's facts in it with the frame's first beat -- the facts its
+port declares, packed in the vocabulary's order, the first in the low
+bits, the frame's width and height first where it declares them -- and
+its width is the port's: a layout is a fact of the design, not of the
+protocol. A module that reads none of it carries it whole.
+
 **The master is the source.** Everything travels with the data except
 READY, which is the sink answering — the handshake's whole asymmetry,
 and what lets a packager tell a consumer from a producer without being

@@ -596,7 +596,7 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
     # the twin drives, and the output word -- never read back from the text.
     ports = {p["name"]: p for p in generated.meta["ports"]}
     scraped = [name for name, p in ports.items() if p["direction"] == "input"
-               and (name.startswith("ctx_") or name.startswith("param_"))]
+               and (name.startswith("param_") or name == "chain_in_ctx")]
     port_values = [_port_values(twin, scraped, values,
                                 {k: (v[n] if np.ndim(v) else v)
                                  for k, v in context.items()},
@@ -621,7 +621,11 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
             f"the chain's output port is {port_bits} bits but its traced "
             f"boundary says {out_bits}; the generator and its own report "
             "disagree about the same word")
-    sized = "chain_out_frame_width" in ports
+    # the frame each output frame IS: its context's size, where the
+    # design's context has the fields that follow the frame
+    out_layout = compose.context_layout(twin)
+    sized = ("chain_out_ctx" in ports
+             and {"width", "height"} <= {f[2] for f in out_layout})
     binary = _twin_binary(verilog, generated.top, scraped,
                           in_bits=in_channels * bit_depth, out_bits=out_bits,
                           sized=sized)
@@ -646,10 +650,16 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
         put_out = [np.array([int(w, 16) for w in block.split()], dtype=object)
                    for block in (scratch / "out.txt").read_text()
                    .split("L\n")[:-1]]
-    # each frame the hardware says it put out: a window's is its registers'
-    sizes = ([tuple(map(int, line.split()[1:])) for line in
-              done.stdout.splitlines() if line.startswith("size")]
-             if sized else [(width, height)] * len(put_out))
+    # each frame the hardware says it put out, as its context says: a
+    # window's is its registers'
+    from np2hw.stream import unpack_context
+    if sized:
+        by = {f[2]: f[0] for f in out_layout if f[2]}
+        told = [unpack_context(out_layout, int(line.split()[1], 16))
+                for line in done.stdout.splitlines() if line.startswith("ctx")]
+        sizes = [(t[by["width"]], t[by["height"]]) for t in told]
+    else:
+        sizes = [(width, height)] * len(put_out)
     out = []
     for got, (w, h) in zip(put_out, sizes):
         if got.size != w * h:
@@ -687,7 +697,9 @@ def _unpack(words: np.ndarray, height: int, width: int, channels: int,
 
 def _port_values(twin, scraped: list[str], values, context, width, height,
                  bit_depth) -> dict[str, int]:
-    """A value for every ctx_*/param_* port of the generated top.
+    """A value for every register port of the generated top, and for its
+    stream's context: the context block's registers where the stream does
+    not carry a fact, the stream's own context packed as it carries it.
 
     Port names are derived the same way the generator derives them -- from
     the instance path and the declared leaf register names -- so this is a
@@ -706,6 +718,7 @@ def _port_values(twin, scraped: list[str], values, context, width, height,
     ctx = {c.name: run_facts[c.follows] if c.follows
            else context.get(c.name, c.default)
            for c in vocab.signals}
+    from np2hw.stream import pack_context
     for stage in compose.stages(twin):
         if stage.path == vocab.block.name:
             continue
@@ -713,11 +726,14 @@ def _port_values(twin, scraped: list[str], values, context, width, height,
             param = stage.paramset.param(name)
             ports[f"param_{stage.module_prefix}_{name}"] = (
                 value & ((1 << param.bits) - 1))
+    owner = vocab.block.name
+    for c in compose.contexts(twin):
+        ports[f"param_{owner}_{c.name}"] = int(ctx[c.name])
 
     chosen = {}
     for port in scraped:
-        if port.startswith("ctx_"):
-            chosen[port] = int(ctx[port[4:]])
+        if port == "chain_in_ctx":
+            chosen[port] = pack_context(compose.carried_layout(twin), ctx)
         else:
             if port not in ports:
                 raise AssertionError(
@@ -754,8 +770,8 @@ def _twin_binary(verilog: str, top: str, scraped: list[str],
     word."""
     assign = "\n".join(f'        top->{port} = take(k, "{port}");'
                        for port in scraped)
-    size = ('std::printf("size %d %d\\n", (int)top->chain_out_frame_width, '
-            '(int)top->chain_out_frame_height);' if sized else "")
+    size = ('std::printf("ctx %llx\\n", '
+            '(unsigned long long)top->chain_out_ctx);' if sized else "")
     harness = (_HARNESS.replace("@TOP@", top).replace("@ASSIGN@", assign)
                .replace("@SIZE@", size)
                .replace("@IN_WORDS@", str(-(-in_bits // 32)))

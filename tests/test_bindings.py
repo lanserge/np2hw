@@ -55,20 +55,21 @@ def test_the_numpy_run_evaluates_the_expression_over_the_context():
 def test_the_core_reads_the_context_not_a_register():
     built = offset.bind({"offset": "(tick + 1) & 3"}, VOCABULARY).generate(
         SPEC, WIDTH, HEIGHT, module_name="bound_offset")
-    ports = {name for name, _, _ in built.core.interface["params"]}
-    assert "tick" in ports and "offset" not in ports
-    assert built.context_map["tick"] == "ctx_tick"
+    fields = {f[0] for f in built.core.interface["input"]["ctx"]}
+    assert "tick" in fields and "offset" not in fields
+    assert built.core.interface["params"] == []
     assert built.params == ()
 
 
 def test_a_constant_folds_away_and_a_bare_signal_is_its_register():
     const = offset.bind({"offset": 5}, VOCABULARY).generate(SPEC, WIDTH, HEIGHT,
                                                 module_name="const_offset")
-    assert {n for n, _, _ in const.core.interface["params"]} == \
-        {"frame_width", "frame_height"}
+    assert const.core.interface["params"] == []
+    assert [f[0] for f in const.core.interface["input"]["ctx"]] == \
+        ["width", "height"]
     bare = offset.bind({"offset": "tick"}, VOCABULARY).generate(SPEC, WIDTH, HEIGHT,
                                                     module_name="bare_offset")
-    assert ("tick", 4, False) in bare.core.interface["params"]
+    assert ["tick", 4, ""] in bare.core.interface["input"]["ctx"]
 
 
 def test_an_expression_the_input_cannot_hold_is_refused_by_its_range():

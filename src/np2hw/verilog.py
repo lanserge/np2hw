@@ -100,8 +100,8 @@ def _interface(in_bits, out_bits, out_signed, params, in_flags=("sof",),
     parameter ports are called. That knowledge belongs to whoever wrote the
     ports, and anywhere else it is a copy waiting to disagree.
 
-    A core self-frames from its frame size -- its frame_width/frame_height
-    ports, latched as each frame enters (_frame_params) -- so it takes only
+    A core self-frames from its frame size -- the size fields of its
+    stream's context, latched as each frame enters -- so it takes only
     `sof` to re-anchor and regenerates the rest. `sink` marks a module that consumes a
     stream and produces none: it never stalls its source, so a composer may fan
     any number of them off one output for free.
@@ -138,28 +138,6 @@ def _interface(in_bits, out_bits, out_signed, params, in_flags=("sof",),
         # which is exactly why it survived this long.
         "combinational_outputs": () if sink else ("in_ready",),
     }
-
-
-def _frame_params(image) -> list:
-    """The frame-size ports every core declares: the frame's width and
-    height, latched as each frame enters. The traced size is the most the
-    core holds (a line buffer's depth, a frame store's) and the ports'
-    default, so a testbench or a register file that leaves them at their
-    defaults runs the frame the model was traced at. They are ordinary
-    parameter ports, so a composer binds them as it binds every other."""
-    return [("frame_width", POS, False, image.width,
-             f"The frame's width in pixels, at most {image.width} (what the "
-             "core was generated for); latched as each frame enters"),
-            ("frame_height", POS, False, image.height,
-             "The frame's height in lines; latched as each frame enters")]
-
-
-def _frame_out_ports() -> list:
-    """The frame size a core hands to the next: two output ports."""
-    return ["    // the frame this core puts out, as it has it in force: what",
-            "    // the next core latches as its own frame starts",
-            f"    output wire [{POS-1}:0] out_frame_width,",
-            f"    output wire [{POS-1}:0] out_frame_height,"]
 
 
 # --------------------------------------------------------------------------- #
@@ -201,9 +179,9 @@ def generate(mod, module_name="np2hw_top", clk_ns=None, label=None,
     checked against the memories the core publishes, and a core that broke
     it would be refused rather than emitted.
 
-    Every core takes its frame's size at run time, on its frame_width and
-    frame_height ports, and hands the size it puts out on: the size the
-    model was traced at is the most it holds (_frame_params).
+    Every core takes its frame's size at run time, in its stream's context
+    (`in_ctx`), and hands the size it puts out on in `out_ctx`: the size
+    the model was traced at is the most it holds.
     """
     from .core import emit
     from .core.pipeline import CoreModule, stage_ns
@@ -237,15 +215,65 @@ def generate(mod, module_name="np2hw_top", clk_ns=None, label=None,
 # Testbench emission
 # --------------------------------------------------------------------------- #
 
+def _ctx_fields(meta) -> list:
+    """The fields of a core's input context, (name, bits, follows) each."""
+    stream = (meta.get("interface") or {}).get("input") or {}
+    return [tuple(field) for field in stream.get("ctx", ())]
+
+
+def offered_params(meta) -> list:
+    """The register ports a wrapper of one core offers: the core's own, and
+    one for each field of its stream's context -- the frame's size among
+    them -- which the wrapper packs into the core's `in_ctx`
+    (_core_conns), so software sets a frame's width and height as it sets
+    every other register."""
+    return list(meta["params"]) + [(n, b) for n, b, _ in _ctx_fields(meta)]
+
+
+def _core_conns(meta, end=",") -> list:
+    """A core's register connections, as a wrapper of it makes them: each
+    register port to its `param_` wire, and `in_ctx` packed from the
+    context fields' wires, the first field in the low bits; each line
+    closed by `end`."""
+    out = [f".param_{n}(param_{n})" for n, _ in meta["params"]]
+    fields = _ctx_fields(meta)
+    if fields:
+        out.append(".in_ctx({" + ", ".join(f"param_{n}" for n, _, _ in
+                                          reversed(fields)) + "})")
+    return out
+
+
+def context_word(meta, values=None) -> str:
+    """The Verilog literal a bench drives a core's `in_ctx` with: each
+    field the caller's value by its name, else its default -- the size the
+    core was traced at, for a field that follows it -- packed as the
+    stream's CTX member packs them."""
+    from .stream import context_bits, pack_context
+    fields = _ctx_fields(meta)
+    values = dict(values or {})
+    defaults = meta.get("param_defaults", {})
+    word = pack_context(fields, {n: values.get(n, defaults.get(n, 0))
+                                 for n, _, _ in fields})
+    return f"{context_bits(fields)}'h{word:x}"
+
+
+def _follows(meta) -> dict:
+    """What each context field a wrapper offers follows, by its name: a
+    core's from its context, a wrapper's as it states it."""
+    if "follows" in meta:
+        return dict(meta["follows"])
+    return {n: f for n, _, f in _ctx_fields(meta)}
+
+
 def _bench_value(meta, name, param_values, W, H) -> int:
     """The value a bench drives a register port with: the caller's, else
-    -- for the frame's size -- the size of the frame the bench streams,
-    else the port's own default."""
+    -- for a context field that follows the frame's size -- the size of
+    the frame the bench streams, else the port's own default."""
     if name in param_values:
         return int(param_values[name])
-    frame = {"frame_width": W, "frame_height": H}
-    if name in frame:
-        return frame[name]
+    follows = _follows(meta).get(name)
+    if follows in ("width", "height"):
+        return {"width": W, "height": H}[follows]
     return int(meta.get("param_defaults", {}).get(name, 0))
 
 
@@ -259,7 +287,7 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a(f"module {tb_name};")
     a("    reg clk = 0, rst = 1, in_valid = 0, in_sof = 0;")
     a(f"    reg  [{in_bits-1}:0] in_data;")
-    for name, bits in meta["params"]:
+    for name, bits in offered_params(meta):
         a(f"    reg  [{bits-1}:0] param_{name};")
     a("    wire out_valid; wire in_ready; wire out_last; reg out_ready = 1'b1;")
     a(f"    wire {'signed ' if meta.get('signed') else ''}[{out_bits-1}:0] out_data;")
@@ -268,8 +296,7 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a("    always #5 clk = ~clk;")
     conns = ["        .clk(clk), .rst(rst),",
              "        .in_valid(in_valid), .in_ready(in_ready), .in_sof(in_sof), .in_data(in_data),"]
-    for name, _ in meta["params"]:
-        conns.append(f"        .param_{name}(param_{name}),")
+    conns += [f"        {c}," for c in _core_conns(meta)]
     conns.append("        .out_valid(out_valid), .out_ready(out_ready), "
                  ".out_last(out_last), .out_data(out_data));")
     a(f"    {mod} dut (")
@@ -278,7 +305,7 @@ def testbench(meta, W, H, param_values=None, tb_name="tb") -> str:
     a("    initial begin")
     a("        $readmemh(\"in.hex\", img);")
     a("        f = $fopen(\"out.txt\", \"w\");")
-    for name, _ in meta["params"]:
+    for name, _ in offered_params(meta):
         a(f"        param_{name} = "
           f"{_bench_value(meta, name, param_values, W, H)};")
     a("        @(negedge clk); rst = 0;")
@@ -322,10 +349,10 @@ def switchboard_wrap(meta, W, H, module_name=None, dest=0, pack=False,
     core = meta["module"]
     top = module_name or core + "_sb"
     ib, ob = meta["in_bits"], meta["out_bits"]
-    params = meta["params"]
+    params = offered_params(meta)
     DW = 416
     pports = "".join(f"\n    , input wire [{b-1}:0] param_{n}" for n, b in params)
-    pconns = "".join(f"\n        .param_{n}(param_{n})," for n, _ in params)
+    pconns = "".join(f"\n        {c}," for c in _core_conns(meta))
     pad = f"{{{DW - ob}{{1'b0}}}}"                        # zero-extend pixel to payload
     if native:                                            # 1-bit `last` (SB_CONNECT)
         fin = "    input  wire        sb_in_last,"
@@ -371,7 +398,8 @@ endmodule
         "module": top,
         "core": core,
         "in_bits": ib, "out_bits": ob,
-        "params": params,
+        "params": params, "follows": _follows(meta),
+        "param_defaults": meta.get("param_defaults", {}),
         "signed": meta.get("signed"),
         "native": native,
     }
@@ -382,7 +410,7 @@ def _switchboard_wrap_pack(meta, W, H, module_name, dest, native=False) -> dict:
     core = meta["module"]
     top = module_name or core + "_sb"
     ib, ob = meta["in_bits"], meta["out_bits"]
-    params = meta["params"]
+    params = offered_params(meta)
     DW = 416
     p_in = DW // ib
     p_out = DW // ob
@@ -426,8 +454,8 @@ def _switchboard_wrap_pack(meta, W, H, module_name, dest, native=False) -> dict:
     a(f"    {core} u_core (")
     a("        .clk(clk), .rst(rst),")
     a("        .in_valid(core_iv), .in_ready(core_ir), .in_sof(1'b0), .in_data(in_pix),")
-    for name, _ in params:
-        a(f"        .param_{name}(param_{name}),")
+    for conn in _core_conns(meta):
+        a(f"        {conn},")
     a("        .out_valid(core_ov), .out_ready(core_or),")
     a("        .out_sof(), .out_eol(), .out_last(core_ol), .out_data(core_od)")
     a("    );")
@@ -464,7 +492,8 @@ def _switchboard_wrap_pack(meta, W, H, module_name, dest, native=False) -> dict:
         "module": top,
         "core": core,
         "in_bits": ib, "out_bits": ob,
-        "params": params,
+        "params": params, "follows": _follows(meta),
+        "param_defaults": meta.get("param_defaults", {}),
         "signed": meta.get("signed"),
         "pack": True, "p_in": p_in, "p_out": p_out, "native": native,
         "out_rows": meta.get("out_rows"), "out_cols": meta.get("out_cols"),
@@ -480,7 +509,7 @@ def switchboard_control_wrap(meta, W, H, module_name=None, dest=0, addr_bits=8) 
     and SB_AXIL_CONNECT (ctrl)."""
     core = meta["module"]
     top = module_name or core + "_sbc"
-    params = meta["params"]
+    params = offered_params(meta)
     DW, A = 416, addr_bits
     reg = axil_regfile(params, module_name=top + "_rf", addr_bits=A,
                        defaults=meta.get("param_defaults"))
@@ -527,7 +556,8 @@ def switchboard_control_wrap(meta, W, H, module_name=None, dest=0, addr_bits=8) 
     return {
         "verilog": "\n".join(L), "module": top, "core": core,
         "in_bits": meta["in_bits"], "out_bits": meta["out_bits"],
-        "params": params, "p_in": gb["p_in"], "p_out": gb["p_out"],
+        "params": params, "follows": _follows(meta),
+        "param_defaults": meta.get("param_defaults", {}), "p_in": gb["p_in"], "p_out": gb["p_out"],
         "out_rows": meta["out_rows"], "out_cols": meta["out_cols"],
         "offsets": reg["offsets"], "addr_bits": A, "signed": meta.get("signed"),
     }
@@ -955,7 +985,7 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
     cm = core["module"]
     top = module_name or cm + "_ctrl"
     ib, ob = core["in_bits"], core["out_bits"]
-    regs = list(core["params"])
+    regs = offered_params(core)
     defaults = dict(core.get("param_defaults", {}))
     mk = axil_regfile if ctrl == "axil" else umi_regfile
     reg = mk(regs, module_name=f"{top}_rf", addr_bits=addr_bits,
@@ -1016,8 +1046,8 @@ def control_top(core, module_name=None, ctrl="axil", frame_sync=True,
     a("        .clk(clk), .rst(rst),")
     a("        .in_valid(in_valid), .in_ready(in_ready), .in_sof(in_sof),")
     a("        .in_data(in_data),")
-    for name, _ in core["params"]:
-        a(f"        .param_{name}(param_{name}),")
+    for conn in _core_conns(core):
+        a(f"        {conn},")
     a("        .out_valid(out_valid), .out_ready(out_ready),")
     a("        .out_sof(out_sof), .out_eol(out_eol), .out_last(core_last), .out_data(out_data)")
     a("    );")
@@ -1101,24 +1131,7 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         raise KeyError(
             f"module {inner!r} does not describe its streams; control_wrap needs "
             "interface['streams'] to pass them through")
-    # A frame's size travels with its stream: the size ports of a stream the
-    # wrapper passes through pass through beside it -- context, so no
-    # register holds them -- unless the caller binds them.
     bind, passthrough, outputs = dict(bind), list(passthrough), list(outputs)
-    for stream in streams:
-        size = stream.get("size")
-        if not size:
-            continue
-        beside = (f"{stream['prefix']}_frame_width",
-                  f"{stream['prefix']}_frame_height")
-        if stream["direction"] == "in":
-            for port, name in zip(size, beside):
-                if port not in bind:
-                    bind[port] = name
-                    passthrough.append((name, 16))
-        else:
-            outputs += [(port, 16) for port in size
-                        if port not in {n for n, _ in outputs}]
 
     declared = [name for name, _, _ in interface["params"]]
     # The arm handshake is PLUMBING between the register file and the
@@ -1201,11 +1214,13 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
     for name, bits in outputs:
         pins.append(Pin(name, "output", bits, before=(
             "what the datapath hands on beside its stream",)))
+    from .stream import context_bits
     for stream in streams:
         flags = [f for f in ("sof", "eol", "last") if f in stream["flags"]]
         pins += stream_pins(stream["prefix"], stream["direction"],
                             stream["data_bits"], flags=flags,
-                            signed=bool(stream.get("signed")))
+                            signed=bool(stream.get("signed")),
+                            ctx_bits=context_bits(stream.get("ctx", ())))
     L += header(top, pins)
     a("")
     for r in rw:
@@ -1281,6 +1296,8 @@ def control_wrap(core, registers, bind, module_name=None, addr_bits=16,
         lines.append(f"        .{p}_valid({p}_valid)")
         lines.append(f"        .{p}_ready({p}_ready)")
         lines.append(f"        .{p}_data({p}_data)")
+        if stream.get("ctx"):
+            lines.append(f"        .{p}_ctx({p}_ctx)")
         lines.extend(f"        .{p}_{flag}({p}_{flag})" for flag in stream["flags"])
     for i, line in enumerate(lines):
         a(line + ("" if i == len(lines) - 1 else ","))
@@ -1374,7 +1391,7 @@ def testbench_ctrl(core, reg, W, H, n_out, param_values, ctrl="axil",
     a(f"    wire {'signed ' if core.get('signed') else ''}[{ob-1}:0] out_pix;")
     a(f"    reg [{ib-1}:0] img [0:{total-1}];")
     a("    integer fed = 0, got = 0, f, cyc = 0;")
-    for name, bits in core["params"]:
+    for name, bits in offered_params(core):
         a(f"    wire [{bits-1}:0] param_{name};")
     a(f"    wire [{ib-1}:0] cur = img[fed % {total}];")
     if frame_sync:
@@ -1400,7 +1417,7 @@ def testbench_ctrl(core, reg, W, H, n_out, param_values, ctrl="axil",
         a("        .s_axil_bresp(s_axil_bresp), .s_axil_bvalid(s_axil_bvalid), .s_axil_bready(s_axil_bready),")
         a("        .s_axil_araddr(s_axil_araddr), .s_axil_arvalid(s_axil_arvalid), .s_axil_arready(s_axil_arready),")
         a("        .s_axil_rdata(s_axil_rdata), .s_axil_rresp(s_axil_rresp), .s_axil_rvalid(s_axil_rvalid), .s_axil_rready(s_axil_rready)")
-        for name, _ in core["params"]:
+        for name, _ in offered_params(core):
             a(f"        , .param_{name}(param_{name})")
         a("    );")
     else:                                                # umi
@@ -1414,15 +1431,15 @@ def testbench_ctrl(core, reg, W, H, n_out, param_values, ctrl="axil",
         a("        .udev_req_valid(udev_req_valid), .udev_req_ready(udev_req_ready),")
         a("        .udev_req_cmd(udev_req_cmd), .udev_req_addr(udev_req_addr), .udev_req_data(udev_req_data),")
         a("        .udev_resp_valid(udev_resp_valid), .udev_resp_ready(udev_resp_ready), .udev_resp_data(udev_resp_data)")
-        for name, _ in core["params"]:
+        for name, _ in offered_params(core):
             a(f"        , .param_{name}(param_{name})")
         a("    );")
     # core
     a(f"    {core['module']} dut (")
     a("        .clk(clk), .rst(rst),")
     a("        .in_valid(in_v), .in_ready(in_ready), .in_sof(1'b0), .in_data(cur),")
-    for name, _ in core["params"]:
-        a(f"        .param_{name}(param_{name}),")
+    for conn in _core_conns(core):
+        a(f"        {conn},")
     a("        .out_valid(out_valid), .out_ready(out_ready),")
     a("        .out_sof(), .out_eol(), .out_last(out_last), .out_data(out_pix)")
     a("    );")
@@ -1468,7 +1485,7 @@ def testbench_ctrl(core, reg, W, H, n_out, param_values, ctrl="axil",
         a("        udev_req_valid=0; udev_resp_ready=1;")
     a("        @(negedge clk); @(negedge clk); rst=0; @(negedge clk);")
     a("        // --- program config registers over the control bus ---")
-    for name, _ in core["params"]:
+    for name, _ in offered_params(core):
         val = _bench_value(core, name, param_values, W, H)
         wr = "axil_w" if ctrl == "axil" else "umi_w"
         a(f"        {wr}({off[name]}, {val});")
@@ -1569,11 +1586,11 @@ def axis_video_wrap(meta, W, H, module_name=None) -> dict:
     core = meta["module"]
     top = module_name or core + "_axis"
     ib, ob = meta["in_bits"], meta["out_bits"]
-    params = meta["params"]
+    params = offered_params(meta)
     signed = meta.get("signed")
     tin, tout = _byte_align(ib), _byte_align(ob)
     pports = "".join(f"\n    , input wire [{b-1}:0] param_{n}" for n, b in params)
-    pconns = "".join(f"\n        .param_{n}(param_{n})," for n, _ in params)
+    pconns = "".join(f"\n        {c}," for c in _core_conns(meta))
     if tout > ob:
         ext = f"{{{tout - ob}{{core_out[{ob-1}]}}}}" if signed else f"{tout - ob}'b0"
         tdata = f"{{{ext}, core_out}}"
@@ -1617,7 +1634,8 @@ endmodule
         "core": core,
         "in_bits": ib, "out_bits": ob,
         "tdata_in": tin, "tdata_out": tout,
-        "params": params,
+        "params": params, "follows": _follows(meta),
+        "param_defaults": meta.get("param_defaults", {}),
         "signed": signed,
         "out_rows": meta.get("out_rows"), "out_cols": meta.get("out_cols"),
     }
@@ -1646,7 +1664,7 @@ def testbench_handshake(meta, W, H, n_out, param_values=None, iface="core",
     a("    reg in_offer; reg out_ready;")
     a("    wire in_ready, out_valid, f0, f1;")
     a(f"    wire {'signed ' if meta.get('signed') else ''}[{ob-1}:0] out_pix;")
-    for name, bits in meta["params"]:
+    for name, bits in offered_params(meta):
         a(f"    reg  [{bits-1}:0] param_{name};")
     a(f"    reg  [{ib-1}:0] img [0:{total-1}];")
     a("    integer fed = 0, got = 0, f, cyc = 0;")
@@ -1680,8 +1698,12 @@ def testbench_handshake(meta, W, H, n_out, param_values=None, iface="core",
         a("        .out_valid(out_valid), .out_ready(out_ready),")
         a("        .out_last(f0), .out_data(out_pix)")
         a("        , .out_sof(), .out_eol()")
-    for name, _ in meta["params"]:
-        a(f"        , .param_{name}(param_{name})")
+    # a wrapper takes every register port it offers; a core, its own and
+    # its context packed
+    conns = (_core_conns(meta) if iface == "core" else
+             [f".param_{n}(param_{n})" for n, _ in offered_params(meta)])
+    for conn in conns:
+        a(f"        , {conn}")
     a("    );")
     if iface != "axis" and iface != "sb":
         a("    assign f1 = 1'b0;")
@@ -1701,7 +1723,7 @@ def testbench_handshake(meta, W, H, n_out, param_values=None, iface="core",
     a("    initial begin")
     a("        $readmemh(\"in.hex\", img);")
     a("        f = $fopen(\"out.txt\", \"w\");")
-    for name, _ in meta["params"]:
+    for name, _ in offered_params(meta):
         a(f"        param_{name} = {_bench_value(meta, name, param_values, W, H)};")
     a("        in_offer = 0; out_ready = 0;")
     a("        @(negedge clk); @(negedge clk); rst = 0;")

@@ -349,11 +349,41 @@ def frame_signals(design):
     return tuple(pair)
 
 
-def _frame_at(signal: str, less: int) -> str:
-    """A context signal less what the stages before took off it."""
-    return (f"ctx_{signal}" if less == 0 else
-            f"(ctx_{signal} - 16'd{less})" if less > 0 else
-            f"(ctx_{signal} + 16'd{-less})")
+def context_layout(design) -> tuple:
+    """The context every core of the design carries, in its streams' CTX
+    member: every signal the design has (contexts), in its vocabulary's
+    order -- what the stream brings and what the context block's registers
+    supply, one word, handed on core to core with each frame."""
+    return vocabulary(design).layout([c.name for c in contexts(design)])
+
+
+def carried_layout(design) -> tuple:
+    """The context the stream entering the design carries: the facts its
+    input port declares, in the vocabulary's order."""
+    return vocabulary(design).layout(shape(design).context)
+
+
+def _entry_context(design, port: str) -> str | None:
+    """The context a core the design's input `port` drives takes: the
+    stream's own fields, and the context block's registers for every field
+    the stream does not carry, joined into the design's one layout -- or
+    None where the stream carries it all."""
+    core, carried = context_layout(design), carried_layout(design)
+    if core == carried:
+        return None
+    owner = vocabulary(design).block.name
+    at, lo = {}, 0
+    for name, bits, _ in carried:
+        at[name] = (lo, bits)
+        lo += bits
+    parts = []
+    for name, bits, _ in reversed(core):            # Verilog: high first
+        if name in at:
+            first, width = at[name]
+            parts.append(f"{port}_ctx[{first + width - 1}:{first}]")
+        else:
+            parts.append(f"param_{owner}_{name}")
+    return "{" + ", ".join(parts) + "}"
 
 
 def stages(design) -> list[Stage]:
@@ -727,10 +757,10 @@ def control_bind(design, built: dict) -> dict:
     and a context BIT is a slice of one of those."""
     carried = shape(design).context
     owner = vocabulary(design).block.name
-    bind = {f"ctx_{ctx.name}":
-            (f"ctx_{ctx.name}" if ctx.name in carried
-             else f"param_{owner}_{ctx.name}")
-            for ctx in contexts(design)}
+    # the context the stream does not carry: the context block's registers,
+    # joined to the stream's where it enters (_entry_context)
+    bind = {f"param_{owner}_{ctx.name}": f"param_{owner}_{ctx.name}"
+            for ctx in contexts(design) if ctx.name not in carried}
     for path, result in built.items():
         s = stage(design, path)
         for name, _ in result.params:
@@ -764,8 +794,7 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
     form = shape(design)
     netlist(design)                      # np2hw's laws, before anything is made
     shared = _shared_subsystems(design)
-    signals = frame_signals(design)
-    frames: dict = {}                    # path -> its frame's two expressions
+    layout = context_layout(design)
 
     modules: list[tuple[str, str]] = []
     built: dict[str, Generated] = {}
@@ -794,36 +823,21 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         # block's input. The only declared stream fact in a whole design is
         # the input's own.
         given = _incoming(design, s, built)
-        # The frame as it reaches this block: the size the block driving it
-        # hands on, as that block has it in force; for a block the design's
-        # input drives, the frame's own context signals, less what any
-        # stage before it took off; and in a design whose frame carries no
-        # size, the size this block is built for, as constants.
-        frame = None
-        driver = _driver(design, s)
-        if driver in built and _hands_frame(built[driver]):
-            frame = _frame_out(design, driver)
-        elif signals:
-            frame = (_frame_at(signals[0], form.width - given.width),
-                     _frame_at(signals[1], form.height - given.height))
-        if frame is not None:
-            frames[s.path] = frame
+        # Every core carries the design's one context with its frames: it
+        # takes the frame's size from it and hands it on, the size its own.
         result = s.block.generate(
             form.spec.with_stream(given.channels, given.bit_depth,
                                   given.frames),
             given.width, given.height, module_name=name, clk_ns=clk_ns,
-            sync_memory=sync_memory, frame=frame)
+            sync_memory=sync_memory, context=layout)
         modules.extend(result.modules)
         built[s.path] = seen[name] = result
 
-    outs = _frame_ports(design, built)
     top = compose(
         module_name=design.name,
-        instances=_instances(design, built, frames),
+        instances=_instances(design, built),
         connections=_connections(design, built),
-        ports=_ports(design, built) + [Port(name, "out", width=16)
-                                       for name in outs],
-        assigns=outs,
+        ports=_ports(design, built),
         header=header(
             design, what=f"{design.name} -- composed ISP pipeline "
                  f"({len(built)} generated block(s), {form.spec.bit_depth}-bit)",
@@ -838,9 +852,9 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
         # it on the other.
         commit=True,
         arm=("cfg_arm_req", "cfg_arm_ack"),
-        # Configuration only. `ctx_*` is context that arrived with a frame,
-        # and holding it to a commit would make a frame's own geometry
-        # arrive one frame late.
+        # Configuration only. The context arrives with a frame, and holding
+        # it to a commit would make a frame's own geometry arrive one frame
+        # late.
         commit_ports={f"param_{stage(design, path).module_prefix}_{name}"
                       for path, result in built.items()
                       for name, _ in result.params},
@@ -904,13 +918,8 @@ def _control_top(design, top: dict, built: dict) -> dict:
     """
     from np2hw import control_wrap
 
-    carried = shape(design).context
     return control_wrap(
         top, address_map(design), bind=control_bind(design, built),
-        passthrough=[(f"ctx_{c.name}", c.bits) for c in contexts(design)
-                     if c.name in carried],
-        # each output's frame size, as its last block hands it on
-        outputs=[(name, 16) for name in _frame_ports(design, built)],
         module_name=f"{design.name}_ctrl",
         addr_bits=allocator(design).address_bits(),
         # ONE bank here, not two. A shadow-and-live pair in the register
@@ -999,18 +1008,6 @@ def _driver(design, s: Stage):
     return source.node if source is not None else None
 
 
-def _hands_frame(result) -> bool:
-    """Whether a block hands its frame size on (out_frame_*): every
-    generated core does; a fixed-structure module may not."""
-    return any(n == "frame_width" for n, *_ in result.core.interface["params"])
-
-
-def _frame_out(design, path: str) -> tuple:
-    """The wires a block's frame size leaves on."""
-    prefix = stage(design, path).module_prefix
-    return (f"{prefix}_out_frame_width", f"{prefix}_out_frame_height")
-
-
 def _incoming(design, s: Stage, built: dict) -> Handed:
     """The stream arriving at ``s``'s input.
 
@@ -1057,13 +1054,14 @@ def _ports(design, built) -> list:
     """Top-level ports: context, per-instance CSRs, then the pixel streams."""
     from np2hw import Port, StreamType
 
+    carried = shape(design).context
+    owner = vocabulary(design).block.name
     ports = [
-        Port(f"ctx_{ctx.name}", "in", width=ctx.bits,
-             comment=f"Pipeline context, owned by "
-                     f"`{vocabulary(design).block.name}` at base 0 and fanned "
-                     f"out as a wire -- never duplicated per block. "
-                     f"{ctx.description}")
-        for ctx in contexts(design)
+        Port(f"param_{owner}_{ctx.name}", "in", width=ctx.bits,
+             comment=f"Pipeline context the stream does not carry, from "
+                     f"`{owner}`'s register at base 0: joined to the "
+                     f"stream's context where it enters. {ctx.description}")
+        for ctx in contexts(design) if ctx.name not in carried
     ]
     # The coefficients are written from another clock -- see the context
     # block's commit register. These two carry the whole crossing: the file says its
@@ -1087,7 +1085,8 @@ def _ports(design, built) -> list:
     # width is the shape's, because the shape IS the input declaration and
     # the first block was traced against it -- one owner, two readers. The
     # OUTPUT boundary is the opposite: entirely traced.
-    entry = StreamType(shape(design).spec.data_bits, ("sof", "eol", "last"))
+    entry = StreamType(shape(design).spec.data_bits, ("sof", "eol", "last"),
+                       ctx=carried_layout(design))
     ports += [Port(name, "in", stream=entry) for name in design.inputs]
     ports += [Port(name, "out", stream=_output_stream(design, built, name))
               for name in design.outputs]
@@ -1107,8 +1106,10 @@ def _output_stream(design, built, name):
             result = built.get(source.node)
             if result is not None:
                 return StreamType(int(result.core.out_bits),
-                                  ("sof", "eol", "last"))
-    return StreamType(shape(design).spec.data_bits, ("sof", "eol", "last"))
+                                  ("sof", "eol", "last"),
+                                  ctx=context_layout(design))
+    return StreamType(shape(design).spec.data_bits, ("sof", "eol", "last"),
+                      ctx=carried_layout(design))
 
 
 def _output_boundary(design, built, name) -> dict:
@@ -1134,54 +1135,27 @@ def _output_boundary(design, built, name) -> dict:
     return out
 
 
-def _instances(design, built, frames=None) -> list:
-    """One np2hw Instance per generated block, with its parameter bindings
-    and, for a block that hands its frame size on, the wires it leaves on.
-    A block's frame is bound per instance: two instances of one module may
-    be driven by different blocks."""
+def _instances(design, built) -> list:
+    """One np2hw Instance per generated block, with its parameter bindings;
+    a block the design's input drives takes the stream's context joined to
+    the registers' (_entry_context). Every other part of a frame's context
+    travels with its stream, core to core."""
     from np2hw import Instance
 
-    frames = frames or {}
+    entering = {sink.node: source.port
+                for source, sink in netlist(design).edges
+                if source.node is None and sink.node in built}
     instances = []
     for path, result in built.items():
         s = stage(design, path)
         declared = [name for name, _, _ in result.core.interface["params"]]
-        bind = {}
-        for name in declared:
-            if name in ("frame_width", "frame_height") and path in frames:
-                expr = frames[path][0 if name == "frame_width" else 1]
-                bind[name] = (expr, "the frame as the block before hands it on"
-                              if not expr.startswith(("ctx_", "(ctx_"))
-                              else "the frame's own context")
-            elif name in result.context_map:
-                bind[name] = (result.context_map[name],
-                              "pipeline context, not a register")
-            else:
-                bind[name] = f"param_{s.module_prefix}_{name}"
-        outputs = {}
-        if _hands_frame(result):
-            w, h = _frame_out(design, path)
-            outputs = {"out_frame_width": (w, 16),
-                       "out_frame_height": (h, 16)}
+        bind = {name: f"param_{s.module_prefix}_{name}" for name in declared}
         instances.append(Instance(
             name=s.module_prefix, core=result.core, bind=bind,
-            outputs=outputs,
+            ctx_in=(_entry_context(design, entering[path])
+                    if path in entering else None),
             comment=f"{path} (base 0x{s.instance.base:04x})"))
     return instances
-
-
-def _frame_ports(design, built) -> dict:
-    """{port: wire}: each output stream's frame size, as the block driving
-    it hands it on -- `<output>_frame_width` and `_height` -- for whatever
-    the design feeds next. None where the driver is built for one size."""
-    outs = {}
-    for source, sink in netlist(design).edges:
-        if sink.node is None and source.node in built \
-                and _hands_frame(built[source.node]):
-            w, h = _frame_out(design, source.node)
-            outs[f"{sink.port}_frame_width"] = w
-            outs[f"{sink.port}_frame_height"] = h
-    return outs
 
 
 def _connections(design, built) -> list:

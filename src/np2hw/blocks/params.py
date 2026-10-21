@@ -561,6 +561,22 @@ class Vocabulary:
     def __len__(self) -> int:
         return len(self._by_name)
 
+    def layout(self, names) -> tuple:
+        """The context a stream carrying the facts `names` has in its CTX
+        member: (name, bits, follows) each -- the frame's size first, the
+        fact following its width then the one following its height, and
+        the rest in this vocabulary's order: one order for every port,
+        whatever order it lists them in, so a producer and a consumer agree
+        without saying it twice, and a reader of the size alone finds it in
+        the low bits."""
+        wanted = set(names)
+        for name in wanted:
+            self.resolve(name)
+        size = {"width": 0, "height": 1}
+        chosen = [c for c in self.signals if c.name in wanted]
+        chosen.sort(key=lambda c: size.get(c.follows, len(size)))
+        return tuple((c.name, c.bits, c.follows) for c in chosen)
+
     def resolve(self, name: str) -> Context:
         """The declaration of one signal, or an error naming what exists."""
         try:

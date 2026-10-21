@@ -65,10 +65,12 @@ def _declared(obj, values):
                     composite.parse(port["when"], port["name"]),
                     lambda n: values[n]):
                 continue
-            raw = port.get("width", 1)
-            width = raw if isinstance(raw, int) else composite.evaluate(
-                composite.parse(raw, port["name"]), lambda n: values[n])
-            want.update(expand(port, side, width))
+            def value(raw):
+                return raw if not isinstance(raw, str) else \
+                    composite.evaluate(composite.parse(raw, port["name"]),
+                                       lambda n: values[n])
+            want.update(expand(port, side, value(port.get("width", 1)),
+                               value(port.get("context_bits"))))
     return want
 
 

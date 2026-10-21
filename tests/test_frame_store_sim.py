@@ -35,10 +35,10 @@ module tb;
     always #5 clk = ~clk;
     reg in_valid = 0, in_sof = 0, in_eol = 0, in_last = 0;
     reg [11:0] in_data = 0;
-    reg [15:0] in_fw = 0, in_fh = 0, in_ctx = 0;
+    reg [15:0] in_ctx = 0;
     wire in_ready, out_valid, out_sof, out_eol, out_last, cold, overrun;
     wire [{frames}*12-1:0] out_data;
-    wire [15:0] out_fw, out_fh, out_ctx, out_source;
+    wire [15:0] out_ctx, out_source;
     reg out_ready = 0;
     wire wr_valid, wr_ready, wr_sof, wr_last, wr_done, rd_start, rd_valid,
          rd_ready, mem_done;
@@ -64,10 +64,9 @@ module tb;
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(in_ready), .in_data(in_data),
         .in_sof(in_sof), .in_eol(in_eol), .in_last(in_last),
-        .in_frame_width(in_fw), .in_frame_height(in_fh), .in_ctx(in_ctx),
+        .in_ctx(in_ctx),
         .out_valid(out_valid), .out_ready(out_ready), .out_data(out_data),
         .out_sof(out_sof), .out_eol(out_eol), .out_last(out_last),
-        .out_frame_width(out_fw), .out_frame_height(out_fh),
         .out_ctx(out_ctx), .out_source(out_source), .cold(cold),
         .overrun(overrun),
         .wr_valid(wr_valid), .wr_ready(wr_ready), .wr_data(wr_data),
@@ -93,8 +92,7 @@ module tb;
         if (in_valid && in_ready && in_last) $fdisplay(f, "I %0d", cyc);
         if (out_valid && out_ready) begin
             if (out_sof)
-                $fdisplay(f, "O %0d %0d %0d %0d %0d", cyc, out_source,
-                          out_ctx, out_fw, out_fh);
+                $fdisplay(f, "O %0d %0d %0d", cyc, out_source, out_ctx);
             $fdisplay(f, "B %0h %0d %0d", out_data, out_eol, out_last);
             if (out_last) $fdisplay(f, "E %0d", cyc);
         end
@@ -117,7 +115,7 @@ module tb;
                 in_valid = 1; in_data = (k * 97 + i) & 12'hfff;
                 in_sof = (i == 0); in_eol = (i % ws[k] == ws[k] - 1);
                 in_last = (i == n - 1);
-                in_fw = ws[k]; in_fh = hs[k]; in_ctx = k * 7 + 3;
+                in_ctx = k * 7 + 3;
                 @(posedge clk); while (!in_ready) @(posedge clk);
                 @(negedge clk);
                 in_valid = 0;
@@ -160,9 +158,9 @@ def parse(lines):
         if kind == "I":
             done.append(int(rest[0]))
         elif kind == "O":
-            cyc, source, ctx, w, h = map(int, rest)
+            cyc, source, ctx = map(int, rest)
             frames.append({"start": cyc, "source": source, "ctx": ctx,
-                           "size": (w, h), "beats": [], "end": None})
+                           "beats": [], "end": None})
         elif kind == "B":
             frames[-1]["beats"].append((int(rest[0], 16), int(rest[1]),
                                         int(rest[2])))
@@ -170,6 +168,11 @@ def parse(lines):
             frames[-1]["end"] = int(rest[0])
         elif kind == "R":
             overrun = int(rest[0])
+    for out in frames:
+        # the size a frame out has is the one its beats draw
+        eols = [i for i, (_, eol, _) in enumerate(out["beats"]) if eol]
+        w = eols[0] + 1 if eols else 0
+        out["size"] = (w, len(out["beats"]) // w if w else 0)
     return done, frames, overrun
 
 

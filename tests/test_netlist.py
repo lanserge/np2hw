@@ -93,7 +93,8 @@ def test_stream_context_becomes_ports_not_registers():
     names = {r["name"] for r in owner["registers"]}
     assert not names & set(carried), \
         f"{sorted(names & set(carried))} kept registers"
-    assert "ctx_width" in compose.generate(pipeline, control=True).verilog
+    assert {f[0] for f in compose.carried_layout(pipeline)} == set(carried)
+    assert "in_ctx" in compose.generate(pipeline, control=True).verilog
     # and what stays a register is what something reads: `limit` is
     # software's choice, but no block here reads it, so none is made
     assert "limit" not in names

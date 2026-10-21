@@ -33,19 +33,24 @@ backend exercises this (60-frame GIF == NumPy with a single reset).
 
 ## A frame's size
 
-Every core takes its frame's size at run time, on two register ports, and hands
-on the size of the frame it puts out:
+Every core takes its frame's size at run time, in its stream's context, and
+hands on the size of the frame it puts out. A stream's context is its `ctx`
+member (`CTX` in `np2hw.stream.STREAM_SIGNALS`): each frame's facts, held with
+its first beat, packed in the order the design's vocabulary declares them, the
+first in the low bits -- the frame's `width` and `height` first, 16 bits each,
+where the stream declares them. An image's `context` is the layout; by default
+it is the size alone.
 
 | port | |
 |---|---|
-| `param_frame_width`, `param_frame_height` | the arriving frame's size; it holds from the frame's first pixel (`in_sof`), and the core keeps it for the rest of the frame |
-| `out_frame_width`, `out_frame_height` | the frame this core puts out: the input's size, or less a window's border, or a crop's own size |
+| `in_ctx` | the arriving frame's context; it holds from the frame's first pixel (`in_sof`), and the core keeps it for the rest of the frame |
+| `out_ctx` | the context of the frame this core puts out: the same fields, the size the frame out has -- the input's, or less a window's border, or a crop's own -- and every other field as the frame brought it |
 
 So one generated core serves a sensor whose mode changes live: a new size lands
 at the next frame's start. A frame is at least two pixels wide and two lines
-high, the ports' contract: at a frame's first pixel nothing a core decides
+high, the context's contract: at a frame's first pixel nothing a core decides
 depends on the size, so the core compares against the size it latched as that
-pixel was taken, and the ports reach only the latch. A window still flushing
+pixel was taken, and the context reaches only the latch. A window still flushing
 one frame finishes it at that frame's size while the next waits. The size a crop hands on follows from what it reads:
 `img[1:-1, 1:-1]` puts out the frame less its border, whatever the frame;
 `img[2:10, 3:15]` always puts out 8×12, and needs a frame that reaches row 10
@@ -71,17 +76,19 @@ arithmetic was not built for.
 
 ### Who states the size
 
-- **In a pipeline**, the composer chains it: each block's `frame_width` and
-  `frame_height` are the size the block before it hands on, and the first
-  block's are the frame's own size where the stream carries it (a bayerlink
-  header's width and height, as context signals).
-- **A design whose stream carries no size** ties the first block's ports to the
-  size it is built for. A fixed-size build is the same core with its size tied
-  to constants.
-- **A core with a register file** (`control_top`, `control_wrap`) has the two
-  size ports as registers like any other, their defaults the traced size, so a
-  register file nobody configures runs the frame the model was traced at, and
-  software sets a new size the way it sets any register, landing at a frame
-  boundary.
-- **A testbench** drives the size of the frames it streams;
-  `np2hw.verilog.testbench` and `np2hw.testing.block` do.
+- **In a pipeline**, the context travels with the stream: each block's is the
+  one the block before it hands on, and the first block's is the frame's own
+  where the stream carries it (a bayerlink header's width and height, declared
+  on the pipeline's input port).
+- **A design whose stream carries no size** has the context block's registers
+  supply it, joined with what the stream does carry into the one layout every
+  core of the pipeline takes; their defaults are the size it is built for.
+- **A wrapper of one core** (`control_top`, the Switchboard and AXI4-Stream
+  wrappers) offers each context field as a register port like any other, its
+  default the traced size, and packs them into `in_ctx`
+  (`np2hw.verilog.offered_params`), so a register file nobody configures runs
+  the frame the model was traced at, and software sets a new size the way it
+  sets any register, landing at a frame boundary.
+- **A testbench** drives the context of the frames it streams;
+  `np2hw.verilog.testbench` and `np2hw.testing.block` do, and
+  `np2hw.verilog.context_word` gives the word for a hand-written one.

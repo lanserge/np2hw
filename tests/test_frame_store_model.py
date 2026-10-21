@@ -148,20 +148,19 @@ module tb;
     always #5 clk = ~clk;
     reg in_valid = 0, in_sof = 0, in_eol = 0, in_last = 0;
     reg [11:0] in_data = 0;
-    reg [15:0] in_fw = 0, in_fh = 0, in_ctx = 0;
+    reg [15:0] in_ctx = 0;
     wire in_ready, out_valid, out_sof, out_eol, out_last, cold, overrun;
     wire [@DEPTH@*12-1:0] out_data;
-    wire [15:0] out_fw, out_fh, out_ctx, out_source;
+    wire [15:0] out_ctx, out_source;
     reg out_ready = 0;
 @MEMORY_WIRES@
     @MODULE@ #(@PARAMS@) dut (
         .clk(clk), .rst(rst),
         .in_valid(in_valid), .in_ready(in_ready), .in_data(in_data),
         .in_sof(in_sof), .in_eol(in_eol), .in_last(in_last),
-        .in_frame_width(in_fw), .in_frame_height(in_fh), .in_ctx(in_ctx),
+        .in_ctx(in_ctx),
         .out_valid(out_valid), .out_ready(out_ready), .out_data(out_data),
         .out_sof(out_sof), .out_eol(out_eol), .out_last(out_last),
-        .out_frame_width(out_fw), .out_frame_height(out_fh),
         .out_ctx(out_ctx), .out_source(out_source), .cold(cold),
         .overrun(overrun)@MEMORY_PORTS@);
 
@@ -179,9 +178,8 @@ module tb;
     integer f, k, i, n, at, j, s, taken, out_done = 0;
     always @(posedge clk) if (!rst && out_valid && out_ready) begin
         if (out_sof)
-            $fdisplay(f, "O %0d %0d %0d %0d", out_source, out_ctx, out_fw,
-                      out_fh);
-        $fdisplay(f, "B %0h", out_data);
+            $fdisplay(f, "O %0d %0d", out_source, out_ctx);
+        $fdisplay(f, "B %0h %0d %0d", out_data, out_eol, out_last);
         if (out_last) $fdisplay(f, "E");
     end
     // the source: each frame `gap` cycles after the last, a beat a cycle
@@ -197,7 +195,7 @@ module tb;
                 in_valid = 1; in_data = pix[at + i];
                 in_sof = (i == 0); in_last = (i == n - 1);
                 in_eol = (i % fw[k] == fw[k] - 1);
-                in_fw = fw[k]; in_fh = fh[k]; in_ctx = k * 7 + 3;
+                in_ctx = k * 7 + 3;
                 @(negedge clk);
             end
             in_valid = 0;
@@ -369,6 +367,7 @@ def run_rtl(tmp_path, frames, stim, outputs, implementation="bram", seed=1):
             got.append({"head": tuple(map(int, rest)), "beats": []})
         elif kind == "B":
             got[-1]["beats"].append(int(rest[0], 16))
+            got[-1].setdefault("flags", []).append((int(rest[1]), int(rest[2])))
         elif kind == "E":
             got[-1]["whole"] = True
         elif kind == "R":
@@ -390,10 +389,14 @@ def test_the_verilog_puts_out_what_the_model_says(tmp_path, implementation,
     assert len(got) == len(want.frames)
     mask = (1 << BITS) - 1
     for i, (g, data, told) in enumerate(zip(got, want.frames, want.ports)):
-        head = (told["out_source"], told["out_ctx"],
-                told["out_frame_width"], told["out_frame_height"])
+        head = (told["out_source"], told["out_ctx"])
         assert g["head"] == head, \
             f"frame out {i}: {g['head']} where the model says {head}"
+        # the size a frame out has is the one its beats draw
+        h, w = data.shape[:2]
+        assert g["flags"] == [(int(b % w == w - 1), int(b == h * w - 1))
+                              for b in range(h * w)], \
+            f"frame out {i} is not {w}x{h}"
         flat = data.reshape(-1, DEPTH)
         for b, word in enumerate(g["beats"]):
             assert [(word >> (k * BITS)) & mask for k in range(DEPTH)] == \

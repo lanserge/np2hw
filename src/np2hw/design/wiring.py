@@ -103,7 +103,12 @@ def facts(inst) -> dict | None:
                     return params[name]
                 width = evaluate(parse(raw, f"{inst.path}.{port['name']}"),
                                  lookup)
-            members = expand(port, side, width)
+            ctx = port.get("context_bits")
+            if isinstance(ctx, str):
+                params = {**obj.get("block_parameters", {}), **inst.build}
+                ctx = evaluate(parse(ctx, f"{inst.path}.{port['name']}"),
+                               lambda name, params=params: params[name])
+            members = expand(port, side, width, ctx)
             signals.update(members)
             roles = {m: role(port["name"], m) for m in members}
             if "stream" in port:

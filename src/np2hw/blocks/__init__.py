@@ -113,13 +113,10 @@ class Generated:
             them out in sequence gives a file that elaborates.
         params: ``(scalar_register_name, bits)`` the top module expects on its
             ``param_*`` inputs, in register-map order.
-        consumes: pipeline context signals the top module expects as wires.
-        context_map: ``{param_name: verilog_expr}`` for generated ``param_*``
-            inputs that are driven by pipeline CONTEXT rather than by a register:
-            the signals a bound input's expression reads, and the frame's size.
-            A Bayer phase a design binds is context, not configuration -- one
-            owner, fanned out -- so the composer wires it straight from its
-            owner instead of giving the block a CSR that would be a second copy.
+        consumes: pipeline context signals the top module reads: fields of
+            its stream's context, ``in_ctx``, never registers of its own --
+            a Bayer phase a design binds is context, not configuration, one
+            owner, fanned out with the frame.
         latency: pixels of delay from input to output, for pipeline alignment.
         meta: generator detail worth keeping (line buffers, accumulator width).
     """
@@ -128,7 +125,6 @@ class Generated:
     modules: tuple[tuple[str, str], ...]
     params: tuple[tuple[str, int], ...] = ()
     consumes: tuple[str, ...] = ()
-    context_map: dict = field(default_factory=dict)
     # The np2hw result this block was generated from. It carries the module's
     # own interface -- which framing flags it accepts, which parameter ports it
     # has -- so the composer reads that from the generator rather than
@@ -628,10 +624,19 @@ class Block:
                        f"{name!r}; its bindings read "
                        f"{sorted(self.params.consumes) or 'nothing'}")
 
+    def default_context(self) -> tuple:
+        """The context a core of this block carries where no composer says
+        what its stream does: its frame's width and height, then the facts
+        its bindings read -- (name, bits, follows) each, in that order."""
+        facts = list(dict.fromkeys(f for b in self.bindings for f in b.facts))
+        return (("width", 16, "width"), ("height", 16, "height"),
+                *((f, self.signal(f).bits, self.signal(f).follows)
+                  for f in facts if f not in ("width", "height")))
+
     def generate(self, spec, width: int, height: int, module_name: str,
                  clk_ns: float | None = None,
                  sync_memory: bool = False,
-                 frame: tuple | None = None) -> "Generated":
+                 context: tuple | None = None) -> "Generated":
         """Trace the model into Verilog. Generic: every block uses this one.
 
         There is no per-block generator and no hand-written Verilog anywhere in
@@ -639,10 +644,12 @@ class Block:
         the pair into a module.
 
         The core holds frames up to ``width`` x ``height`` and takes each
-        frame's own size at run time. ``frame`` is the pair of expressions
-        that drive it -- the width and height as they arrive at this block
-        -- and without it the block's own size, as constants: a block that
-        always sees one size is the same core with its size tied.
+        frame's own size, and every value a frame brings that its bindings
+        read, in the context its stream carries: ``context``, the stream's
+        layout (np2hw.blocks.params.Vocabulary.layout), as a composer hands
+        it -- or, for a block built on its own, its frame's width and height
+        and the facts its bindings read. It hands the context on with the
+        frame, the size its own.
         """
         from np2hw import Image2D, to_ir, generate as np2hw_generate
 
@@ -665,16 +672,19 @@ class Block:
             raise ValueError(
                 f"block {self.name!r} reads no history, and is fed "
                 f"{spec.frames} frames side by side")
-        image = Image2D("pixel", width, height,
-                        bits=spec.bit_depth * spec.channels, signed=False,
-                        frames=HISTORY_TRACE if history else 0,
-                        delivered=spec.frames)
         from np2hw import Param as Np2hwParam
 
         registers = [param.to_np2hw() for param in self.params]
-        # What the bindings read, one port each: the context signal as its
-        # vocabulary declares it.
+        # What the bindings read: fields of the stream's context, each a
+        # context signal as its vocabulary declares it.
         facts = list(dict.fromkeys(f for b in self.bindings for f in b.facts))
+        if context is None:
+            context = self.default_context()
+        image = Image2D("pixel", width, height,
+                        bits=spec.bit_depth * spec.channels, signed=False,
+                        frames=HISTORY_TRACE if history else 0,
+                        delivered=spec.frames,
+                        context=tuple(tuple(f) for f in context))
         # Each frame brings its own: the core takes it with the frame and
         # carries it with the frame's beats (np2hw.ir.Param's frame).
         read = [Np2hwParam(f, bits=self.signal(f).bits,
@@ -716,8 +726,6 @@ class Block:
         core = np2hw_generate(result, module_name=module_name,
                               clk_ns=clk_ns, label=self.name,
                               sync_memory=sync_memory)
-        if frame is None:
-            frame = (f"16'd{width}", f"16'd{height}")
 
         header = model_header(
             self.model, f"{self.name} -- {self.params.description} "
@@ -728,8 +736,6 @@ class Block:
             modules=((module_name, verilog),),
             params=tuple((r.name, r.param.bits) for r in self.params.registers),
             consumes=self.params.consumes,
-            context_map={**{f: f"ctx_{f}" for f in facts},
-                         "frame_width": frame[0], "frame_height": frame[1]},
             core=core,
             latency=1,
             meta={"line_buffers": core.line_buffers,

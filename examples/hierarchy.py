@@ -57,7 +57,9 @@ def build():
     _, out = to_ir(gain, image, g)
     core = generate(out, module_name="gain_core")
 
-    bayer = StreamType(BITS, ("sof", "eol", "last"), "bayer")
+    # the stream carries each frame's context, the layout the core takes
+    bayer = StreamType(BITS, ("sof", "eol", "last"), "bayer",
+                       ctx=tuple(map(tuple, core.interface["input"]["ctx"])))
 
     # A subsystem: two gain stages back to back, sharing one register.
     front = compose(
@@ -105,10 +107,10 @@ module tb;
     .param_left_gain(8'd%(LG)d), .param_right_gain(8'd%(RG)d),
     .l_in_valid(iv), .l_in_ready(lrdy), .l_in_data(idata),
     .l_in_sof(sof), .l_in_eol(1'b0), .l_in_last(1'b0),
-    .l_in_frame_width(16'd%(W)d), .l_in_frame_height(16'd%(H)d),
+    .l_in_ctx({16'd%(H)d, 16'd%(W)d}),
     .r_in_valid(iv), .r_in_ready(rrdy), .r_in_data(idata),
     .r_in_sof(sof), .r_in_eol(1'b0), .r_in_last(1'b0),
-    .r_in_frame_width(16'd%(W)d), .r_in_frame_height(16'd%(H)d),
+    .r_in_ctx({16'd%(H)d, 16'd%(W)d}),
     .l_out_valid(lv), .l_out_ready(ordy), .l_out_data(ldata),
     .l_out_sof(lsof), .l_out_eol(leol), .l_out_last(llast),
     .r_out_valid(rv), .r_out_ready(ordy), .r_out_data(rdata),

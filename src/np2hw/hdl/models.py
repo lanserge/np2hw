@@ -15,7 +15,8 @@ model has one signature::
 
 ``frames`` are the stream's frames in, in order; ``ports`` the values of the
 module's other input ports, one dict per frame by the port names the
-description gives (a frame's size, its context); ``params`` the node's
+description gives -- a stream's context among them, as its ``ctx`` member's
+port, ``in_ctx``; ``params`` the node's
 parameters, by the description's names -- the same values its Verilog is
 built with, one statement of each. A :class:`LeafRun` is the frames out and,
 for each, the values of the module's other output ports.
@@ -64,7 +65,8 @@ class Timeline:
     went in, and when each output frame was chosen, began and ended."""
     started: list[int] = field(default_factory=list)
     arrived: list[int] = field(default_factory=list)
-    restarted: list[int] = field(default_factory=list)  # starts of a history
+    restarted: list[int] = field(default_factory=list)  # a history's start:
+                                        # the last beat of its first frame
     overrun: bool = False               # a frame read was being overwritten
     warmed: list[bool] = field(default_factory=list)  # a choice the store's
                                         # becoming warm made, not the consumer
@@ -76,7 +78,7 @@ class Timeline:
         """Whether a choice -- of the first `upto` -- has an event within
         `latency` of it that the store must tell apart from it: a frame's
         arrival, other than the one that made the store warm and so caused
-        the choice, or the start of a frame that starts a history; or a
+        the choice -- a history starting among them; or a
         consumer beginning a frame within `latency` of its choice. A tie the
         model and the hardware might break differently."""
         chosen = self.chosen[:upto]
@@ -105,9 +107,10 @@ def frame_store(frames, ports, stimulus: Stimulus, params: dict,
     side, at the moment each output frame is chosen, from a ring of SLOTS.
 
     The frames in are each ``(h, w)``; a frame of another size than the one
-    before starts the history over. Each frame out is ``(h, w, FRAMES)``,
-    the frame k before the newest in channel k, and carries the newest's
-    ``in_ctx`` as ``out_ctx``, its size, and its number as ``out_source``.
+    before starts the history over, as its last beat shows its size. Each
+    frame out is ``(h, w, FRAMES)``, the frame k before the newest in
+    channel k, of the newest's size, and carries the newest's ``in_ctx`` as
+    ``out_ctx`` and its number as ``out_source``.
     ``outputs`` is how many frames out to compute: by default as many as the
     stimulus takes. Where the source reached a frame being read,
     ``overrun`` is set from that frame out on, and ``timeline.overrun``
@@ -128,18 +131,18 @@ def frame_store(frames, ports, stimulus: Stimulus, params: dict,
         t.arrived.append(end)
         if f.shape != size:
             epoch, size = epoch + 1, f.shape
-            t.restarted.append(start)
+            t.restarted.append(end)
         epochs.append(epoch)
 
     def warm(at: int) -> int | None:
         """The newest frame whole before cycle `at`, if the history in force
-        then -- the newest frame STARTED's -- holds `depth` whole frames, or
-        None: a frame of a new size starts a history as it starts."""
-        begun = [k for k, s in enumerate(t.started) if s < at]
-        if not begun:
+        then -- the newest frame whole's -- holds `depth` whole frames, or
+        None: a frame of a new size starts a history as its last beat goes
+        in, when its size is drawn."""
+        whole = [k for k, a in enumerate(t.arrived) if a < at]
+        if not whole:
             return None
-        whole = [k for k in begun if t.arrived[k] < at
-                 and epochs[k] == epochs[begun[-1]]]
+        whole = [k for k in whole if epochs[k] == epochs[whole[-1]]]
         return whole[-1] if len(whole) >= depth else None
 
     def ready_at(after: int) -> int | None:
@@ -179,8 +182,7 @@ def frame_store(frames, ports, stimulus: Stimulus, params: dict,
                for m, st in enumerate(t.started) if m > n):
             t.overrun = True
         out.append(np.stack([frames[n - k] for k in range(depth)], axis=-1))
-        told.append({"out_ctx": contexts[n], "out_frame_width": w,
-                     "out_frame_height": h, "out_source": n, "cold": 0,
+        told.append({"out_ctx": contexts[n], "out_source": n, "cold": 0,
                      "overrun": int(t.overrun)})
         previous_end = ended
     return LeafRun(out, told, t)

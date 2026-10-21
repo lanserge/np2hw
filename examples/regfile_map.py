@@ -126,7 +126,7 @@ module tb;
     .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid),
     .s_axil_rready(rready),
     .in_valid(iv), .in_ready(irdy), .in_data(idata), .in_sof(sof),
-    .in_frame_width(16'd%(W)d), .in_frame_height(16'd%(H)d),
+    .in_ctx({16'd%(H)d, 16'd%(W)d}),
     .out_valid(ov), .out_ready(ordy), .out_data(odata),
     .out_sof(osof), .out_eol(oeol), .out_last(olast));
 

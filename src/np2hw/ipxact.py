@@ -176,7 +176,8 @@ def abstraction_definition() -> str:
                                     ("onSlave", "in" if from_source else "out")):
                 el = ET.SubElement(wire, _tag(side))
                 ET.SubElement(el, _tag("presence")).text = presence
-                if width is not None:
+                if isinstance(width, int):
+                    # DATA and CTX are each port's own width, stated there
                     ET.SubElement(el, _tag("width")).text = str(width)
                 ET.SubElement(el, _tag("direction")).text = direction
     return _document("abstractionDefinition", STREAM_RTL_VLNV, build)

@@ -55,6 +55,7 @@ import numpy as np
 from _harness import BUILD, check, check_bp
 from np2hw import Image2D, generate, to_ir
 from np2hw.ir import Param
+from np2hw.verilog import context_word
 
 BITS, K = 12, 5
 N = (1 << K) + 1                 # 33 knots -> 32 segments
@@ -184,6 +185,8 @@ def _two_frames(meta, W, H, frames, values):
     a(f"    {mod} dut (")
     a("        .clk(clk), .rst(rst), .in_valid(in_valid),")
     a("        .in_ready(in_ready), .in_sof(in_sof), .in_data(in_data),")
+    # each frame's context: the size this bench streams
+    a(f"        .in_ctx({context_word(meta, dict(values, width=W, height=H))}),")
     for name, _ in meta["params"]:
         a(f"        .param_{name}(param_{name}),")
     a("        .out_valid(out_valid), .out_ready(1'b1), .out_sof(out_sof),")

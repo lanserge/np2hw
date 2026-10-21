@@ -14,7 +14,8 @@ from np2hw.ir import Image2D
 from np2hw import to_ir
 from np2hw.verilog import (generate, testbench, testbench_handshake,
                            switchboard_wrap, axis_video_wrap, testbench_sb_packed,
-                           axil_regfile, umi_regfile, testbench_ctrl)
+                           axil_regfile, umi_regfile, testbench_ctrl,
+                           offered_params)
 
 BUILD = os.path.join(os.path.dirname(__file__), "..", "build")
 os.makedirs(BUILD, exist_ok=True)
@@ -206,7 +207,7 @@ def check_ctrl(name, fn, A, params, param_values, ctrl="axil", bits=8,
     H, W = A.shape
     s, out = to_ir(fn, Image2D("img", W, H, bits=bits), *params)
     core = generate(out, module_name=name)
-    pspec = core["params"]                                # [(scalar_name, bits)]
+    pspec = offered_params(core)       # [(scalar_name, bits)], the size among them
     mk = axil_regfile if ctrl == "axil" else umi_regfile
     reg = mk(pspec, module_name=f"{name}_{ctrl}", frame_sync=frame_sync,
              defaults=core.get("param_defaults"))

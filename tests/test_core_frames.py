@@ -50,6 +50,17 @@ def _sim(tmp_path, core, video, seed=0, values=None):
                     for n, _ in core["params"])
     sets = ["".join(f"            param_{n} = {int(v.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
                     for n, b in core["params"]) for v in values]
+    # a core whose stream carries its context takes each frame's in it: its
+    # size, and every value the caller gives a frame, packed
+    layout = core["interface"]["input"].get("ctx")
+    if layout:
+        from np2hw.stream import context_bits, pack_context
+        size = {"width": "frame_width", "height": "frame_height"}
+        regs += f"    reg [{context_bits(layout) - 1}:0] in_ctx = 0;\n"
+        conns += "        .in_ctx(in_ctx), .out_ctx(),\n"
+        sets = [s + f"            in_ctx = {context_bits(layout)}'h"
+                f"{pack_context(layout, {n: v.get(size.get(f, n), 0) for n, _, f in layout}):x};\n"
+                for s, v in zip(sets, values)]
     per_frame = "".join(f"            if (k == {k}) begin\n{sets[k]}            end\n"
                         for k in range(len(values)))
     words = [int(v) for v in video.ravel()]

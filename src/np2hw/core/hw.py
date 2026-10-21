@@ -94,17 +94,34 @@ def _bits(x, a):
     return 0, top
 
 
+def cat_fields(attrs, count: int) -> tuple:
+    """The widths of a bit assembly's fields, operand 0's first: each
+    `field` bits, or each its own, as `fields` lists them."""
+    fields = attrs.get("fields") if isinstance(attrs, dict) else \
+        attrs.attr("fields")
+    if fields is not None:
+        return tuple(fields)
+    field = attrs["field"] if isinstance(attrs, dict) else attrs.attr("field")
+    return (field,) * count
+
+
 def _cat(g, ts, a):
-    """Fields into a word, operand 0 in the low bits, each `field` bits:
-    the exact range of the word they make."""
-    f = a["field"]
-    return _t(sum(t.lo << (f * i) for i, t in enumerate(ts)),
-              sum(t.hi << (f * i) for i, t in enumerate(ts)))
+    """Fields into a word, operand 0 in the low bits, each `field` bits --
+    or each its own, `fields`: the exact range of the word they make."""
+    los, lo = [], 0
+    for w in cat_fields(a, len(ts)):
+        los.append(lo)
+        lo += w
+    return _t(sum(t.lo << at for at, t in zip(los, ts)),
+              sum(t.hi << at for at, t in zip(los, ts)))
 
 
 def _verify_cat(g, n):
-    f = n.attr("field")
-    for i, o in enumerate(n.operands):
+    fields = cat_fields(n, len(n.operands))
+    if len(fields) != len(n.operands):
+        raise GraphError(f"bit assembly: {len(n.operands)} fields, "
+                         f"{len(fields)} widths", n.loc)
+    for i, (o, f) in enumerate(zip(n.operands, fields)):
         if o.type.lo < 0 or o.type.hi >= 1 << f:
             raise GraphError(f"bit assembly: field {i} holds "
                              f"[{o.type.lo}, {o.type.hi}], not {f} unsigned "

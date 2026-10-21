@@ -17,6 +17,8 @@ import pytest
 
 from np2hw import Image2D, generate, to_ir
 from np2hw.ir import Param
+from np2hw.stream import context_bits, unpack_context
+from np2hw.verilog import context_word
 
 pytestmark = pytest.mark.skipif(shutil.which("iverilog") is None,
                                 reason="needs iverilog")
@@ -100,21 +102,23 @@ def cross(img, py, px):
 
 def _sim(tmp_path, core, frames, values, blank=None):
     """Drive `frames` through one elaboration of `core`, each frame with its
-    own frame_width/frame_height, honouring the handshake, with a vertical
-    blank between frames long enough for a stencil's bottom flush. Returns
-    each output beat as (data, eol, last), and the frame size the core
-    publishes at each frame's last beat."""
+    own size in its context, honouring the handshake, with a vertical blank
+    between frames long enough for a stencil's bottom flush. Returns each
+    output beat as (data, eol, last), and the frame size the core hands on
+    in its context at each frame's last beat."""
     in_bits, out_bits = core["in_bits"], core["out_bits"]
     names = [n for n, _ in core["params"]]
     ports = "".join(f"    reg [{b-1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n" for n in names)
     sets = "".join(f"        param_{n} = {int(values.get(n, 0))};\n"
-                   for n in names if not n.startswith("frame_"))
+                   for n in names)
+    layout = core["interface"]["input"]["ctx"]
+    bits = context_bits(layout)
     blank = core.get("vdrain", 8) + 8 if blank is None else blank
     feed, words = [], []
     for k, frame in enumerate(frames):
         h, w = frame.shape
-        feed.append(f"        param_frame_width = {w}; param_frame_height = {h};\n"
+        feed.append(f"        in_ctx = {context_word(core, {'width': w, 'height': h})};\n"
                     f"        send({len(words)}, {w * h});\n"
                     f"        repeat ({blank}) @(negedge clk);\n")
         words += [int(v) for v in frame.ravel()]
@@ -126,20 +130,20 @@ module tb;
 {ports}    wire in_ready, out_valid, out_sof, out_eol, out_last;
     reg out_ready = 1;
     wire [{out_bits-1}:0] out_data;
-    wire [15:0] out_frame_width, out_frame_height;
+    reg [{bits-1}:0] in_ctx = 0;
+    wire [{bits-1}:0] out_ctx;
     reg [{in_bits-1}:0] img [0:{len(words)-1}];
     integer f, i;
     always #5 clk = ~clk;
     {core["module"]} dut (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in_ready(in_ready),
-        .in_sof(in_sof), .in_data(in_data),
+        .in_sof(in_sof), .in_data(in_data), .in_ctx(in_ctx),
 {conns}        .out_valid(out_valid), .out_ready(out_ready), .out_sof(out_sof),
         .out_eol(out_eol), .out_last(out_last), .out_data(out_data),
-        .out_frame_width(out_frame_width),
-        .out_frame_height(out_frame_height));
+        .out_ctx(out_ctx));
     always @(posedge clk) if (out_valid && out_ready)
-        $fdisplay(f, "%0d %0d %0d %0d %0d", out_data, out_eol, out_last,
-                  out_frame_width, out_frame_height);
+        $fdisplay(f, "%0d %0d %0d %0h", out_data, out_eol, out_last,
+                  out_ctx);
     task send(input integer at, input integer n);
         begin
             for (i = 0; i < n; i = i + 1) begin
@@ -153,8 +157,7 @@ module tb;
     initial begin
         $readmemh("in.hex", img);
         f = $fopen("out.txt", "w");
-{sets}        param_frame_width = {frames[0].shape[1]};
-        param_frame_height = {frames[0].shape[0]};
+{sets}        in_ctx = {context_word(core, {'width': frames[0].shape[1], 'height': frames[0].shape[0]})};
         repeat (3) @(negedge clk); rst = 0;
         @(negedge clk);
 {"".join(feed)}        repeat ({core.get("vdrain", 8) + 8}) @(negedge clk);
@@ -169,8 +172,10 @@ endmodule
     subprocess.run(["vvp", "sim.vvp"], cwd=tmp_path, check=True,
                    capture_output=True, text=True, timeout=300)
     rows = (tmp_path / "out.txt").read_text().split("\n")
-    rows = [tuple(map(int, r.split())) for r in rows if r.strip()]
-    return [r[:3] for r in rows], [r[3:] for r in rows if r[2]]
+    rows = [r.split() for r in rows if r.strip()]
+    beats = [tuple(map(int, r[:3])) for r in rows]
+    handed = [unpack_context(layout, int(r[3], 16)) for r in rows if r[2] == "1"]
+    return beats, [(c["width"], c["height"]) for c in handed]
 
 
 def _check(tmp_path, fn, params, values, model_args, name, channels=1,
@@ -179,7 +184,8 @@ def _check(tmp_path, fn, params, values, model_args, name, channels=1,
     _, line = to_ir(fn, Image2D("img", MAX_W, MAX_H, bits=bits), *params,
                     channels=channels)
     core = generate(line, module_name=name)
-    assert {"frame_width", "frame_height"} <= {n for n, _ in core["params"]}
+    assert [f[0] for f in core["interface"]["input"]["ctx"]][:2] == \
+        ["width", "height"]
     rng = np.random.default_rng(7)
     top = FULL if channels == 1 else (1 << bits) - 1
     frames = [rng.integers(0, top + 1, (h, w)).astype(np.int64)
@@ -301,13 +307,15 @@ def unpadded(img):
 
 
 @pytest.mark.parametrize("fn, want", [(gauss, (12, 8)), (unpadded, (10, 6))])
-def test_out_of_reset_a_core_hands_on_the_size_its_ports_say(tmp_path, fn,
-                                                             want):
-    """Before any frame, a core's size follows its ports: what it hands on
-    is the size coming, less its border -- not the most it can hold, which
-    a display placing the picture would refuse as too large."""
+def test_out_of_reset_a_core_hands_on_the_size_its_context_says(
+        tmp_path, fn, want):
+    """Before any frame, a core's size follows its context: what it hands
+    on is the size coming, less its border -- not the most it can hold,
+    which a display placing the picture would refuse as too large."""
     _, line = to_ir(fn, Image2D("img", MAX_W, MAX_H, bits=BITS))
     core = generate(line, module_name=f"rst_{fn.__name__}")
+    layout = core["interface"]["input"]["ctx"]
+    bits = context_bits(layout)
     ports = "".join(f"    reg [{b-1}:0] param_{n} = 0;\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n" for n, _ in core["params"])
     (tmp_path / "core.v").write_text(core["verilog"])
@@ -316,20 +324,20 @@ module tb;
     reg clk = 0, rst = 1;
 {ports}    wire in_ready, out_valid, out_sof, out_eol, out_last;
     wire [{core["out_bits"]-1}:0] out_data;
-    wire [15:0] out_frame_width, out_frame_height;
+    reg [{bits-1}:0] in_ctx = 0;
+    wire [{bits-1}:0] out_ctx;
     always #5 clk = ~clk;
     {core["module"]} dut (
         .clk(clk), .rst(rst), .in_valid(1'b0), .in_ready(in_ready),
         .in_sof(1'b0), .in_data({core["in_bits"]}'d0),
 {conns}        .out_valid(out_valid), .out_ready(1'b1), .out_sof(out_sof),
-        .out_eol(out_eol), .out_last(out_last), .out_data(out_data),
-        .out_frame_width(out_frame_width),
-        .out_frame_height(out_frame_height));
+        .in_ctx(in_ctx), .out_eol(out_eol), .out_last(out_last),
+        .out_data(out_data), .out_ctx(out_ctx));
     initial begin
-        param_frame_width = 12; param_frame_height = 8;
+        in_ctx = {context_word(core, {"width": 12, "height": 8})};
         repeat (3) @(negedge clk); rst = 0;
         repeat (4) @(negedge clk);
-        $display("%0d %0d", out_frame_width, out_frame_height);
+        $display("%0h", out_ctx);
         $finish;
     end
 endmodule
@@ -338,7 +346,8 @@ endmodule
                    cwd=tmp_path, check=True, capture_output=True, text=True)
     out = subprocess.run(["vvp", "sim.vvp"], cwd=tmp_path, check=True,
                          capture_output=True, text=True).stdout.split()
-    assert tuple(map(int, out[:2])) == want
+    handed = unpack_context(layout, int(out[0], 16))
+    assert (handed["width"], handed["height"]) == want
 
 
 def test_an_axis_read_to_its_end_follows_the_frame(tmp_path):

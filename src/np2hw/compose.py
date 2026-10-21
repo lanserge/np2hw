@@ -43,6 +43,8 @@ from __future__ import annotations
 import textwrap
 from dataclasses import dataclass, field, replace as dc_replace
 
+from .stream import context_bits
+
 
 def arm_capture(req: str) -> str:
     """The datapath's first synchroniser flop on the arm request: the
@@ -74,9 +76,19 @@ class StreamType:
     # together. Width and framing cannot catch that -- a 12-bit Bayer stream and
     # a 12-bit luma stream are identical to a compiler and nonsense to connect.
     domain: str = ""
+    # The frame's context the stream carries in its CTX member: (name, bits,
+    # follows) a field, in order. A sink that takes a context takes exactly
+    # this one: two layouts are two different words.
+    ctx: tuple = ()
 
     def compatible(self, other: "StreamType") -> str | None:
         """None if a source of this type may drive a sink of `other`."""
+        if other.ctx and tuple(map(tuple, self.ctx)) != tuple(
+                map(tuple, other.ctx)):
+            have = [f[0] for f in self.ctx] or "none"
+            want = [f[0] for f in other.ctx]
+            return (f"a sink taking the context {want} from a source "
+                    f"carrying {have}")
         if self.data_bits != other.data_bits:
             return (f"{self.data_bits}-bit source into a {other.data_bits}-bit "
                     "sink")
@@ -119,6 +131,10 @@ class Instance:
     name: str
     core: dict
     bind: dict = field(default_factory=dict)
+    # What this instance's input context is, where it is not the stream's
+    # own: an expression -- the stream's context with the fields a register
+    # supplies joined to it, where a pipeline's stream enters
+    ctx_in: str | None = None
     # {port_name: domain} -- an opaque tag the caller attaches to this module's
     # streams. np2hw never interprets it; it only refuses to wire two streams
     # the caller called different things. Widths cannot catch that.
@@ -150,7 +166,8 @@ class Instance:
         # An explicit binding wins; otherwise a nested subsystem's own declared
         # domain carries through, so a hierarchy does not lose its types.
         domain = self.domains.get(spec["prefix"], spec.get("domain", ""))
-        return StreamType(spec["data_bits"], tuple(spec["flags"]), domain)
+        return StreamType(spec["data_bits"], tuple(spec["flags"]), domain,
+                          tuple(tuple(f) for f in spec.get("ctx", ())))
 
     def input_stream(self) -> StreamType | None:
         return self._stream("input")
@@ -174,79 +191,6 @@ class Connection:
 
 def _net(endpoint: str) -> str:
     return "net_" + endpoint.replace(".", "_")
-
-
-def _size_ports(port: str) -> tuple:
-    """The two scalar ports that carry the frame size of stream `port`,
-    beside it, on a composed module."""
-    return (f"{port}_frame_width", f"{port}_frame_height")
-
-
-def _thread_frame_sizes(instances, connections, ports, assigns):
-    """A frame's size travels with its stream. Each instance's input size
-    ports -- named by its interface, `input.size` -- that the caller left
-    unbound are bound from where its stream comes from: the size the module
-    driving it hands on (`output.size`), or -- for a stream entering this
-    module -- two size inputs beside it (_size_ports). A stream leaving this
-    module gets the size it carries beside it the same way, as outputs. A
-    binding the caller gave wins: the caller may know the size from
-    elsewhere (a header's context, a constant)."""
-    by_name = {inst.name: inst for inst in instances}
-    names = {p.name for p in ports}
-    stream_in = {p.name for p in ports if p.stream is not None
-                 and p.direction == "in"}
-    stream_out = {p.name for p in ports if p.stream is not None
-                  and p.direction == "out"}
-    bind = {i.name: dict(i.bind) for i in instances}
-    outputs = {i.name: dict(i.outputs) for i in instances}
-    ports, assigns = list(ports), dict(assigns or {})
-
-    def size_of(inst, role):
-        stream = inst.core["interface"].get(role) or {}
-        return stream.get("size")
-
-    def handed(src):
-        """The wires the size leaves instance `src` on, as its outputs."""
-        wires = []
-        for port in size_of(by_name[src], "output"):
-            wire = f"{src}_{port}"
-            outputs[src].setdefault(port, (wire, 16))
-            wires.append(wire)
-        return tuple(wires)
-
-    def declare(name, direction, about):
-        if name not in names:
-            names.add(name)
-            ports.append(Port(name, direction, width=16, comment=about))
-
-    for edge in connections:
-        src, _, _ = edge.source.rpartition(".")
-        dst, _, _ = edge.sink.rpartition(".")
-        if dst:
-            want = size_of(by_name[dst], "input")
-            if not want or all(n in bind[dst] for n in want):
-                continue
-            if src and size_of(by_name[src], "output"):
-                wires = handed(src)
-            elif not src and edge.source in stream_in:
-                wires = _size_ports(edge.source)
-                for w in wires:
-                    declare(w, "in", f"the size of each frame arriving on "
-                                     f"{edge.source}")
-            else:
-                continue
-            for n, w in zip(want, wires):
-                bind[dst].setdefault(n, (w, "the frame's size, with its "
-                                            "stream"))
-        elif src and edge.sink in stream_out and size_of(by_name[src],
-                                                          "output"):
-            for out, w in zip(_size_ports(edge.sink), handed(src)):
-                declare(out, "out", f"the size of each frame leaving on "
-                                    f"{edge.sink}")
-                assigns.setdefault(out, w)
-    instances = [dc_replace(i, bind=bind[i.name], outputs=outputs[i.name])
-                 for i in instances]
-    return instances, ports, assigns
 
 
 def compose(module_name: str, instances, connections, ports,
@@ -289,12 +233,9 @@ def compose(module_name: str, instances, connections, ports,
     Returns:
         ``{"verilog": str, "module": str, "nets": [...]}``.
 
-    A frame's size travels with its stream (_thread_frame_sizes): an
-    instance's frame_width and frame_height left unbound are bound from the
-    stream that feeds it.
+    A frame's size travels with its stream, in its context: the stream's
+    CTX member, wired with the stream like its other members.
     """
-    instances, ports, assigns = _thread_frame_sizes(instances, connections,
-                                                    ports, assigns)
     by_name = {inst.name: inst for inst in instances}
     stream_ports = {p.name: p for p in ports if p.stream is not None}
 
@@ -325,6 +266,9 @@ def compose(module_name: str, instances, connections, ports,
             raise ValueError(f"{edge.source} produces no stream")
         if consumed is None:
             raise ValueError(f"{edge.sink} consumes no stream")
+        if dst_inst is not None and dst_inst.ctx_in is not None:
+            # its context is given, not the stream's: the rest is checked
+            consumed = dc_replace(consumed, ctx=())
         problem = produced.compatible(consumed)
         if problem:
             raise ValueError(
@@ -361,7 +305,8 @@ def compose(module_name: str, instances, connections, ports,
                             port.width, signed=port.signed, before=about))
             continue
         pins += stream_pins(port.name, port.direction, port.stream.data_bits,
-                            flags=port.stream.flags, before=about)
+                            flags=port.stream.flags, before=about,
+                            ctx_bits=context_bits(port.stream.ctx))
     L += port_header(module_name, pins)
     a("")
 
@@ -374,6 +319,8 @@ def compose(module_name: str, instances, connections, ports,
         a(f"    wire [{stream.data_bits - 1}:0] {net}_data;")
         for flag in stream.flags:
             a(f"    wire        {net}_{flag};")
+        if stream.ctx:
+            a(f"    wire [{context_bits(stream.ctx) - 1}:0] {net}_ctx;")
     a("")
     scalars = [(w, b) for inst in instances for w, b in inst.outputs.values()]
     if scalars:
@@ -390,6 +337,8 @@ def compose(module_name: str, instances, connections, ports,
         a(f"    assign {net}_data  = {key}_data;")
         for flag in stream.flags:
             a(f"    assign {net}_{flag} = {key}_{flag};")
+        if stream.ctx:
+            a(f"    assign {net}_ctx  = {key}_ctx;")
         a(f"    assign {key}_ready = {net}_ready;")
     a("")
 
@@ -612,6 +561,9 @@ def compose(module_name: str, instances, connections, ports,
             a(f"        .{spec['prefix']}_data   ({net}_data),")
             for flag in spec["flags"]:
                 a(f"        .{spec['prefix']}_{flag:<6} ({net}_{flag}),")
+            if spec.get("ctx"):
+                a(f"        .{spec['prefix']}_ctx    "
+                  f"({inst.ctx_in or net + '_ctx'}),")
 
         for port, (wire, _bits) in inst.outputs.items():
             a(f"        .{port:<20} ({wire}),")
@@ -624,6 +576,8 @@ def compose(module_name: str, instances, connections, ports,
             a(f"        .{spec['prefix']}_valid ({net}_valid),")
             a(f"        .{spec['prefix']}_ready ({net}_ready),")
             a(f"        .{spec['prefix']}_data  ({net}_data),")
+            if spec.get("ctx"):
+                a(f"        .{spec['prefix']}_ctx   ({net}_ctx),")
             for i, flag in enumerate(flags):
                 tail = "" if i == len(flags) - 1 else ","
                 a(f"        .{spec['prefix']}_{flag:<5} ({net}_{flag}){tail}")
@@ -646,6 +600,8 @@ def compose(module_name: str, instances, connections, ports,
             a(f"    assign {dst_port}_data  = {net}_data;")
             for flag in stream_ports[dst_port].stream.flags:
                 a(f"    assign {dst_port}_{flag} = {net}_{flag};")
+            if stream_ports[dst_port].stream.ctx:
+                a(f"    assign {dst_port}_ctx = {net}_ctx;")
             a(f"    assign {net}_ready = {dst_port}_ready;")
             a("")
 
@@ -697,13 +653,11 @@ def _composed_interface(module_name: str, ports) -> dict:
         port = group[0]
         return stream_of(port)
 
-    names = {p.name for p in ports}
-
     def stream_of(port):
         out = {"prefix": port.name, "data_bits": port.stream.data_bits,
                "flags": tuple(port.stream.flags), "domain": port.stream.domain}
-        if all(n in names for n in _size_ports(port.name)):
-            out["size"] = _size_ports(port.name)
+        if port.stream.ctx:
+            out["ctx"] = [list(f) for f in port.stream.ctx]
         return out
 
     return {

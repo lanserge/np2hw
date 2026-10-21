@@ -822,7 +822,7 @@ class _Loader:
     # -- facts of a node's ports, and composites built whole --------------- #
 
     FACTS = ("bits", "channels", "data_bits", "max_width", "max_height",
-             "context", "frames")
+             "context", "context_bits", "frames")
 
     def port_fact(self, target: str, where: str):
         """``node.port.fact`` -- a fact of the stream at a composite's port,
@@ -850,6 +850,17 @@ class _Loader:
                 # the facts that ride with the stream entering: a design
                 # wires one to the port only where it is in this list
                 return list(facts.get("context", ()))
+            if fact == "context_bits":
+                # the width of its CTX member: those facts, packed as the
+                # design's vocabulary lays them out
+                from np2hw.stream import context_bits
+                names = list(facts.get("context", ()))
+                if names and self.vocabulary is None:
+                    raise CompositionError(
+                        f"{where}: {target}: the stream carries "
+                        f"{names}, and no vocabulary lays them out")
+                return context_bits(self.vocabulary.layout(names)) \
+                    if names else 0
             frames = int(facts.get("frames", 0))
             if fact == "frames":
                 return frames
@@ -857,7 +868,8 @@ class _Loader:
             return channels if fact == "channels" else \
                 int(facts["bits"]) * channels * max(1, frames)
         if port in outputs:
-            if fact in ("max_width", "max_height", "frames"):
+            if fact in ("max_width", "max_height", "frames", "context",
+                        "context_bits"):
                 raise CompositionError(
                     f"{where}: {target}: {fact} is declared where a stream "
                     "enters; an output's is not traced yet")

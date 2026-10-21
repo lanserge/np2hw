@@ -26,12 +26,12 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 - **A design holding modelled leaves is proved from its models**
   (`np2hw.pipeline.proof`). The stream is followed from the design's input
   to its output: each composite of model blocks built whole runs its
-  chain, each leaf its model, and what rides beside the frames -- sizes,
-  context -- is followed net by net. One stimulus drives the models and the
+  chain, each leaf its model; each frame's context rides its stream, and
+  what else rides beside the frames is followed net by net. One stimulus drives the models and the
   design's own Verilog under Verilator: the frames, the input's gaps, the
   consumer's waits and stalls, every register at its reset value. A leaf
-  with no model, and a value read around a stage that chose which frames
-  go on, are refused by name. Every leaf model has one signature: frames
+  with no model, a context the stream does not bring, and a value read
+  around a stage that chose which frames go on, are refused by name. Every leaf model has one signature: frames
   and their ports in, frames and their ports out (`LeafRun`); **the frame
   store's model moved to it**.
 - **A loaded design keeps each pipeline it built whole**
@@ -77,8 +77,8 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   block's vocabulary declares, integers, and the build parameters in scope
   (integers at load). The design's one expression walker evaluates it --
   over integers in a NumPy run, over traced values when the model is
-  traced -- so the expression is folded into the block's core, whose ports
-  are the context it reads, wired as any consumed context is. A range the
+  traced -- so the expression is folded into the block's core, which reads
+  the context it needs from its stream's `ctx`, with each frame. A range the
   input cannot hold is refused, with the range. **Register maps change**
   where a design binds an input: the bound register is gone.
 - **A design asks whether a stream carries a fact.** `in` and `not in`
@@ -131,27 +131,40 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   reason (`ValueError`); `generate(module, module_name, clk_ns, label, dev,
   sync_memory)` builds it, or refuses -- it no longer hands a model to
   another compiler when its own build misses the clock.
-- **Every core takes each frame's size at run time** -- one kind of core.
-  `param_frame_width` and `param_frame_height` are register ports of every
-  core, latched as a frame's first pixel is taken, their defaults the traced
-  size; `out_frame_width` and `out_frame_height` hand on the size of the
-  frame it puts out, from a register. The size a model is traced at is the
-  most the core holds (a line buffer's depth, a frame store's), and a
-  generated module has no `WIDTH`/`HEIGHT` parameters left to override. A
-  frame is at least 2x2. **Ports change on every core**: the two size inputs
-  and two size outputs are new; a fixed-size use ties the inputs to
-  constants. `core["registers"]` lists the model's own registers,
+- **Every core takes each frame's size at run time** -- one kind of core
+  -- **in its stream's context.** A stream carries each frame's context in
+  a new optional member, `ctx` (`CTX` in `np2hw.stream.STREAM_SIGNALS`):
+  the facts the stream declares, packed in its vocabulary's order, the
+  first in the low bits, the frame's `width` and `height` first where it
+  declares them -- `context_bits`, `pack_context` and `unpack_context` read
+  and write it. A core latches `in_ctx` with a frame's first beat and hands
+  `out_ctx` on with the frame: the same fields, the size the frame it puts
+  out has, every other field as the frame brought it, each in a register.
+  An image's `context` is its layout, by default the size alone. The size a
+  model is traced at is the most the core holds (a line buffer's depth, a
+  frame store's), and a generated module has no `WIDTH`/`HEIGHT` parameters
+  left to override. A frame is at least 2x2. **Ports change on every
+  core**: `in_ctx` and `out_ctx` are new, and a value a frame brings
+  (`Param(frame=True)`, a bound input's context) is a field of `in_ctx`,
+  not a port. `core["registers"]` lists the model's own registers,
   `core["params"]` every register port.
-- **A frame's size travels with its stream.** `compose()` binds an
-  instance's unbound size ports from the stream that feeds it, and gives a
-  composed module `<stream>_frame_width`/`_frame_height` ports beside each
-  stream it passes in or out; `control_wrap` passes them through as context.
-  Each stream in an interface states its `size` ports. In a pipeline each
-  block's size is the size its driver hands on; the first block's is the
-  frame's own where the stream carries it (context signals following
-  `width` and `height`), else the size the block is built for. The RTL twin
-  reads each output's size from the `<output>_frame_width`/`_height` the
-  top publishes.
+- **A frame's context travels with its stream.** A composed module wires
+  each stream's `ctx` with its other members, and a sink taking a context
+  is refused one of another layout. A pipeline's input stream carries the
+  facts its port declares; the context block's registers supply the rest,
+  joined into the one layout every core of the pipeline carries
+  (`compose.context_layout`, `compose.carried_layout`), and a fact the
+  stream carries has no register. The RTL twin reads each output's size
+  from its `out_ctx`. A wrapper of one core (`control_top`, the
+  Switchboard and AXI4-Stream wrappers, the testbenches) offers each
+  context field as a register port, the size among them, and packs them
+  into `in_ctx` (`verilog.offered_params`, `verilog.context_word`).
+- **Fixed modules carry the context they do not read.** `frame_store`
+  and `frame_cdc` carry their stream's `ctx` whole (`CTX_BITS`, which a
+  design reads as `node.port.context_bits`), and the frame store's size
+  is the one each frame's own beats draw: its width to the first `eol`,
+  its rows to its `last`. **Their ports change**: the separate size ports
+  are gone.
 - **A window takes frames of any height**: its row steps count at the
   16-bit geometry width (its column steps stay sized from the traced width,
   which its line buffers hold). **Emitted widths change** for those step

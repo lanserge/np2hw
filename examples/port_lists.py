@@ -53,6 +53,7 @@ def _composed() -> dict:
         _, out = to_ir(gain, Image2D("img", 8, 4, bits=8),
                        Param("g", bits=8, default=16))
         cores.append(generate(out, module_name=f"gain_{name}"))
+    ctx = tuple(map(tuple, cores[0].interface["input"]["ctx"]))
     top = compose(
         "pair",
         [Instance("a", cores[0], bind={"g": "g_a"}),
@@ -61,14 +62,16 @@ def _composed() -> dict:
          Connection("b.out", "out")],
         [Port("g_a", "in", width=8), Port("g_b", "in", width=8),
          Port("trim", "in", width=6, signed=True, comment="unused, signed"),
-         Port("in", "in", stream=StreamType(8, ("sof", "eol", "last"))),
-         Port("out", "out", stream=StreamType(8, ("sof", "eol", "last")))])
+         Port("in", "in", stream=StreamType(8, ("sof", "eol", "last"),
+                                             ctx=ctx)),
+         Port("out", "out", stream=StreamType(8, ("sof", "eol", "last"),
+                                              ctx=ctx))])
     return dict(top, verilog="\n".join([cores[0]["verilog"], cores[1]["verilog"],
                                        top["verilog"]]))
 
 
 def _wrapped(bus_clock: bool) -> dict:
-    """A traced core behind its register file, with a context port passed
+    """A traced core behind its register file, with a scalar port passed
     through. The core is a companion module the wrapper instantiates."""
     import numpy as np
     from np2hw import Image2D, Param, Reg, control_wrap, generate, to_ir
@@ -82,7 +85,7 @@ def _wrapped(bus_clock: bool) -> dict:
     wrap = control_wrap(core, [Reg("g", 8, reset=16)], bind={"g": "param_g"},
                         module_name="gain_ctrl", addr_bits=8,
                         commit="out_valid && out_ready && out_last",
-                        bus_clock=bus_clock, passthrough=[("ctx_width", 16)])
+                        bus_clock=bus_clock, passthrough=[("sensor_mode", 4)])
     return dict(wrap, verilog=core["verilog"] + "\n" + wrap["verilog"])
 
 # The generators whose streams carry their bundle attributes; the others
@@ -129,7 +132,9 @@ def streams_are_buses(name, result) -> bool:
     for stream in iface.get("streams", []):
         prefix = stream["prefix"]
         want = {f"{prefix}_{s}" for s in ("valid", "ready", "data",
-                                          *stream["flags"])}
+                                          *stream["flags"],
+                                          *(("ctx",) if stream.get("ctx")
+                                            else ()))}
         got = {p["name"] for p in iface["ports"]
                if p.get("bus", {}).get("bundle") == bundle_name(prefix)}
         if want != got:

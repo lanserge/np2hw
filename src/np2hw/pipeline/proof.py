@@ -13,15 +13,16 @@ chain does, and each modelled leaf runs its model. Both runs are driven by
 one :class:`~np2hw.hdl.models.Stimulus` -- the frames, and when they come
 and go -- and nothing in the model run is read back from the hardware.
 
-What travels beside the frames is followed the same way. Every port of a
-stage other than its stream is a net of the design: a frame's size, its
-context. Each frame carries the values its nets hold for it -- the design's
-inputs as the frame enters, then each stage's outputs as the stage hands
-the frame on -- and a stage reads its other inputs from those. A stage
-after one that re-times the stream (a frame store chooses which frames go
-out, and when) may read only what came through it: a value read around it
-would be whichever frame happened to be arriving, which no model of frames
-can say, and the run refuses it, naming the net.
+What travels beside the frames is followed the same way. A frame's context
+rides its stream, as the stream's CTX member (``<port>_ctx``), and every
+port of a stage other than its stream is a net of the design. Each frame
+carries the values its nets and its stream's context hold for it -- the
+design's inputs as the frame enters, then each stage's outputs as the stage
+hands the frame on -- and a stage reads its other inputs from those. A
+stage after one that re-times the stream (a frame store chooses which
+frames go out, and when) may read only what came through it: a value read
+around it would be whichever frame happened to be arriving, which no model
+of frames can say, and the run refuses it, naming the net.
 
 The Verilog run is the design's own, emitted as it is built, under
 Verilator, driven by np2hw's one harness: the stream's framing as its source
@@ -152,11 +153,19 @@ def _model(ref: str):
     return getattr(import_module(module), name)
 
 
-def _read(design, stage: Stage, port: str, env: list) -> list:
-    """Each frame's value at `stage`'s input `port`."""
+def _read(design, stage: Stage, port: str, env: list,
+          member: str = "") -> list:
+    """Each frame's value at `stage`'s input `port` -- or, with `member`,
+    at that member of the stream port: ``ctx``, its frame's context."""
     driver = _driver(design, f"{stage.path}.{port}")
     if driver is None:
         raise ProofError(f"{stage.path}.{port} is driven by nothing")
+    if member:
+        port, driver = f"{port}_{member}", f"{driver}_{member}"
+        if not any(driver in held for held in env):
+            raise ProofError(
+                f"{stage.path}.{port} reads {driver}: that stream carries no "
+                f"{'context' if member == 'ctx' else member} with its frames")
     try:
         return [held[driver] for held in env]
     except KeyError:
@@ -171,7 +180,8 @@ def run_model(design, frames, ports, stimulus: Stimulus,
               ) -> Run:
     """The design's models, stage by stage, on `frames` -- each ``(h, w)``
     -- and `ports`, each frame's values of the design's other inputs by
-    their names, as `stimulus` times them."""
+    their names, its stream's context among them as ``<stream>_ctx``, as
+    `stimulus` times them."""
     frames = [np.asarray(f) for f in frames]
     env = [dict(p) for p in ports]
     for stage in stages(design, *stream):
@@ -181,7 +191,12 @@ def run_model(design, frames, ports, stimulus: Stimulus,
             own = {}
             for spec in leaf.get("inputs", []):
                 name = spec["name"]
-                if name == stage.stream_in or _clocking(name):
+                if name == stage.stream_in:
+                    if "ctx" in spec.get("stream", ()):
+                        own[f"{name}_ctx"] = _read(design, stage, name, env,
+                                                   "ctx")
+                    continue
+                if _clocking(name):
                     continue
                 own[name] = _read(design, stage, name, env)
             given = [{k: v[i] for k, v in own.items()}
@@ -190,8 +205,13 @@ def run_model(design, frames, ports, stimulus: Stimulus,
             run = _model(leaf["model"])(frames, given, stimulus, params,
                                         outputs=outputs)
             frames = list(run.frames)
-            env = [{f"{stage.path}.{k}": v for k, v in told.items()}
-                   for told in run.ports]
+            # a context goes on only with a stream that declares one
+            spec = next(p for p in leaf.get("outputs", [])
+                        if p["name"] == stage.stream_out)
+            dropped = () if "ctx" in spec.get("stream", ()) else \
+                (f"{stage.stream_out}_ctx",)
+            env = [{f"{stage.path}.{k}": v for k, v in told.items()
+                    if k not in dropped} for told in run.ports]
         else:
             frames, env = _pipeline(design, stage, frames, env)
     out_ports = [p for p in design.outputs if p != stream[1]]
@@ -202,23 +222,39 @@ def run_model(design, frames, ports, stimulus: Stimulus,
             driver = _driver(design, port)
             if driver in held:
                 row[port] = held[driver]
+        # the stream's own context, as it goes out
+        driver = _driver(design, stream[1])
+        if f"{driver}_ctx" in held:
+            row[f"{stream[1]}_ctx"] = held[f"{driver}_ctx"]
         told.append(row)
     return Run(frames, told)
 
 
 def _pipeline(design, stage: Stage, frames: list, env: list):
     """A composite of model blocks built whole, run as its chain: each
-    frame's context read from its `ctx_*` inputs; a stream that brings its
-    history run a frame of frames at a time."""
+    frame's context the fields its stream carries, and the context block's
+    registers, as they are from reset, for those it does not; a stream that
+    brings its history run a frame of frames at a time. The context handed
+    on is the core's: every field, the size the frame out's own."""
+    from np2hw.stream import pack_context, unpack_context
     sub = design.pipelines[stage.path]
     chain = chains.pixel_chain(sub)
     values, _ = chains.resolve_values(sub)
     form = compose.shape(sub)
     bits = form.spec.bit_depth
-    context = {}
-    for name in _signals(design, stage.path):
-        if name.startswith("ctx_"):
-            context[name[4:]] = _read(design, stage, name, env)
+    owner = compose.vocabulary(sub).block.name
+    registers = next(b for b in compose.register_map(sub)["blocks"]
+                     if b["path"] == owner)["registers"]
+    held = {r["name"]: r["default"] for r in registers}
+    carried = compose.carried_layout(sub)
+    words = (_read(design, stage, stage.stream_in, env, "ctx") if carried
+             else [0] * len(frames))
+    layout = compose.context_layout(sub)
+    brought = {name for name, _, _ in carried}
+    fields = [dict({name: held[name] for name, _, _ in layout
+                    if name not in brought},
+                   **unpack_context(carried, word)) for word in words]
+    context = {name: [f[name] for f in fields] for name, _, _ in layout}
     out = []
     if form.spec.frames:
         n = form.spec.frames
@@ -230,14 +266,14 @@ def _pipeline(design, stage: Stage, frames: list, env: list):
         made = chains.run_model(chain, np.stack(frames), values, context, bits)
         skipped = len(frames) - len(made)
         out, env = list(made), env[skipped:]
+        fields = fields[skipped:]
     else:
         for i, f in enumerate(frames):
             ctx = {k: v[i] for k, v in context.items()}
             out.append(chains.run_model(chain, f, values, ctx, bits))
-    handed = [dict(held, **{
-        f"{stage.path}.{stage.stream_out}_frame_width": f.shape[1],
-        f"{stage.path}.{stage.stream_out}_frame_height": f.shape[0]})
-        for held, f in zip(env, out)]
+    handed = [dict(held, **{f"{stage.path}.{stage.stream_out}_ctx": pack_context(
+        layout, dict(given, width=f.shape[1], height=f.shape[0]))})
+        for held, given, f in zip(env, fields, out)]
     return out, handed
 
 
@@ -282,6 +318,8 @@ def run_rtl(design, frames, ports, stimulus: Stimulus,
         sin, sout = stream
         side_in = sorted({k for p in ports for k in p})
         side_out = [p for p in design.outputs if p != sout and p in pins]
+        if f"{sout}_ctx" in pins:
+            side_out.append(f"{sout}_ctx")
         for name in side_in:
             if name not in pins:
                 raise ProofError(f"{top} has no input {name}")

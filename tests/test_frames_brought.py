@@ -50,34 +50,27 @@ def test_without_frames_brought_the_block_keeps_its_own(library):
 
 def test_a_design_sets_its_frame_store_from_the_frames_a_stream_brings(
         library):
-    """The store's depth and sample are the pipeline's input's facts, read
-    by the design, and its output -- the frames side by side -- is exactly
-    the word the pipeline takes."""
+    """The store's depth, sample and context are the pipeline's input's
+    facts, read by the design, and its output -- the frames side by side,
+    each frame's context beside them -- is exactly the stream the pipeline
+    takes."""
     def files(name):
         return {"pipes": _brought(2), "board": {"board": {
             "description": "a frame store feeding a pipeline",
-            "inputs": [{"name": n} for n in (
-                "clk", "rst", "in", "in_frame_width", "in_frame_height",
-                "in_ctx")],
+            "inputs": [{"name": n} for n in ("clk", "rst", "in")],
             "outputs": [{"name": n} for n in (
-                "out", "out_frame_width", "out_frame_height", "out_ctx",
-                "out_source", "cold", "overrun")],
+                "out", "out_source", "cold", "overrun")],
             "nodes": {
                 "store": {"block": "np2hw.hdl.frames:frame_store",
                           "build": {"FRAMES": "isp.in.frames",
                                     "BITS": "isp.in.bits",
+                                    "CTX_BITS": "isp.in.context_bits",
                                     "PIXELS": 32}},
                 "isp": {"block": f"{name}.pipes:brought"}},
             "connections": [
                 ["clk", "store.clk"], ["rst", "store.rst"],
                 ["in", "store.in"],
-                ["in_frame_width", "store.in_frame_width"],
-                ["in_frame_height", "store.in_frame_height"],
-                ["in_ctx", "store.in_ctx"],
                 ["store.out", "isp.in"], ["isp.out", "out"],
-                ["store.out_frame_width", "out_frame_width"],
-                ["store.out_frame_height", "out_frame_height"],
-                ["store.out_ctx", "out_ctx"],
                 ["store.out_source", "out_source"],
                 ["store.cold", "cold"], ["store.overrun", "overrun"]]}}}
     name = library(files)
@@ -87,6 +80,8 @@ def test_a_design_sets_its_frame_store_from_the_frames_a_stream_brings(
     # its implementation states over them
     assert store.leaf["block_parameters"]["FRAMES"] == 2
     assert (store.build["FRAMES"], store.build["BITS"]) == (2, 10)
+    # width, height and tick, as the vocabulary lays them out
+    assert store.build["CTX_BITS"] == 16 + 16 + 4
     assert ("store.out", "isp.in") in design.edges
 
 
@@ -112,7 +107,7 @@ def test_a_design_asks_whether_a_node_has_a_port(library):
             "nodes": {"store": {"block": "np2hw.hdl.frames:frame_store",
                                 "build": {"implementation": "impl",
                                           "FRAMES": 2, "BITS": 10,
-                                          "PIXELS": 32}}},
+                                          "CTX_BITS": 32, "PIXELS": 32}}},
             "connections": []}}}
     name = library(files)
     for impl, external in (("'bram'", False), ("'axi'", True)):

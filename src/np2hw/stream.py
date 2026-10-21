@@ -66,6 +66,10 @@ STREAM_SIGNALS = (
      "end of line: this beat is a row's last"),
     ("last", "LAST", 1, True, "optional",
      "end of frame: this beat is the frame's last"),
+    ("ctx", "CTX", "ctx", True, "optional",
+     "the frame's context, held with its first beat: the facts the port "
+     "declares -- its size, its count, what a block reads of each frame -- "
+     "packed in order, the first in the low bits"),
 )
 
 # The three that make a stream a stream. A prefix carrying these is one;
@@ -73,7 +77,32 @@ STREAM_SIGNALS = (
 STREAM_REQUIRED = tuple(s for s, _, _, _, p, _ in STREAM_SIGNALS
                         if p == "required")
 STREAM_FLAGS = tuple(s for s, _, _, _, p, _ in STREAM_SIGNALS
-                     if p == "optional")
+                     if p == "optional" and s != "ctx")
+
+
+def context_bits(layout) -> int:
+    """The width of a stream's CTX member: its fields', (name, bits,
+    follows) each."""
+    return sum(int(field[1]) for field in layout)
+
+
+def pack_context(layout, values: dict) -> int:
+    """A frame's context as the CTX member carries it: each field's value,
+    in the layout's order, the first in the low bits."""
+    word, lo = 0, 0
+    for name, bits, _ in layout:
+        word |= (int(values[name]) & ((1 << int(bits)) - 1)) << lo
+        lo += int(bits)
+    return word
+
+
+def unpack_context(layout, word: int) -> dict:
+    """The fields of a CTX word, by name."""
+    out, lo = {}, 0
+    for name, bits, _ in layout:
+        out[name] = (int(word) >> lo) & ((1 << int(bits)) - 1)
+        lo += int(bits)
+    return out
 
 
 # A bus interface named after an HDL reserved word is a critical warning
@@ -151,7 +180,7 @@ def stream_signal(suffix: str) -> tuple:
 
 
 def stream_pins(prefix: str, direction: str, data_bits, flags=(),
-                order=None, before=(), signed=False) -> list:
+                order=None, before=(), signed=False, ctx_bits=0) -> list:
     """The ports of one stream, each carrying its bundle attribute.
 
     `direction` is the stream's: ``"in"`` for a sink, ``"out"`` for a
@@ -159,8 +188,10 @@ def stream_pins(prefix: str, direction: str, data_bits, flags=(),
     drives it. `data_bits` is a width or an expression over the module's
     parameters; `flags` the optional signals this stream carries; `order`
     the order the declarations appear in, which is the module's own;
-    `before` the comment lines above the first of them."""
-    carried = ["valid", "ready", "data", *flags]
+    `before` the comment lines above the first of them; `ctx_bits` the
+    width of its CTX member, 0 for a stream that carries no context."""
+    carried = ["valid", "ready", "data", *flags,
+               *(["ctx"] if ctx_bits else [])]
     unknown = [f for f in flags if f not in ("sof", "eol", "last")]
     if unknown:
         raise KeyError(f"{prefix}: {unknown} are not stream flags")
@@ -173,7 +204,8 @@ def stream_pins(prefix: str, direction: str, data_bits, flags=(),
         _, _, width, from_source, *_ = stream_signal(suffix)
         out = (direction == "out") == from_source
         pins.append(Pin(f"{prefix}_{suffix}", "output" if out else "input",
-                        data_bits if suffix == "data" else 1,
+                        data_bits if suffix == "data" else
+                        ctx_bits if suffix == "ctx" else 1,
                         signed=signed and suffix == "data",
                         bus=(":".join(STREAM_RTL_VLNV), bundle_name(prefix),
                              stream_signal(suffix)[1]),

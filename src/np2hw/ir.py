@@ -83,6 +83,17 @@ class Image2D:
     # them -- so the reads across time are fields of the word, and the core
     # keeps no frames of its own.
     delivered: int = 0
+    # What each frame carries beside its pixels, in the stream's CTX member
+    # (np2hw.stream): (name, bits, follows) a field, packed in order, the
+    # first in the low bits. A core latches it with each frame's first beat
+    # -- its frame's size where a field follows the width or the height,
+    # the value a bound input reads where one is named -- and hands it on
+    # with the frame, the size its own. By default the frame's size alone.
+    context: tuple = (("width", 16, "width"), ("height", 16, "height"))
+
+    @property
+    def context_bits(self) -> int:
+        return sum(bits for _, bits, _ in self.context)
 
     @property
     def word_bits(self) -> int:

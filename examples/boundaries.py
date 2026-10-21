@@ -92,6 +92,15 @@ def _combinational_in_rtl(verilog, module):
             comb.append(sig)
             continue
         expr = " ".join(asg.group(1).split())
+        # a port driven by a named wire is driven by what the wire is
+        # defined as: follow the alias to its definition
+        for _ in range(8):
+            alias = re.fullmatch(r"\w+", expr) and re.search(
+                rf"^\s*wire\s*(?:\[[^\]]*\])?\s*{expr}\s*=\s*([^;]+);",
+                body, re.M)
+            if not alias:
+                break
+            expr = " ".join(alias.group(1).split())
         # Declarations live in BOTH parts: `output reg` is in the port
         # header, plain `reg` in the body, and a concat of registers
         # routinely mixes the two.

@@ -62,10 +62,13 @@
       ]
     },
     "frame_cdc": {
-      "description": "stream_cdc for a stream that carries its frame's size: each frame's width and height cross beside its samples, published from the moment the frame's first beat is presented until the next frame's is. A link reset must assert both sides; the pointer paths are constrained by np2hw's own file, scoped to the FIFO.",
+      "description": "stream_cdc for a stream that carries its frame's context, its CTX member: each frame's context crosses whole beside its samples, published from the moment the frame's first beat is presented until the next frame's is. A link reset must assert both sides; the pointer paths are constrained by np2hw's own file, scoped to the FIFO.",
       "parameters": {
         "DATA_BITS": {
           "description": "The stream's data width."
+        },
+        "CTX_BITS": {
+          "description": "The stream's context width: its CTX member's."
         },
         "A": {
           "default": 4,
@@ -89,19 +92,11 @@
           "stream": [
             "sof",
             "eol",
-            "last"
+            "last",
+            "ctx"
           ],
-          "width": "DATA_BITS"
-        },
-        {
-          "name": "in_frame_width",
-          "width": 16,
-          "description": "The width of the frame whose first beat is going in."
-        },
-        {
-          "name": "in_frame_height",
-          "width": 16,
-          "description": "Its height."
+          "width": "DATA_BITS",
+          "context_bits": "CTX_BITS"
         },
         {
           "name": "rclk"
@@ -117,19 +112,12 @@
           "stream": [
             "sof",
             "eol",
-            "last"
+            "last",
+            "ctx"
           ],
-          "width": "DATA_BITS"
-        },
-        {
-          "name": "out_frame_width",
-          "width": 16,
-          "description": "The width of the frame being presented: the next frame's from the moment its first beat is."
-        },
-        {
-          "name": "out_frame_height",
-          "width": 16,
-          "description": "Its height."
+          "width": "DATA_BITS",
+          "context_bits": "CTX_BITS",
+          "description": "The frames, each one's context presented from the moment its first beat is."
         }
       ],
       "vivado": {

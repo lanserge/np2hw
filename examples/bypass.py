@@ -54,8 +54,8 @@ def main():
     ports = core.interface if isinstance(core, Core) else {}
     typed = (isinstance(core, Core) and ports.get("output") is not None
              and [n for n, _ in core["registers"]] == ["enable"]
-             and [p[0] for p in ports.get("params", ())]
-             == ["enable", "frame_width", "frame_height"])
+             and [p[0] for p in ports.get("params", ())] == ["enable"]
+             and [f[0] for f in ports["input"]["ctx"]] == ["width", "height"])
     print(f"  generate() returns a Core with its interface   "
           f"{'PASS' if typed else 'FAIL'}")
     r.append(typed)

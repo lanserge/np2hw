@@ -45,7 +45,7 @@ module tb;
  reg[7:0] img[0:{nf*H*W-1}]; integer fr,r,c,k,fo;
  always #5 clk=~clk;
  gaxis dut(.aclk(clk),.aresetn(!rst),
-   .param_frame_width(16'd{W}),.param_frame_height(16'd{H}),
+   .param_width(16'd{W}),.param_height(16'd{H}),
    .s_axis_tvalid(tv),.s_axis_tready(tr),.s_axis_tdata(td),.s_axis_tuser(tu),.s_axis_tlast(1'b0),
    .m_axis_tvalid(mv),.m_axis_tready(mr),.m_axis_tdata(md),.m_axis_tuser(mu),.m_axis_tlast(ml));
  always @(posedge clk) if(mv&&mr) $fdisplay(fo,"%0d",md);

@@ -17,6 +17,7 @@ import pytest
 
 from np2hw import Image2D, coords, generate, to_ir
 from np2hw.ir import Param
+from np2hw.verilog import context_word
 
 pytestmark = pytest.mark.skipif(shutil.which("iverilog") is None,
                                 reason="needs iverilog")
@@ -57,6 +58,7 @@ module tb;
     {core["module"]} dut (
         .clk(clk), .rst(rst), .in_valid(in_valid), .in_ready(in_ready),
         .in_sof(in_sof), .in_data(in_data),
+        .in_ctx({context_word(core, values)}), .out_ctx(),
 {conns}        .out_valid(out_valid), .out_ready(out_ready), .out_sof(out_sof),
         .out_eol(out_eol), .out_last(out_last), .out_data(out_data));
     always @(posedge clk) if (out_valid && out_ready)

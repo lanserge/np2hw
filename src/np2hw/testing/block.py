@@ -129,18 +129,15 @@ async def bit_exact_against_model(dut):
         for name, value in values.items():
             getattr(dut, f"param_{name}").value = (
                 int(value) & ((1 << reg_bits[name]) - 1))
-        # Context reaches the datapath as the ports a bound input's
-        # expression reads -- one per signal, as the vocabulary declares it;
-        # the expression itself is inside the core.
-        for name in block.params.consumes:
-            if hasattr(dut, f"param_{name}"):
-                getattr(dut, f"param_{name}").value = (
-                    int(context.get(name, 0))
-                    & ((1 << block.signal(name).bits) - 1))
-        # the frame's own size, as a frame arriving states it: the core
-        # latches it as the frame's first pixel enters
-        dut.param_frame_width.value = width
-        dut.param_frame_height.value = height
+        # Each frame's context rides its stream: its own size, and the
+        # facts a bound input's expression reads, packed as the block's
+        # core carries them; the core latches it as the frame's first pixel
+        # enters, and the expression itself is inside the core.
+        from np2hw.stream import pack_context
+        layout = block.default_context()
+        dut.in_ctx.value = pack_context(layout, {
+            **{name: int(context.get(name, 0)) for name, _, _ in layout},
+            "width": width, "height": height})
         await RisingEdge(dut.clk)
 
         # Models speak channels ((h, w, c), the NumPy way); the wire speaks

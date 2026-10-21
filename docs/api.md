@@ -66,8 +66,8 @@ core = generate(module, module_name="np2hw_top", clk_ns=None, label=None,
 | `dev` | the device family the core is timed and built for (`np2hw.timing.Device`; 7-series by default) |
 | `sync_memory` | the promise a core bound for silicon makes: every memory reads through a register ([memories.md](memories.md)) |
 
-Every core takes each frame's size on its `frame_width`/`frame_height` register
-ports and hands its own on `out_frame_width`/`out_frame_height`
+Every core takes each frame's size in its stream's context, `in_ctx`, and hands
+its own on in `out_ctx`
 ([framing-and-resolution.md](framing-and-resolution.md)).
 
 Returns a `Core`. It is a `dict` subclass, so the detail keys np2hw's own
@@ -101,7 +101,7 @@ produces none, and therefore never stalls its source.
 
 The fixed modules -- `skid`, `cdc_fifo`, `stream_cdc` (a stream with its
 flags across clocks, on `cdc_fifo`), `frame_cdc` (the same, with each
-frame's size), `tee` -- are Verilog files, `np2hw/hdl/np2hw_skid.v`,
+frame's context, its `ctx` member), `tee` -- are Verilog files, `np2hw/hdl/np2hw_skid.v`,
 `np2hw_cdc_fifo.v`, `np2hw_stream_cdc.v`, `np2hw_frame_cdc.v`,
 `np2hw_tee.v`, read and reviewed as files: their structure never varies, only a width and a depth,
 which are module parameters set where they are instantiated. The

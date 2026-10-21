@@ -72,12 +72,14 @@ def axi(port: dict, data: int) -> tuple:
     return tuple(table)
 
 
-def expand(port: dict, side: str, width: int) -> dict[str, tuple[str, int]]:
+def expand(port: dict, side: str, width: int,
+           ctx_width: int | None = None) -> dict[str, tuple[str, int]]:
     """``{signal: (direction, width)}`` for one declared port.
 
     `side` is ``"inputs"`` or ``"outputs"``, where the port is declared:
     a stream under inputs is sunk, a bus under inputs is served. `width`
-    is the port's width already evaluated."""
+    is the port's width already evaluated, and `ctx_width` its context's
+    (``context_bits``), for a stream that carries one."""
     name = port["name"]
     sink = side == "inputs"
     if "stream" in port and "bus" in port:
@@ -90,7 +92,8 @@ def expand(port: dict, side: str, width: int) -> dict[str, tuple[str, int]]:
                 continue
             driven_here = from_source != sink
             out[f"{name}_{suffix}"] = ("output" if driven_here else "input",
-                                       width if w is None else w)
+                                       width if w is None else
+                                       ctx_width if w == "ctx" else w)
         return out
     if port.get("bus") == "pins":
         return {m["name"]: ("inout" if m.get("inout") else

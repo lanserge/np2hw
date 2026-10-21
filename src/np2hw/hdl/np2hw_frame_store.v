@@ -31,11 +31,12 @@
 // began on a frame already being overwritten: that frame out may hold rows
 // of two frames.
 //
-// WHAT EACH FRAME IS rides with it. A frame's size and its CTX_BITS of
-// context -- whatever the stream carries beside its pixels, a frame count,
-// a capture's place in a loop -- are latched as its first beat goes in, and
-// published with the frame of frames that is read out: the newest's, for
-// it is what the frame out is computed AT. `out_source` counts the frame
+// WHAT EACH FRAME IS rides with it. A frame's CTX_BITS of context -- the
+// stream's CTX member, whatever its facts, carried whole and never read --
+// is latched as its first beat goes in, and its size is the one its own
+// beats draw, its width up to the first eol and its rows up to its last:
+// both are published with the frame of frames that is read out, the
+// newest's, for it is what the frame out is computed AT. `out_source` counts the frame
 // out came from, the input's frames counted from reset, so a reader can
 // tell a repeat from a new one.
 //
@@ -75,8 +76,6 @@ module np2hw_frame_store #(
     input  wire                     in_sof,
     input  wire                     in_eol,
     input  wire                     in_last,
-    input  wire [15:0]              in_frame_width,
-    input  wire [15:0]              in_frame_height,
     input  wire [CTX_BITS-1:0]      in_ctx,
     // the newest FRAMES frames, as the consumer takes them: channel k is
     // the frame k before the newest
@@ -86,8 +85,6 @@ module np2hw_frame_store #(
     output wire                     out_sof,
     output wire                     out_eol,
     output wire                     out_last,
-    output wire [15:0]              out_frame_width,
-    output wire [15:0]              out_frame_height,
     output wire [CTX_BITS-1:0]      out_ctx,
     // status
     output wire [15:0]              out_source,
@@ -121,7 +118,15 @@ module np2hw_frame_store #(
     reg          writing = 1'b0;        // a frame begun, its last not yet in
     reg [15:0]   count = 16'd0;         // frames begun since reset
     reg [31:0]   last_size = 32'd0;     // the frame before's
+    reg [15:0]   in_x = 16'd0;          // the beat's place in its row
+    reg [15:0]   in_w = 16'd0;          // the frame's width, once a row ends
+    reg [15:0]   in_y = 16'd0;          // rows ended in the frame
     wire take = in_valid && in_ready;
+    // the frame's size as its last beat draws it: {rows, width}
+    wire [15:0] beat_x = in_sof ? 16'd0 : in_x;
+    wire [15:0] beat_y = in_sof ? 16'd0 : in_y;
+    wire [31:0] drawn = {beat_y + 16'd1,
+                         (!in_sof && in_y != 16'd0) ? in_w : beat_x + 16'd1};
     assign in_ready = wr_ready;
     assign wr_valid = in_valid;
     assign wr_data  = in_data;
@@ -161,32 +166,56 @@ module np2hw_frame_store #(
 
     // A history is one run of consecutive frames of one size: its EPOCH
     // tags every slot written in it, so a frame the binding finishes after
-    // a later one has started the history over is never counted in it.
+    // a later one has started the history over is never counted in it. A
+    // frame cut short starts it over as the next one begins; a frame of
+    // another size, as its own last beat shows it -- before the binding
+    // can say the frame is whole, which is a cycle after its last beat at
+    // the soonest -- and it is the new history's first.
     reg [7:0] epoch = 8'd0;
     reg [7:0] epoch_of [0:SLOTS-1];
     wire      begins = take && in_sof;
-    wire      restart = begins &&
-                        (writing || {in_frame_height, in_frame_width} != last_size);
+    wire      ends = take && in_last;
+    wire      cut = begins && writing;
+    wire      resized = ends && drawn != last_size;
+    wire      restart = cut || resized;
+    wire [7:0] epoch_next = epoch + (cut ? 8'd1 : 8'd0)
+                                  + (resized ? 8'd1 : 8'd0);
     wire      counts = wr_done && epoch_of[wr_done_slot] == epoch;
     always @(posedge clk) begin
         if (rst) begin
             next <= {SB{1'b0}}; wslot <= {SB{1'b0}}; writing <= 1'b0;
             count <= 16'd0; whole <= 8'd0; overrun <= 1'b0;
             last_size <= 32'd0; epoch <= epoch + 8'd1;
+            in_x <= 16'd0; in_w <= 16'd0; in_y <= 16'd0;
         end else begin
             if (begins) begin
                 if (read_holds(next)) overrun <= 1'b1;
-                last_size <= {in_frame_height, in_frame_width};
-                size_of[next] <= {in_frame_height, in_frame_width};
                 ctx_of[next] <= in_ctx;
                 num_of[next] <= count;
-                epoch_of[next] <= restart ? epoch + 8'd1 : epoch;
-                if (restart) epoch <= epoch + 8'd1;
                 count <= count + 16'd1;
                 wslot <= next;
                 next <= (next == SLOTS - 1) ? {SB{1'b0}} : next + 1'b1;
             end
-            if (take) writing <= !in_last;
+            // the slot the beat goes to is tagged with the epoch the beat
+            // leaves: the one it begins, or the one its frame's size starts
+            if (begins || resized)
+                epoch_of[wr_slot] <= epoch_next;
+            epoch <= epoch_next;
+            if (ends) begin
+                last_size <= drawn;
+                size_of[wr_slot] <= drawn;
+            end
+            if (take) begin
+                writing <= !in_last;
+                if (in_eol) begin
+                    in_x <= 16'd0;
+                    in_y <= beat_y + 16'd1;
+                    if (beat_y == 16'd0) in_w <= beat_x + 16'd1;
+                end else begin
+                    in_x <= beat_x + 16'd1;
+                    in_y <= beat_y;
+                end
+            end
             // a frame is whole once the binding says every beat of it is
             // where a read will find it, and counts if it is of this history
             if (restart) begin
@@ -238,8 +267,6 @@ module np2hw_frame_store #(
     assign out_sof   = x == 16'd0 && y == 16'd0;
     assign out_eol   = x == r_w - 1;
     assign out_last  = out_eol && y == r_h - 1;
-    assign out_frame_width  = r_w;
-    assign out_frame_height = r_h;
     assign out_ctx    = r_ctx;
     assign out_source = r_num;
 endmodule

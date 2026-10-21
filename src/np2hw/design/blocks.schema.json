@@ -560,10 +560,15 @@
               "enum": [
                 "sof",
                 "eol",
-                "last"
+                "last",
+                "ctx"
               ]
             },
-            "description": "This port is a stream carrying these flags."
+            "description": "This port is a stream carrying these flags, and with `ctx` its frame's context, context_bits wide."
+          },
+          "context_bits": {
+            "$ref": "#/$defs/value",
+            "description": "The width of a stream port's context (its `ctx` member): each frame's facts, packed, held with its first beat."
           },
           "bus": {
             "enum": [
