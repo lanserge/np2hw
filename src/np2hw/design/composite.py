@@ -435,6 +435,10 @@ class Design:
     # top input -> the facts of the stream entering it (bits, max_width,
     # max_height, context), from every input port it passes through on its
     # way in: stated once where it enters, inherited by what wraps it.
+    pipelines: dict = field(default_factory=dict)
+    # path -> the design of each composite of model blocks built whole
+    # inside this one, as its build made it: what a run of the models takes
+    # it as, with every setting its parents made
     hierarchy: dict = field(default_factory=dict)
     # composite path ("" the top) -> {"ref", "inputs", "outputs", "pins",
     # "children", "connections"}: each composite as it is written, its
@@ -773,9 +777,13 @@ class _Loader:
 
         def declared(pin):
             node = self.nodes[pin[0]]
-            port = next(p for p in node.found.obj.get("inputs", [])
-                        if p["name"] == pin[1])
             where = f"{node.found.ref}: input {pin[1]}"
+            port = next((p for p in node.found.obj.get("inputs", [])
+                         if p["name"] == pin[1]), None)
+            if port is None:
+                # a port its build publishes -- a clock, a register bus, a
+                # context input -- carries no stream entering
+                return {}, where
             facts = {}
             for fact in self.STREAM_FACTS:
                 if fact in port:
@@ -1122,6 +1130,9 @@ class _Loader:
             vocabulary=self.vocabulary,
         )
         design.streams = self.streams(self.forward)
+        design.pipelines = {path: self.elaborations[path][0]
+                            for path in self.opaque
+                            if path in self.elaborations}
         design.hierarchy = {
             path: {"ref": self.nodes[path].found.ref,
                    "inputs": [p["name"] for p in

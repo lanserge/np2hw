@@ -180,8 +180,9 @@ def draw(rng, outputs=14, overrun=False):
 
     def model(first, waits, n):
         stim = Stimulus(gaps, first, tuple(waits), stalls)
-        return stim, frame_store(frames, stim, PARAMS, outputs=n,
-                                 contexts=contexts)
+        run = frame_store(frames, [{"in_ctx": c} for c in contexts], stim,
+                          PARAMS, outputs=n)
+        return stim, (run, run.timeline)
 
     def clear(first, waits):
         """Whether the choice the last-drawn wait leads to -- the store
@@ -207,10 +208,10 @@ def draw(rng, outputs=14, overrun=False):
                 break
         else:
             raise AssertionError(f"no clear wait for frame out {i}")
-    stim, (out, t) = model(first, waits, outputs)
-    assert len(out) == outputs and not t.close(MARGIN)
+    stim, (run, t) = model(first, waits, outputs)
+    assert len(run.frames) == outputs and not t.close(MARGIN)
     assert overrun or not t.overrun
-    return frames, stim, out, t.overrun
+    return frames, stim, run, t.overrun
 
 
 def run_rtl(tmp_path, frames, stim, outputs):
@@ -242,16 +243,16 @@ def run_rtl(tmp_path, frames, stim, outputs):
 def test_the_verilog_puts_out_what_the_model_says(tmp_path, seed):
     rng = np.random.default_rng(seed)
     frames, stim, want, _ = draw(rng)
-    got, said = run_rtl(tmp_path, frames, stim, len(want))
+    got, said = run_rtl(tmp_path, frames, stim, len(want.frames))
     assert said == 0, "overrun where the model says none"
-    assert len(got) == len(want)
+    assert len(got) == len(want.frames)
     mask = (1 << BITS) - 1
-    for i, (g, w) in enumerate(zip(got, want)):
-        h, wd, _ = w.data.shape
-        assert g["head"] == (w.source, w.context, wd, h), \
-            f"frame out {i}: {g['head']} where the model says " \
-            f"{(w.source, w.context, wd, h)}"
-        flat = w.data.reshape(-1, DEPTH)
+    for i, (g, data, told) in enumerate(zip(got, want.frames, want.ports)):
+        head = (told["out_source"], told["out_ctx"],
+                told["out_frame_width"], told["out_frame_height"])
+        assert g["head"] == head, \
+            f"frame out {i}: {g['head']} where the model says {head}"
+        flat = data.reshape(-1, DEPTH)
         for b, word in enumerate(g["beats"]):
             assert [(word >> (k * BITS)) & mask for k in range(DEPTH)] == \
                 [int(v) for v in flat[b]], f"frame out {i}, beat {b}"
@@ -264,5 +265,5 @@ def test_the_verilog_says_overrun_where_the_model_does(tmp_path, seed):
     sticky `overrun` as the model predicts it, either way."""
     rng = np.random.default_rng(100 + seed)
     frames, stim, want, predicted = draw(rng, overrun=True)
-    _, said = run_rtl(tmp_path, frames, stim, len(want))
+    _, said = run_rtl(tmp_path, frames, stim, len(want.frames))
     assert said == int(predicted)

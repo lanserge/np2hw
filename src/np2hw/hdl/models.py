@@ -8,9 +8,17 @@ These are those models. Most fixed modules pass data through unchanged and
 need none beyond the identity; this file holds the ones whose output is not
 their input.
 
-A module's library description names its model (``"model"``), and the
-model takes the module's parameters by the names the description gives
-them, the same values its Verilog is built with: one statement of each.
+A module's library description names its model (``"model"``), and every
+model has one signature::
+
+    model(frames, ports, stimulus, params, outputs=None) -> LeafRun
+
+``frames`` are the stream's frames in, in order; ``ports`` the values of the
+module's other input ports, one dict per frame by the port names the
+description gives (a frame's size, its context); ``params`` the node's
+parameters, by the description's names -- the same values its Verilog is
+built with, one statement of each. A :class:`LeafRun` is the frames out and,
+for each, the values of the module's other output ports.
 
 A model is driven with the SAME stimulus as the Verilog: the frames, and
 where a module's output depends on when things happen, the timing -- when
@@ -82,40 +90,34 @@ class Timeline:
 
 
 @dataclass(frozen=True)
-class FrameOut:
-    """One frame the store put out: the input frame it was computed at, and
-    the frames side by side, newest in channel 0."""
-    source: int
-    data: np.ndarray                    # (h, w, frames)
-    context: object
+class LeafRun:
+    """What a leaf's model computes: the frames it puts out and, for each,
+    the values of its other output ports by name; a timed leaf's events in
+    ``timeline``, for a stimulus generator to check for ties."""
+    frames: list
+    ports: list
+    timeline: Timeline | None = None
 
 
-def frame_store(frames, stimulus: Stimulus, params: dict, contexts=None,
-                outputs: int | None = None):
+def frame_store(frames, ports, stimulus: Stimulus, params: dict,
+                outputs: int | None = None) -> LeafRun:
     """np2hw.hdl.frames:frame_store: the newest FRAMES whole frames, side by
     side, at the moment each output frame is chosen, from a ring of SLOTS.
 
-    Args:
-        frames: the input frames in order, each ``(h, w)``; a frame of
-            another size than the one before starts the history over.
-        stimulus: when they arrive and when the consumer takes the output.
-        params: the node's parameters, by the description's names: FRAMES
-            and SLOTS are read.
-        contexts: what rides with each input frame; each output frame
-            carries its source's.
-        outputs: how many output frames to compute; by default as many as
-            the stimulus has waits for.
-
-    Returns:
-        ``(outputs, timeline)``: each :class:`FrameOut` in order, and the
-        events, for a stimulus generator to check for ties. Where the
-        source reached a frame being read -- the store's `overrun` --
-        ``timeline.overrun`` says so, and the frames out from then on are
-        not what the hardware puts out: their samples may be of two frames.
+    The frames in are each ``(h, w)``; a frame of another size than the one
+    before starts the history over. Each frame out is ``(h, w, FRAMES)``,
+    the frame k before the newest in channel k, and carries the newest's
+    ``in_ctx`` as ``out_ctx``, its size, and its number as ``out_source``.
+    ``outputs`` is how many frames out to compute: by default as many as the
+    stimulus takes. Where the source reached a frame being read,
+    ``overrun`` is set from that frame out on, and ``timeline.overrun``
+    says so: the frames out from then on are not what the hardware puts
+    out, for their samples may be of two frames.
     """
     depth, slots = int(params["FRAMES"]), int(params["SLOTS"])
     frames = [np.asarray(f) for f in frames]
-    contexts = list(contexts) if contexts is not None else [None] * len(frames)
+    contexts = [p.get("in_ctx") for p in ports] if ports else \
+        [None] * len(frames)
     t = Timeline()
     # the input side: every frame's last beat, and the history it belongs to
     end, epoch, epochs, size = -1, -1, [], None
@@ -147,7 +149,7 @@ def frame_store(frames, stimulus: Stimulus, params: dict, contexts=None,
                 return c
         return None
 
-    out = []
+    out, told = [], []
     count = outputs if outputs is not None else len(stimulus.waits) + 1
     previous_end = None
     for i in range(count):
@@ -176,7 +178,9 @@ def frame_store(frames, stimulus: Stimulus, params: dict, contexts=None,
         if any(chosen <= st <= ended and m % slots in held
                for m, st in enumerate(t.started) if m > n):
             t.overrun = True
-        data = np.stack([frames[n - k] for k in range(depth)], axis=-1)
-        out.append(FrameOut(source=n, data=data, context=contexts[n]))
+        out.append(np.stack([frames[n - k] for k in range(depth)], axis=-1))
+        told.append({"out_ctx": contexts[n], "out_frame_width": w,
+                     "out_frame_height": h, "out_source": n, "cold": 0,
+                     "overrun": int(t.overrun)})
         previous_end = ended
-    return out, t
+    return LeafRun(out, told, t)

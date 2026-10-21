@@ -11,6 +11,19 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **A design holding modelled leaves is proved from its models**
+  (`np2hw.pipeline.proof`). The stream is followed from the design's input
+  to its output: each composite of model blocks built whole runs its
+  chain, each leaf its model, and what rides beside the frames -- sizes,
+  context -- is followed net by net. One stimulus drives the models and the
+  design's own Verilog under Verilator: the frames, the input's gaps, the
+  consumer's waits and stalls, every register at its reset value. A leaf
+  with no model, and a value read around a stage that chose which frames
+  go on, are refused by name. Every leaf model has one signature: frames
+  and their ports in, frames and their ports out (`LeafRun`); **the frame
+  store's model moved to it**.
+- **A loaded design keeps each pipeline it built whole**
+  (`Design.pipelines`), as its build made it.
 - **A stream may bring its history.** An input port's `frames` says the
   stream entering carries that many frames side by side -- a frame store
   upstream keeps them -- and a block reading the stream's history then
