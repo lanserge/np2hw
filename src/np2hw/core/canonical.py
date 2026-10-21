@@ -171,10 +171,14 @@ class _Rebuild:
 # --------------------------------------------------------------------------- #
 
 def _key(g, v: Value):
-    """(key, size) when `v` is a remainder key -- an index mod k -- else None."""
+    """(key, size) when `v` is a remainder key -- a POSITION mod k -- else
+    None. A register's remainder is no position: the same at every pixel,
+    a select on it is a select, not a lattice."""
     n = v.node
-    if n.kind == "model.mod" and affine(g, n.operands[0]) is not None:
-        return v, n.attr("divisor")
+    if n.kind == "model.mod":
+        form = affine(g, n.operands[0])
+        if form is not None and form.terms:
+            return v, n.attr("divisor")
     return None
 
 

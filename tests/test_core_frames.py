@@ -246,3 +246,41 @@ def test_a_video_at_a_frame_smaller_than_it_was_traced_at(tmp_path):
     core = _compile(average, name="average_small")
     video = _video(6)[:, :3, :4]
     assert _sim(tmp_path, core, video, seed=13) == _beats(average(video))
+
+
+# --------------------------------------------------------------------------- #
+# a frame chosen by a register: comparisons on a register are hardware
+# --------------------------------------------------------------------------- #
+
+def by_equality(video, pos):
+    """The live frame where the place is 1, the one before elsewhere:
+    `pos == 1` is a comparator while traced, not Python's identity."""
+    v = video.astype(np.int32)
+    return np.where(pos == 1, v[1:], v[:-1]).astype(np.uint16)
+
+
+def by_parity(video, pos):
+    """The same choice by the place's low bit: a register's remainder is a
+    value the same at every pixel, not a position's lattice."""
+    v = video.astype(np.int32)
+    return np.where((pos & 1) == 1, v[1:], v[:-1]).astype(np.uint16)
+
+
+@pytest.mark.parametrize("model", [by_equality, by_parity],
+                         ids=["equality", "parity"])
+def test_a_frame_chosen_by_a_register_compare(tmp_path, model):
+    core = _compile(model, (POS,), name=model.__name__)
+    places = [1, 2, 3, 1, 0, 1, 2]
+    video = _video(8)
+    want = [model(video[n - 1:n + 1], places[n])[0]
+            for n in range(1, FRAMES)]
+    got = _sim(tmp_path, core, video, seed=17,
+               values=[{"pos": p} for p in places])
+    assert got == _beats(np.array(want))
+    assert len({model(video[:2], p).tobytes() for p in range(4)}) == 2
+
+
+def test_a_register_outside_a_trace_is_equal_only_to_itself():
+    other = Param("pos", bits=2)
+    assert POS == POS and POS != other and not (POS == 1)
+    assert len({POS, other}) == 2

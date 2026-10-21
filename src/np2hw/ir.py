@@ -176,6 +176,35 @@ class Param:
         v = self._traced()
         return NotImplemented if v is None else -v
 
+    # Compared while a model is traced, a register is a value like any
+    # other, `p.pos == 1` a comparator. Outside a trace a Param is a
+    # declaration, equal only to itself -- and hashed as one.
+    def __eq__(self, other):
+        v = self._traced()
+        return (self is other) if v is None else v == other
+
+    def __ne__(self, other):
+        v = self._traced()
+        return (self is not other) if v is None else v != other
+
+    def __lt__(self, other):
+        v = self._traced()
+        return NotImplemented if v is None else v < other
+
+    def __le__(self, other):
+        v = self._traced()
+        return NotImplemented if v is None else v <= other
+
+    def __gt__(self, other):
+        v = self._traced()
+        return NotImplemented if v is None else v > other
+
+    def __ge__(self, other):
+        v = self._traced()
+        return NotImplemented if v is None else v >= other
+
+    __hash__ = object.__hash__
+
     def __xor__(self, other):
         if other in (0, 1):
             return PhaseRef(self, bool(other))
