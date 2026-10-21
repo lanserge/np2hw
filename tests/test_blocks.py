@@ -242,3 +242,49 @@ def test_the_schedule_times_a_shift_as_the_printer_builds_it():
     assert "hw.mul" not in minus and _cost(minus["hw.neg"], dev) == \
         dev.add(minus["hw.neg"].value.type.bits)
     assert _cost(three["hw.mul"], dev) == dev.mul()
+
+
+@block(version=(1, 0), description="a sample's signed bits, offset",
+       inputs=(StreamPort("in"),), outputs=(StreamPort("out"),), params=[])
+def signed11(pixel, p, bit_depth):
+    """Eleven bits of two's complement in a 12-bit word, read as signed by
+    moving the sign to the top of an int16 and viewing it so -- then offset
+    back to unsigned for the stream out."""
+    s = (pixel << 5).view(np.int16) >> 1
+    return (s + 16384).astype(np.uint16)
+
+
+def test_a_view_reads_the_same_bits_as_another_integer_of_their_width():
+    """NumPy is the oracle: the bit above the sample is shifted out of the
+    container, and bit 10 lands as int16's sign."""
+    words = np.array([[0, 1, 1023, 1024, 2047, 2048 + 5]])
+    out = signed11.run(words, {}, bit_depth=12)
+    assert out.tolist() == [[16384, 16400, 32752, 0, 16368, 16464]]
+
+
+def test_a_view_to_another_width_is_refused():
+    @block(version=(1, 0), description="a view that changes width",
+           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),), params=[])
+    def narrow(pixel, p, bit_depth):
+        return pixel.view(np.int8).astype(np.uint8)
+
+    with pytest.raises(Exception, match="of its own width"):
+        narrow.generate(StreamSpec(bit_depth=12), 8, 4, "narrow")
+
+
+@pytest.mark.skipif(__import__("shutil").which("verilator") is None,
+                    reason="verilator not on PATH")
+def test_the_rtl_reads_a_view_and_a_left_shift_as_numpy_does():
+    """Every 12-bit word, bit 11 set and clear: the shift drops it in the
+    RTL exactly as in the model, and the view's sign is the RTL's."""
+    from np2hw.design.composite import assemble
+    from np2hw.pipeline import run as runner
+    design = assemble("t", {"s": signed11}, [("in", "s.in"), ("s.out", "out")],
+                      vocabulary=TOY,
+                      stream={"bits": 12, "max_width": 64, "max_height": 64})
+    chain = runner.pixel_chain(design, "in", None)
+    frame = np.arange(4096).reshape(64, 64)
+    values = {"s": {}, "ctxblock": {}}
+    model = runner.run_model(chain, frame, values, {}, 12)
+    rtl = runner.run_rtl(chain, frame, values, {}, 12)
+    assert np.array_equal(model, rtl)

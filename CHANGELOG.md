@@ -11,6 +11,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **A model reads a value's bits as another integer, and shifts left, as
+  NumPy does.** `x.view(np.int16)` on a 16-bit unsigned value is the same
+  bits read signed -- the container's wrap, which np2hw already models --
+  and is refused for a dtype of another width; `x << k` is a multiply by
+  `2**k` in the value's own container, so the bits shifted past it are
+  gone, exactly as in NumPy. Both are wires in the hardware. A sensor's
+  signed sample in a wider word is then the model's own statement --
+  `(pixel << 5).view(np.int16) >> 1` for eleven bits of two's complement in
+  twelve -- not a conversion upstream.
 - **Scalar inputs bound to expressions.** A design binds a block's scalar
   input under a node's `bind` (`{"quad.pos": "frame_seq & 3"}`), and
   `Block.bind()` does the same in Python. The input leaves the block's

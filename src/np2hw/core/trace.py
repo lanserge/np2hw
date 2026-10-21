@@ -163,11 +163,30 @@ class Array:
     def __mod__(self, o): return self._by_constant("model.mod", o, "divisor")
     def __rshift__(self, o): return self._by_constant("model.shr", o, "amount")
 
+    def __lshift__(self, o):
+        # a multiply by a power of two, in the value's own container, as
+        # NumPy shifts: the bits shifted past it are gone
+        if isinstance(o, (int, np.integer)) and not isinstance(o, bool) \
+                and o >= 0:
+            return self._binary("model.mul", 1 << int(o))
+        return NotImplemented
+
     def clip(self, lo, hi):
         return self._op("model.clip", self.v, lo=int(lo), hi=int(hi))
 
     def astype(self, dtype):
         return self._op("model.astype", self.v, container=_container_of(dtype))
+
+    def view(self, dtype):
+        """The same bits read as another integer of their width: the value's
+        container wrapped to that one, which is what a view of the same
+        size does. Hardware: wires."""
+        have, want = self.v.type.container, _container_of(dtype)
+        if have[0] not in "ui" or want[0] not in "ui" or have[1] != want[1]:
+            raise Unsupported(f"a view of a {have} value as {np.dtype(dtype)}"
+                              ": np2hw views an integer as another of its "
+                              "own width")
+        return self.astype(dtype)
 
     def __int__(self):
         raise Unsupported("a traced value used as a Python int")
