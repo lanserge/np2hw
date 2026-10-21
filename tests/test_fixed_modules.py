@@ -46,9 +46,9 @@ def _modules(found):
     obj = found.obj
     if "implementations" not in obj:
         return [(found.ref, found, obj["vivado"]["module"], obj["sources"],
-                 {})]
+                 {}, None)]
     return [(f"{found.ref}[{name}]", found, impl["vivado"]["module"],
-             impl["sources"], impl.get("ports", {}))
+             impl["sources"], impl.get("ports", {}), name)
             for name, impl in obj["implementations"].items()
             if "module" in impl.get("vivado", {})]
 
@@ -61,6 +61,10 @@ def _declared(obj, values):
     want = {}
     for side in ("inputs", "outputs"):
         for port in obj.get(side, []):
+            if "when" in port and not composite.evaluate(
+                    composite.parse(port["when"], port["name"]),
+                    lambda n: values[n]):
+                continue
             raw = port.get("width", 1)
             width = raw if isinstance(raw, int) else composite.evaluate(
                 composite.parse(raw, port["name"]), lambda n: values[n])
@@ -74,10 +78,10 @@ def test_every_library_describes_something():
 
 @pytest.mark.skipif(shutil.which("verilator") is None,
                     reason="verilator not on PATH")
-@pytest.mark.parametrize("ref, found, module, files, renames", MODULES,
-                         ids=[m[0] for m in MODULES])
-def test_a_fixed_module_has_exactly_the_ports_it_declares(ref, found, module,
-                                                          files, renames):
+@pytest.mark.parametrize("ref, found, module, files, renames, implementation",
+                         MODULES, ids=[m[0] for m in MODULES])
+def test_a_fixed_module_has_exactly_the_ports_it_declares(
+        ref, found, module, files, renames, implementation):
     obj = found.obj
     declared = {k: v for k, v in obj.get("parameters", {}).items()
                 if k != "implementation"}
@@ -85,7 +89,8 @@ def test_a_fixed_module_has_exactly_the_ports_it_declares(ref, found, module,
     sources = [composite.source_file(found.folder, f) for f in files]
     got = elaborated_ports(sources, module, params)
     want = _declared(obj, {**{k: v.get("default") for k, v in
-                              declared.items()}, **params})
+                              declared.items()}, **params,
+                           "implementation": implementation})
     for block_port, own in renames.items():
         for name in [n for n in want if n == block_port or
                      n.startswith(block_port + "_")]:

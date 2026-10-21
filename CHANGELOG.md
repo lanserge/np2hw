@@ -11,6 +11,14 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **The frame store keeps its frames in external memory**
+  (`implementation: "axi"`): an AXI4 master, its port `mem`, slots from
+  `BASE` a frame apart rounded up to 4K. A frame is whole once its writes
+  are answered, bursts never cross a frame's end or a page, and each frame
+  read is fetched ahead into a queue of its own only as far as the queue
+  has room, so a read is never paused. Bursts are sixteen beats at most, as
+  a Zynq's AXI3 ports take them. It is held to the store's one model, under
+  a memory that answers late and lands a write only when it answers it.
 - **A design holding modelled leaves is proved from its models**
   (`np2hw.pipeline.proof`). The stream is followed from the design's input
   to its output: each composite of model blocks built whole runs its

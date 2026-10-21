@@ -8,7 +8,8 @@
         "FRAMES": {"description": "Frames delivered together: how far back the consumer reads."},
         "SLOTS": {"default": 16, "description": "Frames kept, FRAMES and the slack: the frames a source may begin, past the newest whole one, while a frame of frames is read."},
         "CTX_BITS": {"default": 32, "description": "The context carried with each frame: whatever rides beside its pixels."},
-        "PIXELS": {"description": "The largest frame kept, in samples."}
+        "PIXELS": {"description": "The largest frame kept, in samples."},
+        "BASE": {"default": 0, "description": "Where the first slot starts in external memory, the slots a frame's samples apart rounded up to 4K: a region the design keeps for the store alone."}
       },
       "inputs": [
         {"name": "clk"},
@@ -25,7 +26,10 @@
         {"name": "out_ctx", "width": "CTX_BITS", "description": "The newest's context."},
         {"name": "out_source", "width": 16, "description": "Which input frame the frames out are computed at, counted from reset: a repeat shows as the same number."},
         {"name": "cold", "description": "Fewer than FRAMES frames of one history are whole: nothing goes out."},
-        {"name": "overrun", "description": "Sticky until reset: the source reached a frame being read."}
+        {"name": "overrun", "description": "Sticky until reset: the source reached a frame being read."},
+        {"name": "mem", "bus": "axi4", "width": 64, "when": "implementation == 'axi'",
+         "omit": ["awid", "awlock", "awqos", "arid", "arlock", "arqos", "bid", "rid"],
+         "description": "The external memory the frames live in: bursts of sixteen beats at most, one ID, every burst inside one 4K page."}
       ],
       "model": "np2hw.hdl.models:frame_store",
       "implementations": {
@@ -38,6 +42,16 @@
                       "np2hw.hdl:np2hw_frame_store.v",
                       "np2hw.hdl:np2hw_frame_mem_bram.v"],
           "facts": {"latency": 4}
+        },
+        "axi": {
+          "description": "The frames in external memory over AXI4, from BASE: a frame is whole once its writes are answered, and each frame read is fetched ahead into a queue of its own.",
+          "vivado": {"module": "np2hw_frame_store_axi"},
+          "config": {"BITS": "BITS", "FRAMES": "FRAMES", "SLOTS": "SLOTS",
+                     "CTX_BITS": "CTX_BITS", "PIXELS": "PIXELS", "BASE": "BASE"},
+          "sources": ["np2hw.hdl:np2hw_frame_store_axi.v",
+                      "np2hw.hdl:np2hw_frame_store.v",
+                      "np2hw.hdl:np2hw_frame_mem_axi.v"],
+          "facts": {"latency": 400}
         }
       }
     }
