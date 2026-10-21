@@ -146,3 +146,40 @@ def test_a_chain_runs_a_run_of_frames_through_its_twin():
     still = run_model(chain, video, values, {"tick": 1}, 8)
     assert (still != model).any(), "the ticks changed nothing: no test"
 
+
+@block(version=(1, 0), description="deep arithmetic, then the place added",
+       inputs=(StreamPort("in", history=True),),
+       outputs=(StreamPort("out"),),
+       params=[Param("pos", bits=4, description="the live frame's place")])
+def late(video, p, bit_depth):
+    v = video.astype(np.int64)
+    x = v[1:] * 3 + v[:-1]
+    for _ in range(5):
+        x = (x * x + 7) & 65535
+    return ((x + p.pos) & 255).astype(np.uint16)
+
+
+@requires_verilator
+def test_a_frames_context_stays_with_the_frame_through_the_stages():
+    """A bound input read deep in a core cut into stages: the frames sent
+    back to back, each one's tick set as it starts, while the frame before
+    is still inside. Every pixel takes its own frame's tick -- the core
+    holds it from the frame's first pixel and carries it with the beats."""
+    from np2hw.design.composite import assemble
+    from np2hw.pipeline.run import pixel_chain, run_model, run_rtl
+
+    design = assemble(
+        "t", {"l": late.bind({"pos": "tick"}, VOCABULARY)},
+        [("in", "l.in"), ("l.out", "out")], vocabulary=VOCABULARY,
+        stream={"bits": 8, "max_width": 16, "max_height": 8,
+                "context": ["tick"]})
+    chain = pixel_chain(design)
+    video = np.random.default_rng(2).integers(0, 256, (6, 8, 16))
+    ticks = [1, 4, 9, 2, 15, 7]
+    model = run_model(chain, video, {"l": {}}, {"tick": ticks}, 8)
+    rtl = run_rtl(chain, video, {"l": {}}, {"tick": ticks}, 8, clk_ns=5.0)
+    np.testing.assert_array_equal(rtl, model)
+    built = late.bind({"pos": "tick"}, VOCABULARY).generate(
+        StreamSpec(bit_depth=8, channels=1), 16, 8, module_name="late",
+        clk_ns=5.0)
+    assert built.core["pipeline_stages"] > 2, "one stage: nothing in flight"

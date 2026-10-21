@@ -156,6 +156,8 @@ for _k in (
     Kind("hw.port", _P, 0, _port),
     Kind("hw.const", frozenset({PURE, CONSTANT}), 0, _const),
     Kind("hw.param", frozenset({PURE, READS_REGISTER}), 0, _param),
+    # a value its frame brings, before control holds it (lower._frame_values)
+    Kind("hw.frameparam", frozenset({PURE, READS_REGISTER}), 0, _param),
     Kind("hw.add", frozenset({PURE, COMMUTATIVE}), 2,
          _bin(lambda x, y: (x.lo + y.lo, x.hi + y.hi))),
     Kind("hw.sub", _P, 2, _bin(lambda x, y: (x.lo - y.hi, x.hi - y.lo))),

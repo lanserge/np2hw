@@ -89,8 +89,14 @@ class Param:
     `kernel_i_j`. The IR only ever sees scalar Params -- the matrix is just a
     naming/collection convenience at the front end."""
     def __init__(self, name, dtype=None, *, bits=8, signed=False, shape=(),
-                 default=0, description="", labels=()):
+                 default=0, description="", labels=(), frame=False):
         self.name = name
+        # A value each FRAME brings -- the frame's own context, set as it
+        # starts -- rather than one software holds steady across frames. A
+        # core takes it with the frame's first pixel and carries it with the
+        # frame through its stages, so the frame before, still inside, keeps
+        # its own.
+        self.frame = bool(frame)
         # Carried into the generated Verilog as the port's comment. A register
         # whose meaning is only in the Python is a register the person reviewing
         # the RTL has to guess at.

@@ -105,7 +105,7 @@ def control_ns(mod: CoreModule, dev) -> tuple:
 def _cost(n, dev):
     from ..timing import Depth
     k = n.kind
-    if k in ("hw.port", "hw.const", "hw.param", "hw.regread",
+    if k in ("hw.port", "hw.const", "hw.param", "hw.frameparam", "hw.regread",
              "hw.shr", "hw.shl", "hw.wrap", "hw.bits", "hw.cat", "hw.not",
              "hw.read"):
         return dev.wire()

@@ -261,6 +261,10 @@ def rewrite(c: Canonical, dev=None):
                 params.setdefault(p.name, ((p.name, 0), (
                     p.name, p.bits, bool(p.signed), p.default,
                     p.description)))
+                if getattr(p, "frame", False):
+                    # the frame's own value: held and carried (_frame_values)
+                    return g.op("hw.frameparam", name=p.name, bits=p.bits,
+                                signed=bool(p.signed))
                 return g.op("hw.param", name=p.name, bits=p.bits,
                             signed=bool(p.signed))
             if k == "model.mul":
@@ -513,6 +517,41 @@ def _substitute(g: Graph, roots: dict, fn) -> dict:
     return {k: go(v) for k, v in roots.items()}
 
 
+def _frame_values(g, unit, reg_symbol, SEL, load):
+    """A substitution for each value a frame brings (``Param(frame=True)``):
+    its port as the frame's first pixel is taken, and the copy held from
+    then on, loaded with it -- so a core further down the chain takes the
+    value its frame entered with, though the source has moved on to the
+    next. Read at the first stage, it is pinned there, and the stages carry
+    it with the frame's own beats: the frame before, still inside, keeps
+    its own."""
+    made: dict = {}
+
+    def substitute(n):
+        if n.kind != "hw.frameparam":
+            return None
+        name, bits, signed = n.attr("name"), n.attr("bits"), n.attr("signed")
+        if name not in made:
+            port = g.op("hw.param", name=name, bits=bits, signed=signed)
+            held = reg_symbol(f"frame_{name}", port.type.lo, port.type.hi, 0)
+            unit.regs.append(g.node("hw.reg", [port, load],
+                                    {"name": f"frame_{name}"}))
+            made[name] = SEL(load, port, held)
+        return made[name]
+    return substitute
+
+
+def _either(*fns):
+    """The first of several substitutions that maps a node."""
+    def substitute(n):
+        for fn in fns:
+            new = fn(n)
+            if new is not None:
+                return new
+        return None
+    return substitute
+
+
 def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
                      in_sof, out_ready) -> Unit:
     """The control of a core with windows (docs/one-graph.md, the window
@@ -742,8 +781,9 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
                         lo=0, width=w)
         return None
 
-    roots = _substitute(g, unit.roots, substitute)
     load = _size_load(g, unit, reg_symbol, AND(go, anchor))
+    roots = _substitute(g, unit.roots, _either(
+        substitute, _frame_values(g, unit, reg_symbol, SEL, load)))
     unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
                   **_handed(g, unit, reg_symbol, handed, load,
                             {"rows": H, "cols": W})}
@@ -994,9 +1034,10 @@ def control() -> Pass:
             w = max(1, (n.attr("count") - 1).bit_length())
             return g.op("hw.bits", epos[n.attr("var")], lo=0, width=w)
 
-        roots = _substitute(g, unit.roots, position)
-        img = unit.facts["image"]
         load = _size_load(g, unit, reg_symbol, AND(go, in_sof))
+        roots = _substitute(g, unit.roots, _either(
+            position, _frame_values(g, unit, reg_symbol, SEL, load)))
+        img = unit.facts["image"]
         unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
                       **_handed(g, unit, reg_symbol, handed,
                                 load,

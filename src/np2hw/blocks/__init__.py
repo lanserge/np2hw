@@ -669,9 +669,12 @@ class Block:
         # What the bindings read, one port each: the context signal as its
         # vocabulary declares it.
         facts = list(dict.fromkeys(f for b in self.bindings for f in b.facts))
+        # Each frame brings its own: the core takes it with the frame and
+        # carries it with the frame's beats (np2hw.ir.Param's frame).
         read = [Np2hwParam(f, bits=self.signal(f).bits,
                            signed=self.signal(f).signed,
-                           description=self.signal(f).description)
+                           description=self.signal(f).description,
+                           frame=True)
                 for f in facts]
 
         def traced(pixel, *traced_args):
