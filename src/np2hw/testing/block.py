@@ -53,6 +53,22 @@ def _diagnose(block, case, trial, i, got, want, frame):
     return "; ".join(parts)
 
 
+def _model_frame(case, trial):
+    """A trial's frame as the model takes it. Models speak channels ((h, w,
+    c), the NumPy way); the wire speaks words, and the packing law's owner
+    translates. The case states the channel count of the words it packed,
+    right next to the spec the DUT was generated with -- one writer, both
+    facts."""
+    frame = np.array(trial["frame"], dtype=object).reshape(case["height"],
+                                                           case["width"])
+    in_channels = case.get("in_channels", 1)
+    if in_channels == 1:
+        return frame
+    spec_in = StreamSpec(bit_depth=case["bit_depth"], channels=in_channels)
+    return np.array([[spec_in.unpack(int(word)) for word in row]
+                     for row in frame], dtype=np.int64)
+
+
 @cocotb.test()
 async def bit_exact_against_model(dut):
     """The generated Verilog must produce EXACTLY what the NumPy model produces.
@@ -74,6 +90,26 @@ async def bit_exact_against_model(dut):
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_stream(dut)
+
+    # A block reading the stream's history takes the trials as ONE run of
+    # frames, each trial the next: the model runs over the run, a bound
+    # input's context one value a frame, and the frames the history is
+    # still filling are owed no output at all.
+    history = block.inputs[0].history
+    expected_run = lag = None
+    if history:
+        trials = case["trials"]
+        values0 = trials[0].get("values", {})
+        if any(t.get("values", {}) != values0 for t in trials):
+            raise AssertionError("a history run sets its registers once: "
+                                 "every trial's values must be the same")
+        names = {n for t in trials for n in t.get("context", {})}
+        run_context = {n: [int(t.get("context", {}).get(n, 0))
+                           for t in trials] for n in names}
+        video = np.stack([_model_frame(case, t) for t in trials])
+        expected_run = block.run(video, values0, bit_depth=bit_depth,
+                                 **run_context)
+        lag = len(trials) - len(expected_run)
 
     for trial_number, trial in enumerate(case["trials"]):
         rnd = random.Random(trial["seed"])
@@ -102,18 +138,13 @@ async def bit_exact_against_model(dut):
 
         # Models speak channels ((h, w, c), the NumPy way); the wire speaks
         # words. The packing law's owner translates at BOTH boundaries.
-        model_in = frame
-        # The case states the channel count of the words it packed, right
-        # next to the spec the DUT was generated with -- one writer, both
-        # facts. There is no declaration to consult: streams carry whatever
-        # the upstream math packed.
-        in_channels = case.get("in_channels", 1)
-        if in_channels > 1:
-            spec_in = StreamSpec(bit_depth=bit_depth, channels=in_channels)
-            model_in = np.array(
-                [[spec_in.unpack(int(word)) for word in row]
-                 for row in frame], dtype=np.int64)
-        expected = block.run(model_in, values, bit_depth=bit_depth, **context)
+        if not history:
+            expected = block.run(_model_frame(case, trial), values,
+                                 bit_depth=bit_depth, **context)
+        elif trial_number >= lag:
+            expected = expected_run[trial_number - lag]
+        else:
+            expected = expected_run[:0].reshape(0, *expected_run.shape[2:])
         if expected.ndim == 3:
             spec_out = StreamSpec(bit_depth=bit_depth,
                                   channels=expected.shape[-1])
@@ -140,7 +171,8 @@ async def bit_exact_against_model(dut):
                                              beat.data, int(flat[i]), frame))
         # framed as the model's output is: a block that keeps a window
         # frames the window, not the frame it was given
-        check_framing(collected, expected.shape[1], expected.shape[0])
+        if expected.size:
+            check_framing(collected, expected.shape[1], expected.shape[0])
 
         dut._log.info(f"{label}: {expected.size} pixels bit-exact, "
                       "framing exact")

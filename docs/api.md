@@ -156,7 +156,10 @@ registers, its value the expression over the pipeline context (`"(tick + 1)
 & 3"`) or an integer, evaluated by the design's one walker over integers in
 a run and over traced values in a trace, so it is folded into the core and
 the core's ports are the context it reads. A value range the input cannot
-hold is refused. `registry(package)` and
+hold is refused. A stream input declared `StreamPort("in", history=True)`
+hands the model the stream's recent frames, `(T, H, W)` newest last, traced
+at `HISTORY_TRACE` frames; the core keeps as many as the model reads back,
+and a run takes the context one value a frame. `registry(package)` and
 `resolve(package, name)` discover the blocks declared under a package.
 
 A design names its pipeline context (`np2hw.blocks.params.Vocabulary`): a

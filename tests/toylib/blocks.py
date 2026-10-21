@@ -96,3 +96,12 @@ def bias(pixel, p, bit_depth):
 def balance(pixel, p, bit_depth):
     value = pixel.astype(np.int32) * p.gain[0, 0]
     return saturate(value >> p.decl.gain.frac, bit_depth)
+
+
+@toyblock(version=(1, 0), description="this frame or the one before, by place",
+          inputs=(StreamPort("in", "the frames", history=True),),
+          outputs=(StreamPort("out"),),
+          params=[Param("pos", bits=2, description="the live frame's place: "
+                        "odd shows it, even the one before")])
+def placed(video, p, bit_depth):
+    return np.where((p.pos & 1) == 1, video[1:], video[:-1])

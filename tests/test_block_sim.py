@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from np2hw.blocks.stream import StreamSpec
-from toylib.blocks import VOCABULARY, balance, bias, pair, triple
+from toylib.blocks import VOCABULARY, balance, bias, pair, placed, triple
 
 pytestmark = pytest.mark.skipif(shutil.which("verilator") is None,
                                 reason="verilator not on PATH")
@@ -72,3 +72,14 @@ def test_channels_in_and_out(tmp_path):
               [{"seed": 4, "frame": _frame(4)}])
     _simulate(tmp_path / "triple", triple, "toylib.blocks:triple",
               [{"seed": 5, "frame": _frame(5, channels=2)}], in_channels=2)
+
+
+def test_a_history_run_frame_after_frame(tmp_path):
+    """Trials of a history block are one run of frames: the first, which
+    the history is still filling, owed nothing; every one after, the model
+    at the place its own header set."""
+    ticks = (5, 2, 7, 7, 0, 3)
+    trials = [{"seed": 20 + n, "context": {"tick": t}, "frame": _frame(20 + n)}
+              for n, t in enumerate(ticks)]
+    _simulate(tmp_path, placed, "toylib.blocks:placed", trials,
+              bind={"pos": "tick & 3"})

@@ -22,6 +22,20 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   are the context it reads, wired as any consumed context is. A range the
   input cannot hold is refused, with the range. **Register maps change**
   where a design binds an input: the bound register is gone.
+- **A block may read the stream's history.** `StreamPort("in",
+  history=True)` hands the model the recent frames, `(T, H, W)` newest
+  last, and it reads past ones by slicing the first axis. How many frames
+  are kept is declared nowhere: the core's store is how far back the model
+  reads (traced at `HISTORY_TRACE`, 64 frames, the deepest read 63). A run
+  takes a bound input's context one value a frame, and each output frame is
+  the model's at the context of the frame it ends at.
+- **A chain runs a run of frames.** Where a block reads the history,
+  `run_model` and `run_rtl` take `(t, h, w[, c])` and context one value a
+  frame; the twin sends the frames back to back, each frame's context set
+  as it starts, and returns every frame the hardware put out.
+  `run_rtl(clk_ns=)` builds the twin cut into the stages a design at that
+  clock has. `np2hw.testing.block` takes a history block's trials as one
+  run.
 - **A slice may start at a value computed from registers** -- `p.phase >>
   1`, `1 - (p.phase & 1)` -- whose exact range fits the stride: a CFA block
   takes its phase as the one input it is.

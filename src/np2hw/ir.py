@@ -72,9 +72,10 @@ class Image2D:
     height: int
     bits: int = 8
     signed: bool = False
-    # A VIDEO when set: the model is handed (T, H, W), `frames` long -- the
-    # length it is traced at, enough for its reads across time. The stream
-    # has no end; only the reads' spread on the frame axis is hardware.
+    # A HISTORY when set: the model is handed the stream's recent frames,
+    # (T, H, W), `frames` long -- the length it is traced at, enough for its
+    # reads across time. The stream has no end; only the reads' spread on
+    # the frame axis is hardware.
     frames: int = 0
 
 

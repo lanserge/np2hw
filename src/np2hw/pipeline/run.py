@@ -258,6 +258,13 @@ def _vocabulary(chain):
     return chain.vocabulary
 
 
+def reads_history(chain) -> bool:
+    """Whether a block of the chain reads the stream's history: then the
+    chain is run over a run of frames, not one."""
+    return any(stage.block.inputs and stage.block.inputs[0].history
+               for stage in chain)
+
+
 class Chain(list):
     """The stages of a run, in order, with the pipeline context of the
     design they were cut from -- what a twin of them is built around."""
@@ -353,23 +360,47 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
     less, a block that widens hands on more. Nothing declares any of it; the
     trace is its one owner. A model whose frame comes out other than its
     trace says is refused: the model and its hardware disagree.
+
+    A chain with a block that reads the stream's history (``history=True``)
+    is run over a RUN of frames, ``(t, h, w[, c])``, and a context value
+    may be one a frame: a block that reads one frame runs on each, one that
+    reads the history on the run, which comes out the frames shorter its
+    history fills -- and the context of the frames it leaves out is left
+    out with them.
     """
     from np2hw.blocks.stream import StreamSpec
 
-    height, width = frame.shape[:2]
+    run = reads_history(chain)
+    height, width = frame.shape[1:3] if run else frame.shape[:2]
+    per_frame = frame.ndim - (1 if run else 0)
     spec = StreamSpec(bit_depth=bit_depth,
-                      channels=1 if frame.ndim == 2 else int(frame.shape[-1]))
+                      channels=1 if per_frame == 2 else int(frame.shape[-1]))
     for stage in chain:
         consumed = {name: context[name]
                     for name in stage.block.params.consumes if name in context}
-        frame = stage.block.run(frame, values.get(stage.path),
-                                bit_depth=spec.bit_depth, **consumed)
+        if not run:
+            frame = stage.block.run(frame, values.get(stage.path),
+                                    bit_depth=spec.bit_depth, **consumed)
+        elif stage.block.inputs[0].history:
+            out = stage.block.run(frame, values.get(stage.path),
+                                  bit_depth=spec.bit_depth, **consumed)
+            left_out = len(frame) - len(out)
+            context = {k: (v[left_out:] if np.ndim(v) else v)
+                       for k, v in context.items()}
+            frame = out
+        else:
+            frame = np.stack([stage.block.run(
+                f, values.get(stage.path), bit_depth=spec.bit_depth,
+                **{k: (v[n] if np.ndim(v) else v)
+                   for k, v in consumed.items()})
+                for n, f in enumerate(frame)])
         if not stage.block.traceable:
             continue
         built = stage.block.generate(
             spec, width, height, module_name=f"run_{stage.module_prefix}")
         handed = compose.handed_on(built)
-        got = (frame.shape[:2], 1 if frame.ndim == 2 else frame.shape[-1])
+        one = frame[0] if run else frame
+        got = (one.shape[:2], 1 if one.ndim == 2 else one.shape[-1])
         traced = ((handed.height, handed.width), handed.channels)
         # a window's frame is its registers', anything up to the trace's
         inside = (compose.keeps_window(built) and got[1] == traced[1]
@@ -503,19 +534,29 @@ def _png_read(path: Path) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 
 def run_rtl(chain, frame: np.ndarray, values, context: dict,
-            bit_depth: int) -> np.ndarray:
+            bit_depth: int, clk_ns: float | None = None) -> np.ndarray:
     """The same sub-chain, through generated Verilog under Verilator.
 
     The chain is composed into a throwaway pipeline at the FRAME's geometry
     (line buffers are sized at synthesis; a twin built wide for a small test
     frame would not be the hardware the test claims to exercise), generated,
     compiled once per structure, and fed the same words the model consumed.
+
+    A chain reading the stream's history takes a run of frames, as
+    :func:`run_model` does: each frame sent straight after the one before,
+    its context set as it starts, as a header's arrives -- and the run that
+    comes out is every frame the hardware put out.
+
+    ``clk_ns`` builds the twin cut into the stages a design at that clock
+    has; without it, the cores are as few stages as they can be.
     """
     from np2hw.pipeline import compose
     from np2hw.design.composite import assemble
 
-    height, width = frame.shape[:2]
-    in_channels = 1 if frame.ndim == 2 else int(frame.shape[-1])
+    run = reads_history(chain)
+    frames = frame if run else frame[None]
+    height, width = frames.shape[1:3]
+    in_channels = 1 if frames.ndim == 3 else int(frames.shape[-1])
     # A context with no register exists only where the stream delivers it,
     # so the twin takes from its "stream" -- the values the caller passes --
     # every stream-only context its chain consumes.
@@ -536,7 +577,7 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
         stream={"bits": bit_depth, "max_width": width, "max_height": height,
                 "channels": in_channels, "context": from_stream},
         vocabulary=chain.vocabulary)
-    generated = compose.generate(twin, control=False)
+    generated = compose.generate(twin, control=False, clk_ns=clk_ns)
     verilog = "\n".join(text for _, text in generated.modules)
 
     # The top's ports as np2hw published them -- the ctx_*/param_* inputs
@@ -544,8 +585,11 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
     ports = {p["name"]: p for p in generated.meta["ports"]}
     scraped = [name for name, p in ports.items() if p["direction"] == "input"
                and (name.startswith("ctx_") or name.startswith("param_"))]
-    port_values = _port_values(twin, scraped, values, context,
-                               width, height, bit_depth)
+    port_values = [_port_values(twin, scraped, values,
+                                {k: (v[n] if np.ndim(v) else v)
+                                 for k, v in context.items()},
+                                width, height, bit_depth)
+                   for n in range(len(frames))]
 
     # The output word is whatever the trace packed, and the trace SAYS so:
     # channels and lane width are published on the boundary. Dividing the
@@ -569,33 +613,44 @@ def run_rtl(chain, frame: np.ndarray, values, context: dict,
     binary = _twin_binary(verilog, generated.top, scraped,
                           in_bits=in_channels * bit_depth, out_bits=out_bits,
                           sized=sized)
-    words = _pack(frame, in_channels, bit_depth)
+    words = _pack(frames, in_channels, bit_depth)
 
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         (scratch / "in.hex").write_text(
             "\n".join(f"{w:x}" for w in words) + "\n")
-        (scratch / "ports.txt").write_text(
-            "\n".join(f"{n} {v:x}" for n, v in port_values.items()) + "\n")
+        (scratch / "ports.txt").write_text("".join(
+            f"{k} {n} {v:x}\n" for k, chosen in enumerate(port_values)
+            for n, v in chosen.items()))
         done = subprocess.run(
             [str(binary), str(scratch / "in.hex"), str(scratch / "out.txt"),
-             str(scratch / "ports.txt"), str(len(words))],
+             str(scratch / "ports.txt"), str(len(words) // len(frames)),
+             str(len(frames))],
             capture_output=True, text=True)
         if done.returncode:
             raise RuntimeError(
                 f"the RTL twin did not complete the frame: {done.stdout.strip()}"
                 f" {done.stderr.strip()}")
-        got = np.array([int(line, 16) for line in
-                        (scratch / "out.txt").read_text().split()], dtype=object)
-    # the frame the hardware says it put out: a window's is its registers'
-    if sized:
-        _, w, h = done.stdout.split()
-        width, height = int(w), int(h)
-    if got.size != width * height:
-        raise RuntimeError(
-            f"the RTL twin put out {got.size} words for the {width}x{height} "
-            "frame it published")
-    return _unpack(got, height, width, out_channels, out_lane)
+        put_out = [np.array([int(w, 16) for w in block.split()], dtype=object)
+                   for block in (scratch / "out.txt").read_text()
+                   .split("L\n")[:-1]]
+    # each frame the hardware says it put out: a window's is its registers'
+    sizes = ([tuple(map(int, line.split()[1:])) for line in
+              done.stdout.splitlines() if line.startswith("size")]
+             if sized else [(width, height)] * len(put_out))
+    out = []
+    for got, (w, h) in zip(put_out, sizes):
+        if got.size != w * h:
+            raise RuntimeError(
+                f"the RTL twin put out {got.size} words for the {w}x{h} "
+                "frame it published")
+        out.append(_unpack(got, h, w, out_channels, out_lane))
+    if not run:
+        if len(out) != 1:
+            raise RuntimeError(f"the RTL twin put out {len(out)} frames "
+                               "for one")
+        return out[0]
+    return np.stack(out) if out else np.zeros((0, height, width))
 
 
 def _pack(frame: np.ndarray, channels: int, bit_depth: int) -> np.ndarray:
@@ -685,7 +740,7 @@ def _twin_binary(verilog: str, top: str, scraped: list[str],
     """Compile the twin, or reuse the cached build for this exact structure.
     A `sized` twin reports the frame size its top publishes at the last
     word."""
-    assign = "\n".join(f'    top->{port} = take("{port}");'
+    assign = "\n".join(f'        top->{port} = take(k, "{port}");'
                        for port in scraped)
     size = ('std::printf("size %d %d\\n", (int)top->chain_out_frame_width, '
             '(int)top->chain_out_frame_height);' if sized else "")
@@ -755,9 +810,10 @@ static void get_out(V@TOP@* top, uint32_t* w) {
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
-    if (argc != 5) { std::fprintf(stderr, "in out ports total\n"); return 1; }
+    if (argc != 6) { std::fprintf(stderr, "in out ports per frames\n"); return 1; }
     auto* top = new V@TOP@;
-    long total = std::atol(argv[4]);
+    long per = std::atol(argv[4]), frames = std::atol(argv[5]);
+    long total = per * frames;
 
     std::vector<uint32_t> mem((size_t)total * IW);
     FILE* fi = std::fopen(argv[1], "r");
@@ -768,20 +824,25 @@ int main(int argc, char** argv) {
     }
     std::fclose(fi);
 
-    std::map<std::string, uint64_t> port;
+    // each frame's ports: its context as its header carries it
+    std::vector<std::map<std::string, uint64_t>> port((size_t)frames);
     FILE* fp = std::fopen(argv[3], "r");
-    char name[256]; unsigned long long value;
-    while (std::fscanf(fp, "%255s %llx", name, &value) == 2) port[name] = value;
+    char name[256]; unsigned long long value; long fk;
+    while (std::fscanf(fp, "%ld %255s %llx", &fk, name, &value) == 3)
+        port[(size_t)fk][name] = value;
     std::fclose(fp);
-    auto take = [&](const char* n) {
-        auto it = port.find(n);
-        if (it == port.end()) { std::fprintf(stderr, "no port %s\n", n); std::exit(1); }
+    auto take = [&](long k, const char* n) {
+        auto it = port[(size_t)k].find(n);
+        if (it == port[(size_t)k].end()) { std::fprintf(stderr, "no port %s\n", n); std::exit(1); }
         return it->second;
     };
+    auto assign = [&](long k) {
 @ASSIGN@
+    };
+    assign(0);
 
     FILE* fo = std::fopen(argv[2], "w");
-    long idx = 0, got = 0;
+    long idx = 0, got = 0, ends = 0, quiet = 0, set = 0;
     int sending = 0, ended = 0;
     top->rst = 1; top->chain_in_valid = 0;
     top->chain_in_eol = 0; top->chain_in_last = 0; top->chain_out_ready = 1;
@@ -789,7 +850,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 4; i++) { top->clk = 0; top->eval(); top->clk = 1; top->eval(); }
     top->rst = 0; sending = 1; top->chain_in_valid = 1;
 
-    for (long guard = 0; guard < 4 * total + 4096; guard++) {
+    for (long guard = 0; guard < 8 * total + 4096 * frames; guard++) {
         top->clk = 0; top->eval();
         int ready = top->chain_in_ready, valid = top->chain_out_valid;
         int last = top->chain_out_last;
@@ -804,18 +865,28 @@ int main(int argc, char** argv) {
             std::fprintf(fo, "%x", data[OW - 1]);
             for (int w = OW - 2; w >= 0; w--) std::fprintf(fo, "%08x", data[w]);
             std::fprintf(fo, "\n");
-            got++;
+            got++; quiet = 0;
             // the frame ends where the hardware says it does, and is the
             // size it publishes beside it
-            if (last) { ended = 1; @SIZE@ break; }
+            if (last) {
+                std::fprintf(fo, "L\n"); ends++; @SIZE@
+                if (frames == 1) { ended = 1; break; }
+            }
+        } else if (!sending && ++quiet > 4 * per + 4096) {
+            // a run is over when everything is in and the pipe is quiet:
+            // a history's first frames put nothing out
+            ended = 1; break;
         }
+        // a frame's context is set as its first beat is offered, as a
+        // header's arrives with it
+        if (sending && idx / per != set) { set = idx / per; assign(set); }
         set_in(top, &mem[(size_t)idx * IW]);
-        top->chain_in_sof = (idx == 0);
+        top->chain_in_sof = (idx % per == 0);
     }
     std::fclose(fo);
     if (!ended)
-        std::fprintf(stderr, "frame incomplete: %ld words and no last, "
-                     "of %ld in\n", got, total);
+        std::fprintf(stderr, "frame incomplete: %ld words and %ld ends, "
+                     "of %ld in\n", got, ends, total);
     delete top;
     return ended ? 0 : 2;
 }

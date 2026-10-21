@@ -237,7 +237,10 @@ async def run_frame(dut, beats, expected_count: int, rnd,
         await RisingEdge(dut.clk)
         if consumed:
             index += 1
-        if len(collected) >= expected_count:
+        # A frame owed no output -- one a history is still filling -- is
+        # driven whole all the same: done when every beat is taken.
+        if len(collected) >= expected_count and (expected_count
+                                                 or index >= len(beats)):
             break
 
     dut.in_valid.value = 0

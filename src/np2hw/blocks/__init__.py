@@ -44,10 +44,18 @@ class StreamPort:
     of it here would be a second source of truth free to disagree with the
     first. What flows through a wire is whatever the math upstream computed;
     whether a connection makes SENSE is the author's judgment, not a check.
+
+    ``history`` is part of the math's signature: the model is handed the
+    stream's recent frames, ``(T, H, W)`` newest last, and reads past ones
+    by slicing the first axis -- which a channel axis, ``(H, W, C)``, is
+    indistinguishable from by shape. How many frames are kept is not
+    declared: it is how far back the model reads, and the core's store is
+    derived from that.
     """
 
     name: str
     description: str = ""
+    history: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,6 +166,13 @@ class _View:
             raise AttributeError(
                 f"{name!r} is not available here; this view has "
                 f"{sorted(object.__getattribute__(self, '_values'))}") from None
+
+
+#: The frames a history input is traced at: the deepest read a block may
+#: make is one fewer. The hardware is the same at any length that holds the
+#: reads -- the store is the reads' spread -- so this bounds, and declares
+#: nothing.
+HISTORY_TRACE = 64
 
 
 @dataclass(frozen=True)
@@ -498,13 +513,17 @@ class Block:
 
         Args:
             pixel: the frame, ``(h, w)`` or ``(h, w, c)`` as the model's
-                arithmetic expects, unsigned, ``bit_depth`` bits.
+                arithmetic expects, unsigned, ``bit_depth`` bits -- or, for
+                a history input, the run of frames, ``(t, h, w[, c])``.
             values: register values for ``params.bind`` (defaults fill in).
             bit_depth: datapath width.
             **context: pipeline context by name, e.g. ``frame_seq=5``: what
                 the block's bound inputs read. Everything it consumes
                 defaults to 0; a name it does not consume is refused, because
-                silently accepting it would be accepting a typo.
+                silently accepting it would be accepting a typo. For a
+                history input a value may be one per frame, as each frame's
+                header carries it: each output frame is then the model's
+                with the context of the frame it ends at.
         """
         import numpy as np
 
@@ -531,25 +550,50 @@ class Block:
             raise TypeError(
                 f"block {self.name!r} does not consume {sorted(unknown)}; "
                 f"it consumes {sorted(consumed) or 'no context'}")
+        history = bool(self.inputs) and self.inputs[0].history
+        frames = len(pixel) if history else 1
         ctx_values = {}
         for name in consumed:
             declared = self.signal(name)
-            value = int(context.get(name, 0))
-            lo, hi = 0, (1 << declared.bits) - 1
-            if not lo <= value <= hi:
+            raw = context.get(name, 0)
+            each = np.asarray(raw).ravel().tolist() if np.ndim(raw) else None
+            if each is not None and (not history or len(each) != frames):
                 raise ValueError(
-                    f"context {name!r} = {value} outside its declared "
-                    f"{declared.bits}-bit range")
-            ctx_values[name] = value
+                    f"context {name!r} has {len(each)} values; one per frame "
+                    f"is {frames} frames of a history input"
+                    if history else
+                    f"context {name!r} is one value a frame, and "
+                    f"{self.name!r} takes one frame")
+            for value in (each if each is not None else [raw]):
+                if not 0 <= int(value) <= (1 << declared.bits) - 1:
+                    raise ValueError(
+                        f"context {name!r} = {value} outside its declared "
+                        f"{declared.bits}-bit range")
+            ctx_values[name] = [int(v) for v in each] if each is not None \
+                else int(raw)
         if self.even_frame:
-            height, width = pixel.shape[:2]
+            height, width = pixel.shape[1:3] if history else pixel.shape[:2]
             if height % 2 or width % 2:
                 raise ValueError(
                     f"frame {width}x{height} has an odd dimension; a "
                     "CFA-indexed block has no consistent Bayer phase unless "
                     "both dimensions are even")
-        return self.model(pixel, self.bound_values(values, ctx_values),
-                          bit_depth)
+        if not any(isinstance(v, list) for v in ctx_values.values()):
+            return self.model(pixel, self.bound_values(values, ctx_values),
+                              bit_depth)
+        # Context a frame: each output frame is the model's at the context
+        # of the frame it ends at -- the live one, the last it reads.
+        def at(n):
+            return {k: v[n] if isinstance(v, list) else v
+                    for k, v in ctx_values.items()}
+        first = self.model(pixel, self.bound_values(values, at(frames - 1)),
+                           bit_depth)
+        lag = frames - len(first)
+        out = np.empty_like(first)
+        for k in range(len(first)):
+            out[k] = self.model(pixel, self.bound_values(values, at(k + lag)),
+                                bit_depth)[k]
+        return out
 
     def bound_values(self, values: dict | None, context: dict):
         """The model's `p` for a NumPy run: the registers' values, and each
@@ -616,7 +660,9 @@ class Block:
         # The traced image is the packed DATA WORD, not one component: a
         # 3-channel block sees channels side by side in one value and
         # unpacks them itself, exactly as the wire carries them.
-        image = Image2D("pixel", width, height, bits=spec.data_bits, signed=False)
+        history = self.inputs[0].history
+        image = Image2D("pixel", width, height, bits=spec.data_bits,
+                        signed=False, frames=HISTORY_TRACE if history else 0)
         from np2hw import Param as Np2hwParam
 
         registers = [param.to_np2hw() for param in self.params]
