@@ -223,7 +223,9 @@ _UNARY = {ast.USub: lambda a: -a, ast.UAdd: lambda a: +a,
           ast.Invert: lambda a: ~a, ast.Not: lambda a: int(not a)}
 _COMPARE = {ast.Lt: lambda a, b: a < b, ast.LtE: lambda a, b: a <= b,
             ast.Gt: lambda a, b: a > b, ast.GtE: lambda a, b: a >= b,
-            ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b}
+            ast.Eq: lambda a, b: a == b, ast.NotEq: lambda a, b: a != b,
+            # a fact that is a list -- a stream's context -- holds a name
+            ast.In: lambda a, b: a in b, ast.NotIn: lambda a, b: a not in b}
 _CALLS = {"min": min, "max": max, "abs": abs}
 # Calls that read the design's wiring, bound per node once it is wired: an
 # expression using one is evaluated then ({value, wired}), never at load.
@@ -809,7 +811,8 @@ class _Loader:
 
     # -- facts of a node's ports, and composites built whole --------------- #
 
-    FACTS = ("bits", "channels", "data_bits", "max_width", "max_height")
+    FACTS = ("bits", "channels", "data_bits", "max_width", "max_height",
+             "context")
 
     def port_fact(self, target: str, where: str):
         """``node.port.fact`` -- a fact of the stream at a composite's port,
@@ -833,6 +836,10 @@ class _Loader:
                         f"{where}: {target}: the stream entering "
                         f"{node.found.ref}'s {port} states no {fact}")
                 return facts[fact]
+            if fact == "context":
+                # the facts that ride with the stream entering: a design
+                # wires one to the port only where it is in this list
+                return list(facts.get("context", ()))
             channels = int(facts.get("channels", 1))
             return channels if fact == "channels" else \
                 int(facts["bits"]) * channels
@@ -1515,8 +1522,11 @@ class _Loader:
         driven: dict[tuple, str] = {}
         # each composite's own connections, as pins, kept beside the
         # flattening: the hierarchy a writer of one module per composite
-        # reads (Design.hierarchy)
-        self.local: dict[str, list] = {}
+        # reads (Design.hierarchy). Built here and published only once
+        # whole: a connection's `when` may read a port's facts, which walk
+        # the edges again, and a walk nested inside this one must not
+        # clear what this one has gathered.
+        local: dict[str, list] = {}
         for path, node in self.nodes.items():
             if (node.kind != "composite" or path in self.inactive
                     or path in opaque or not self.in_scope(path, root, opaque)):
@@ -1544,7 +1554,7 @@ class _Loader:
                                            f"driven ({driven[b]})")
                 driven[b] = where
                 forward.setdefault(a, []).append(b)
-                self.local.setdefault(path, []).append((a, b))
+                local.setdefault(path, []).append((a, b))
 
         def is_pin(pin):
             return pin[1] in _pin_names(self.nodes[pin[0]])
@@ -1597,6 +1607,7 @@ class _Loader:
                         f"{path}: input {port['name']} of "
                         f"{node.found.ref} is used inside it and driven by "
                         "nothing")
+        self.local = local
         return edges, forward
 
     def port_built(self, node: _Node, port: dict) -> bool:

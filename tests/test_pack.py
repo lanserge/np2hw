@@ -49,7 +49,7 @@ def test_the_pack_is_verified_by_default(tmp_path, capsys):
 def test_a_diverging_twin_refuses_the_whole_pack(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner, "run_rtl",
-        lambda chain, frame, values, context, bit_depth: frame ^ 1)
+        lambda chain, frame, values, context, bit_depth, **_: frame ^ 1)
     out = tmp_path / "pack"
     with pytest.raises(ValueError, match="DIFFERS"):
         pack.emit(DESIGN, out)
@@ -85,7 +85,7 @@ def test_a_verified_pack_keeps_its_vlnv(tmp_path, monkeypatch):
     # every input's chain leaves the manifest's name alone
     monkeypatch.setattr(
         runner, "run_rtl",
-        lambda chain, frame, values, context, bit_depth:
+        lambda chain, frame, values, context, bit_depth, **_:
             runner.run_model(chain, frame, values, context, bit_depth))
     written = pack.emit(DESIGN, tmp_path, vlnv="acme:toy:p:0")
     assert written["core"].name == "p.core"

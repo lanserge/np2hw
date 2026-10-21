@@ -87,6 +87,13 @@ async def bit_exact_against_model(dut):
     # Raw two's complement at each register's DECLARED width -- the testbench
     # holds no mask of its own to go stale when a design overrides bits.
     reg_bits = {r.name: r.param.bits for r in block.params.registers}
+    # A channel of the output word is as wide as the trace packed it -- a
+    # block that narrows to a display's 8 bits packs 8-bit fields -- which
+    # the core states; the input's depth is no statement of it.
+    probe = block.generate(StreamSpec(bit_depth=bit_depth,
+                                      channels=case.get("in_channels", 1)),
+                           width, height, module_name="tb_probe")
+    out_field = probe.core["interface"]["output"].get("field_bits", bit_depth)
 
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
     await reset_stream(dut)
@@ -146,7 +153,7 @@ async def bit_exact_against_model(dut):
         else:
             expected = expected_run[:0].reshape(0, *expected_run.shape[2:])
         if expected.ndim == 3:
-            spec_out = StreamSpec(bit_depth=bit_depth,
+            spec_out = StreamSpec(bit_depth=out_field,
                                   channels=expected.shape[-1])
             expected = np.array(
                 [[spec_out.pack(px) for px in row]

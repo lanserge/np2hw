@@ -258,6 +258,12 @@ def _vocabulary(chain):
     return chain.vocabulary
 
 
+#: The frames a history chain is proved over: past the deepest history a
+#: block of revela's or np2hw's reads, so frames come out, and with every
+#: alignment of a four-place loop met twice.
+FRAMES_PROVED = 11
+
+
 def reads_history(chain) -> bool:
     """Whether a block of the chain reads the stream's history: then the
     chain is run over a run of frames, not one."""
@@ -328,20 +334,26 @@ def synthetic_values(pipeline, seed: int = 20260821):
 
 
 
-def synthetic_context(pipeline) -> dict:
+def synthetic_context(pipeline, frames: int | None = None) -> dict:
     """Context values for TWIN VERIFICATION, read from the vocabulary.
 
     A signal a transport or software may set (``origin="either"``) and
     that follows no fact of the frame is moved off its reset by flipping
     its top bit -- a reset of zero masks whatever the signal indexes, a
     colour-filter phase say. A register-only choice (a crop) keeps its
-    reset, for the reason :func:`synthetic_values` gives, and so does a
-    fact the stream delivers anew every frame, which one frame cannot
-    stand for.
+    reset, for the reason :func:`synthetic_values` gives. A fact the
+    stream delivers anew every frame (``origin="stream"``) one frame cannot
+    stand for; over a run of ``frames`` it is one value a frame, counting
+    up from an odd start and wrapping at its width, so each frame's differs
+    from the one before.
     """
-    return {c.name: c.default ^ (1 << (c.bits - 1))
-            for c in compose.vocabulary(pipeline).signals
-            if c.origin == "either" and not c.follows}
+    signals = compose.vocabulary(pipeline).signals
+    out = {c.name: c.default ^ (1 << (c.bits - 1))
+           for c in signals if c.origin == "either" and not c.follows}
+    if frames:
+        out.update({c.name: [(37 + n) % (1 << c.bits) for n in range(frames)]
+                    for c in signals if c.origin == "stream"})
+    return out
 
 # --------------------------------------------------------------------------- #
 # The model run

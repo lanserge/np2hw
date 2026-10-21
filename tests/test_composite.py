@@ -1444,3 +1444,37 @@ def test_the_wiring_cannot_be_read_before_it_is_known(library):
     with pytest.raises(CompositionError, match=r"reads the design's wiring.*"
                        r"\{value, wired\}"):
         load(f"{lib}.lib:top")
+
+
+def test_a_list_fact_is_asked_whether_it_holds_a_name():
+    """`in` and `not in`: a design asks whether a stream carries a context
+    fact -- `'frame_seq' in isp.isp_in.context` -- to make a connection
+    only where there is a port for it."""
+    from np2hw.design.composite import evaluate, parse
+    facts = {"isp.in.context": ["width", "height", "frame_seq"]}
+    ask = lambda text: evaluate(parse(text, "test"), facts.__getitem__)
+    assert ask("'frame_seq' in isp.in.context") == 1
+    assert ask("'bayer_phase' in isp.in.context") == 0
+    assert ask("'bayer_phase' not in isp.in.context") == 1
+
+
+def test_a_connection_asking_a_ports_facts_keeps_every_connection(library):
+    """A connection made where a stream carries a fact -- its `when` reads
+    the port's context -- walks the design's edges again to answer; that
+    walk must not lose the connections the first had gathered, which the
+    hierarchy a Verilog writer reads is made of."""
+    inner = chain(("g", "toylib.blocks:gain"), ("o", "toylib.blocks:offset"))
+    inner["inputs"][0].update(bits=8, max_width=16, max_height=4,
+                              context=["width", "height"])
+    outer = chain(("first", "toylib.blocks:gain"), ("sub", "{lib}.m:inner"),
+                  ("last", "toylib.blocks:offset"))
+    outer["connections"].insert(1, {"from": "first.out", "to": "sub.in",
+                                    "when": "'width' in sub.in.context"})
+    outer["connections"].remove(["first.out", "sub.in"])
+    lib = library(lambda lib: {"m": json.loads(json.dumps(
+        {"inner": inner, "outer": outer}).replace("{lib}", lib))})
+    design = load(f"{lib}.m:outer")
+    assert ("first", "out") in {a for a, _ in
+                                design.hierarchy[""]["connections"]}
+    assert len(design.hierarchy[""]["connections"]) == 4
+    assert len(design.hierarchy["sub"]["connections"]) == 3

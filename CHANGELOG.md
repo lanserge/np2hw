@@ -22,6 +22,14 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   are the context it reads, wired as any consumed context is. A range the
   input cannot hold is refused, with the range. **Register maps change**
   where a design binds an input: the bound register is gone.
+- **A design asks whether a stream carries a fact.** `in` and `not in`
+  in the expression language, and an input port's `context` among the
+  facts a design reads (`isp.isp_in.context`), so a connection exists only
+  where its port does: `"when": "'frame_seq' in isp.isp_in.context"`.
+- **A pack is proved over a run of frames where its chain reads a
+  history**, each frame's stream context its own (`synthetic_context`'s
+  `frames`), and every pack's twin at the clock it is cut for, the stages
+  the hardware has.
 - **A block may read the stream's history.** `StreamPort("in",
   history=True)` hands the model the recent frames, `(T, H, W)` newest
   last, and it reads past ones by slicing the first axis. How many frames

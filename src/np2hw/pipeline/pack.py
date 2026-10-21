@@ -68,22 +68,29 @@ def emit(design, output_dir, vlnv: str | None = None, control: bool = True,
         from np2hw.pipeline import run as runner
 
         values = runner.synthetic_values(pipeline)
-        frame = np.random.default_rng(20260813).integers(
-            0, 1 << form.spec.bit_depth,
-            size=(form.height, form.width), dtype=np.uint16)
-        context = runner.synthetic_context(pipeline)
+        rng = np.random.default_rng(20260813)
         # EVERY input's chain, not "the" chain. Asking for the sole input
         # was right for a mono pipeline and refused outright on a stereo
         # one -- which is the design that most wants proving, since it is
         # the one where a leg can be wrong on its own. A pipeline with two
         # sensors has two chains, and both are verified before anything is
         # emitted.
+        clk_ns = None if clock_mhz is None else 1000.0 / clock_mhz
         for name in pipeline.inputs:
             chain = runner.pixel_chain(pipeline, name, None)
+            # a chain reading the stream's history is proved over a run of
+            # frames, each with its own context, as the stream brings it --
+            # and every chain at the clock it is cut for, the stages the
+            # hardware has
+            run = runner.FRAMES_PROVED if runner.reads_history(chain) else None
+            frame = rng.integers(0, 1 << form.spec.bit_depth,
+                                 size=((run,) if run else ())
+                                 + (form.height, form.width), dtype=np.uint16)
+            context = runner.synthetic_context(pipeline, run)
             model = runner.run_model(chain, frame, values, context,
                                      form.spec.bit_depth)
             rtl = runner.run_rtl(chain, frame, values, context,
-                                 form.spec.bit_depth)
+                                 form.spec.bit_depth, clk_ns=clk_ns)
             if not np.array_equal(model, rtl):
                 raise ValueError(
                     f"{pipeline.name}: the generated RTL DIFFERS from the "
