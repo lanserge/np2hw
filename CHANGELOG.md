@@ -35,7 +35,11 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   and their ports in, frames and their ports out (`LeafRun`); **the frame
   store's model moved to it**.
 - **A loaded design keeps each pipeline it built whole**
-  (`Design.pipelines`), as its build made it.
+  (`Design.pipelines`), as its build made it. `np2hw pipeline generate
+  DESIGN --node PATH` proves and packs the one at `PATH` -- the part of a
+  design holding a frame store, say, made of models -- as the design sets
+  it, and takes the design's own parameters as `NAME=VALUE`; `pack.emit`
+  takes such a loaded design as well as a reference.
 - **A stream may bring its history.** An input port's `frames` says the
   stream entering carries that many frames side by side -- a frame store
   upstream keeps them -- and a block reading the stream's history then

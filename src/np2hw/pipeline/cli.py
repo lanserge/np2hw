@@ -74,6 +74,16 @@ def add_commands(commands) -> None:
                     "Verilog, register map, SystemRDL, FuseSoC core "
                     "manifest. Refuses to emit anything unverified.")
     generate.add_argument("design", help="a composite, package.module:name")
+    generate.add_argument("settings", nargs="*", metavar="NAME=VALUE",
+                          help="the design's own parameters, as a build "
+                               "sets them: a value JSON where it parses as "
+                               "JSON, the design's expression otherwise")
+    generate.add_argument("--node", default=None, metavar="PATH",
+                          help="the composite of model blocks at PATH inside "
+                               "the design, built whole, as the design sets "
+                               "it: how a design holding anything else -- a "
+                               "frame store, a FIFO -- has the part of it "
+                               "made of models proved and packed")
     generate.add_argument("--library", action="append", metavar="DIR",
                           help=LIBRARY_HELP)
     generate.add_argument("--vlnv", default=None,
@@ -160,13 +170,40 @@ def _run(arguments) -> int:
     return 0
 
 
+def _within(ref: str, settings: list, node: str | None):
+    """The design `ref` with its parameters set by `settings`, or the
+    composite built whole at `node` inside it, as the design sets it."""
+    import json
+    from np2hw.design import composite
+    build = {}
+    for setting in settings:
+        key, eq, value = setting.partition("=")
+        if not eq:
+            raise ValueError(f"{setting!r} is not NAME=VALUE")
+        try:
+            build[key] = json.loads(value)
+        except ValueError:
+            build[key] = value
+    design = composite.load(ref, build)
+    if node is None:
+        return design
+    if node not in design.pipelines:
+        raise ValueError(
+            f"{ref}: no composite of model blocks built whole at {node!r}; "
+            f"this design builds {sorted(design.pipelines) or 'none'}")
+    return design.pipelines[node]
+
+
 def _generate(arguments) -> int:
     from np2hw.design.composite import add_libraries
     from np2hw.pipeline import pack
 
     add_libraries(arguments.library)
 
-    written = pack.emit(arguments.design, arguments.out,
+    design = arguments.design
+    if arguments.node is not None or arguments.settings:
+        design = _within(design, arguments.settings, arguments.node)
+    written = pack.emit(design, arguments.out,
                         vlnv=arguments.vlnv,
                         control=not arguments.no_control,
                         clock_mhz=arguments.clock_mhz,

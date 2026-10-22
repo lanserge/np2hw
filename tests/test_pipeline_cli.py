@@ -135,3 +135,39 @@ def test_the_rtl_twin_is_bit_exact(tmp_path, samples, capsys):
     assert _run(RGB, samples, tmp_path / "model.npy") == 0
     assert np.array_equal(np.load(tmp_path / "rtl.npy"),
                           np.load(tmp_path / "model.npy"))
+
+
+def test_generate_proves_the_models_inside_a_design_as_it_sets_them(
+        library, tmp_path, capsys):
+    """A design holding a frame store before a pipeline: what is made of
+    models is proved and packed as the design builds it -- here three
+    frames side by side, which the pipeline's own default is not."""
+    from test_frames_brought import _brought
+
+    def files(name):
+        return {"pipes": _brought(2), "board": {"board": {
+            "description": "a frame store feeding a pipeline",
+            "inputs": [{"name": n} for n in ("clk", "rst", "in")],
+            "outputs": [{"name": "out"}],
+            "nodes": {
+                "store": {"block": "np2hw.hdl.frames:frame_store",
+                          "build": {"FRAMES": "isp.in.frames",
+                                    "BITS": "isp.in.bits",
+                                    "CTX_BITS": "isp.in.context_bits",
+                                    "PIXELS": 32}},
+                "isp": {"block": f"{name}.pipes:brought",
+                        "build": {"frames": 3}}},
+            "connections": [
+                ["clk", "store.clk"], ["rst", "store.rst"],
+                ["in", "store.in"], ["store.out", "isp.in"],
+                ["isp.out", "out"]]}}}
+    ref = f"{library(files)}.board:board"
+    assert cli.main(["pipeline", "generate", ref, "--node", "isp",
+                     "--out", str(tmp_path)]) == 0
+    assert "twin bit-exact" in capsys.readouterr().out
+    verilog = (tmp_path / "brought.v").read_text()
+    assert "input  wire [29:0] in_data" in verilog
+    # the store is not models: there is nothing at its path to prove
+    assert cli.main(["pipeline", "generate", ref, "--node", "store",
+                     "--out", str(tmp_path / "no")]) == 2
+    assert "this design builds ['isp']" in capsys.readouterr().err

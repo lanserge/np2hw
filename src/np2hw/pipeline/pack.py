@@ -21,7 +21,10 @@ def emit(design, output_dir, vlnv: str | None = None, control: bool = True,
     """Build a design and write its pack: Verilog, maps, manifest.
 
     Args:
-        design: a composite's reference, package.module:name.
+        design: a composite's reference, package.module:name -- or a
+            design already loaded, of model blocks: a composite built whole
+            inside a larger design, as that design sets it
+            (``Design.pipelines``).
         output_dir: where the pack lands. Created if absent.
         vlnv: the core's VLNV for the manifest; by default no vendor, the
             models' package as the library and the pipeline's own name.
@@ -54,7 +57,11 @@ def emit(design, output_dir, vlnv: str | None = None, control: bool = True,
     from np2hw.pipeline import compose
     from np2hw.pipeline.compose import register_map_markdown
 
-    pipeline = pipelines.load(design)
+    if isinstance(design, str):
+        pipeline = pipelines.load(design)
+    else:
+        pipeline = design
+        compose.netlist(pipeline)
     form = compose.shape(pipeline)
 
     if verify:
