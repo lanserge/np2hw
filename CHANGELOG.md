@@ -11,6 +11,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **The tee's branch A may hold its stream** (`HOLD_A`, `tee(...,
+  hold_a=True)`): for a stream that can wait -- a frame store's, paced by
+  its consumer, never a sensor's -- A joins every frame it is enabled for
+  at its start and holds the stream while it is not ready, so it is never
+  torn, and B, still a disposable tap, sees only the beats taken. Off by
+  default: the tee still never stalls.
+
 - **`np.where` on a condition the trace already knows picks its operand,**
   as NumPy does: a bound constant or a build parameter choosing between two
   values is the one chosen, in the core as in the run -- wires, where a

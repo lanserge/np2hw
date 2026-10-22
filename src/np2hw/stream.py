@@ -454,7 +454,7 @@ def stream_cdc(data_bits: int, addr_bits: int = 4) -> dict:
     }
 
 
-def tee(data_bits: int) -> dict:
+def tee(data_bits: int, hold_a: bool = False) -> dict:
     """One stream, two DISPOSABLE consumers -- and the tee NEVER stalls.
 
     The law: a branch's consumer may be owned by software, and
@@ -486,6 +486,10 @@ def tee(data_bits: int) -> dict:
         data_bits: payload width; flags ride in it, packed by the
             caller, except SOF which the tee must see to keep its
             frame-atomic promise -- so it is a port of its own.
+        hold_a: for a stream that can wait -- a frame store's, paced by
+            its consumer, never a sensor's: branch A then holds the
+            stream while it is not ready, so it is never torn, and B
+            sees only the beats taken.
     """
     if data_bits < 1:
         raise ValueError(f"data_bits {data_bits} must be at least 1")
@@ -506,14 +510,15 @@ def tee(data_bits: int) -> dict:
         Pin("torn_b", "output", reg=True),
     ]
 
+    parameters = {"W": W, "HOLD_A": int(bool(hold_a))}
     return {
         "verilog": hdl.text("np2hw_tee"),
         "module": "np2hw_tee",
-        "parameters": {"W": W},
+        "parameters": parameters,
         "interface": {
             "clock": "clk", "reset": "rst", "param_prefix": "",
             "ports": published(pins),
-            "parameters": {"W": W},
+            "parameters": parameters,
             "input": {"prefix": "in", "data_bits": W, "flags": ("sof",)},
             "output": None,      # two outputs: `streams` is the truth
             "streams": [
@@ -525,7 +530,8 @@ def tee(data_bits: int) -> dict:
                  "flags": (), "domain": ""},
             ],
             "params": [("en_a", 1, False), ("en_b", 1, False)],
-            # valid fans out combinationally; in_ready is constant 1.
+            # valid fans out combinationally; in_ready is constant 1,
+            # or A's ready where A holds the stream.
             "combinational_outputs": ("in_ready", "a_valid", "b_valid"),
         },
     }

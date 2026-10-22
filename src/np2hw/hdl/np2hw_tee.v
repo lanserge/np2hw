@@ -9,8 +9,15 @@
 // and a sticky torn output says so; the sibling and the
 // pipeline never feel it. Enables are sampled at SOF and held
 // for the frame, so no branch ever receives a partial head.
+//
+// HOLD_A=1 is for a stream that can wait -- one handed out by a frame
+// store at its consumer's pace, not a sensor's: branch A then joins
+// every frame it is enabled for at its start and holds the stream while
+// it is not ready, so it is never torn, and B, still a disposable tap,
+// sees only the beats taken. A branch disabled holds nothing.
 module np2hw_tee #(
-    parameter W = 8
+    parameter W = 8,
+    parameter HOLD_A = 0
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK", X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF in_stream:a:b, ASSOCIATED_RESET rst" *)
     input  wire         clk,
@@ -49,24 +56,25 @@ module np2hw_tee #(
     reg act_a = 1'b0, act_b = 1'b0;
     // a branch takes the SOF beat only if it is ready FOR that
     // beat; joining late would hand it a headless frame
-    wire join_a = en_a && a_ready;
+    wire join_a = en_a && (HOLD_A || a_ready);
     wire join_b = en_b && b_ready;
     wire sel_a = in_sof ? join_a : act_a;
     wire sel_b = in_sof ? join_b : act_b;
 
     assign a_data  = in_data;
     assign b_data  = in_data;
-    assign a_valid = in_valid && sel_a;
-    assign b_valid = in_valid && sel_b;
     // the whole law in one line: nothing downstream of a tap
-    // may slow the stream that feeds it
-    assign in_ready = 1'b1;
+    // may slow the stream that feeds it -- but a branch that holds
+    assign in_ready = !(HOLD_A && sel_a) || a_ready;
+    wire   take = in_valid && in_ready;
+    assign a_valid = in_valid && sel_a;
+    assign b_valid = take && sel_b;
 
     always @(posedge clk) begin
         if (rst) begin
             act_a <= 1'b0; act_b <= 1'b0;
             torn_a <= 1'b0; torn_b <= 1'b0;
-        end else if (in_valid) begin
+        end else if (take) begin
             if (in_sof) begin
                 act_a <= join_a; act_b <= join_b;
             end else begin

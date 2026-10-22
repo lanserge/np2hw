@@ -58,7 +58,7 @@ module tb;
   wire [%(W)d-1:0] a_data, b_data;
   wire torn_a, torn_b;
 
-  np2hw_tee #(.W(%(W)d)) dut (.clk(clk), .rst(rst),
+  np2hw_tee #(.W(%(W)d), .HOLD_A(%(HOLD)d)) dut (.clk(clk), .rst(rst),
     .in_valid(in_valid), .in_ready(in_ready),
     .in_data(in_data), .in_sof(in_sof),
     .en_a(en_a), .en_b(en_b),
@@ -154,7 +154,7 @@ def check(label, passed, detail=""):
 
 
 def run(tmp, tag, verilog, n=320, ena=1, enb=1, afull=0, bfull=0,
-        flipa=0, flipb=0, adead=0, bdead=0, adie=0, bdie=0):
+        flipa=0, flipb=0, adead=0, bdead=0, adie=0, bdie=0, hold=0):
     v = os.path.join(tmp, tag + ".v")
     with open(v, "w") as f:
         f.write(verilog + "\n" + TB % dict(W=W, FRAME=FRAME, N=n,
@@ -163,6 +163,7 @@ def run(tmp, tag, verilog, n=320, ena=1, enb=1, afull=0, bfull=0,
                                            ADEAD=adead, BDEAD=bdead,
                                            ADIE=adie, BDIE=bdie,
                                            FLIPA=flipa, FLIPB=flipb,
+                                           HOLD=hold,
                                            TMAX=n * 900))
     exe = os.path.join(tmp, tag)
     r = subprocess.run(["iverilog", "-g2012", "-o", exe, v],
@@ -226,6 +227,26 @@ def main():
               and int(r["a"]) % FRAME == 0 and r["ta"] == "0"
               and r["nrl"] == "0",
               f"A received {r['a'] if isinstance(r, dict) else r}")
+
+        # A that holds: for a stream that can wait, the frame store's
+        r = run(tmp, "hold", v, hold=1, afull=0, bfull=1)
+        check("A holding, flaky: it receives every beat in order and is "
+              "never torn -- the stream waits for it",
+              r not in (None, "TIMEOUT") and r["a"] == r["sent"] == r["b"]
+              and r["erra"] == "0" and r["partial"] == "0"
+              and r["ta"] == "0" and r["tb"] == "0" and int(r["nrl"]) > 0,
+              f"{r if isinstance(r, str) else (r['sent'], r['a'], r['nrl'])}"
+              " -- sent, received, cycles the input waited")
+        r = run(tmp, "hold_b", v, hold=1, afull=0, bfull=0)
+        check("...and B flaky beside it: B sees only beats taken, whole "
+              "heads or honest tears, and A is untouched",
+              r not in (None, "TIMEOUT") and r["a"] == r["sent"]
+              and r["erra"] == "0" and r["partial"] == "0"
+              and r["ta"] == "0")
+        r = run(tmp, "hold_off", v, hold=1, ena=0, enb=1, adead=1, bfull=1)
+        check("...and A disabled holds nothing: dead, it never stalls",
+              r not in (None, "TIMEOUT") and r["sent"] == "320"
+              and r["a"] == "0" and r["b"] == "320" and r["nrl"] == "0")
 
     check("the interface admits the combinational fan-out",
           tuple(core["interface"]["combinational_outputs"])
