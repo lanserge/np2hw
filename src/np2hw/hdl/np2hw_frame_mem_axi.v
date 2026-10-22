@@ -31,6 +31,15 @@
 // One ID, so responses come in the order they were asked for, which is how
 // each read beat finds its queue. Bursts are sixteen beats at most, which a
 // Zynq's AXI3 ports take as they are.
+//
+// TWO RESETS. `mem_rst` is the memory's: it starts the master over, and
+// only the memory's own reset may, for a master reset alone mid-burst
+// leaves its memory waiting for beats that never come. `rst` is the
+// stream's, which comes whenever the stream starts over: the words not
+// yet promised are dropped and no more are asked for, but an address out
+// stays out until it is taken, a burst whose address went has every beat
+// sent, and every response owed is taken. A read asked for is begun only
+// once no beat of an earlier one is still to come, so none lands in it.
 module np2hw_frame_mem_axi #(
     parameter BITS = 12,
     parameter FRAMES = 4,
@@ -40,7 +49,8 @@ module np2hw_frame_mem_axi #(
     parameter SB = $clog2(SLOTS)
 ) (
     input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     rst,        // the stream's
+    input  wire                     mem_rst,    // the memory's
     // the seam
     input  wire                     wr_valid,
     output wire                     wr_ready,
@@ -102,8 +112,9 @@ module np2hw_frame_mem_axi #(
     assign mem_awprot = 3'b000; assign mem_arprot = 3'b000;
     assign mem_wstrb = 8'hff;
 
-    function [31:0] addr(input [SB-1:0] slot, input [OFF-1:0] word);
-        addr = BASE + slot * SLOT_BYTES + {word, 3'b000};
+    // where a slot starts: worked out once a frame, never on a request
+    function [31:0] slot_base(input [SB-1:0] slot);
+        slot_base = BASE + slot * SLOT_BYTES;
     endfunction
 
     // ================================================================ write
@@ -121,7 +132,10 @@ module np2hw_frame_mem_axi #(
     // ---- the queue of words: data, where it goes, whether a frame ends
     reg  [63:0]     wq_data [0:WQ-1];
     reg  [SB-1:0]   wq_slot [0:WQ-1];
-    reg  [OFF-1:0]  wq_off  [0:WQ-1];
+    reg  [31:0]     wq_addr [0:WQ-1];
+    // the frame's first byte: its slot's, from the frame's first sample
+    reg  [31:0]     wbase = 32'd0;
+    wire [31:0]     base_now = wr_sof ? slot_base(wr_slot) : wbase;
     reg             wq_end  [0:WQ-1];
     reg  [6:0]      wq_w = 7'd0, wq_r = 7'd0;   // pushes and pops, mod 128
     wire [6:0]      wq_count = wq_w - wq_r;
@@ -132,14 +146,27 @@ module np2hw_frame_mem_axi #(
     wire            ending = ends_w != ends_r;
     wire [6:0]      to_end = ends[ends_r[3:0]] - wq_r + 7'd1;
 
+    // what the burst out, or going out, still owes its memory: its words
+    // stay queued however the stream starts over
+    reg  [7:0]      len = 8'd0;                 // beats of the burst
+    reg  [7:0]      sent = 8'd0;
+    reg             wsending = 1'b0;
+    reg             last_of_frame = 1'b0;
+    wire [7:0]      promised = mem_awvalid ? len : wsending ? len - sent
+                                                             : 8'd0;
     always @(posedge clk) begin
-        if (rst) begin
+        if (mem_rst) begin
             lane <= 4'd0; woff <= {OFF{1'b0}}; wq_w <= 7'd0; ends_w <= 5'd0;
+        end else if (rst) begin
+            lane <= 4'd0; woff <= {OFF{1'b0}};
+            wq_w <= wq_r + promised[6:0];
+            ends_w <= ends_r + {4'd0, mem_awvalid && last_of_frame};
         end else if (take) begin
+            if (wr_sof) wbase <= slot_base(wr_slot);
             if (push) begin
                 wq_data[wq_w[5:0]] <= word;
                 wq_slot[wq_w[5:0]] <= wr_slot;
-                wq_off[wq_w[5:0]]  <= off;
+                wq_addr[wq_w[5:0]] <= base_now + {off, 3'b000};
                 wq_end[wq_w[5:0]]  <= wr_last;
                 wq_w <= wq_w + 7'd1;
                 if (wr_last) begin
@@ -158,10 +185,6 @@ module np2hw_frame_mem_axi #(
     end
 
     // ---- bursts: the address once the words are queued, then the words
-    reg  [7:0]      len = 8'd0;                 // beats of the burst
-    reg  [7:0]      sent = 8'd0;
-    reg             wsending = 1'b0;
-    reg             last_of_frame = 1'b0;
     reg  [SB-1:0]   burst_slot = {SB{1'b0}};
     reg  [31:0]     awaddr = 32'd0;
     // the responses owed: whether each burst ends a frame, and its slot
@@ -171,18 +194,18 @@ module np2hw_frame_mem_axi #(
     wire            bq_full = bq_w - bq_r == 4'd8;
     wire [7:0]      ready_len = (ending && to_end <= BURST) ? {1'b0, to_end}
                                                             : BURST;
-    wire            can_burst = !mem_awvalid && !wsending && !bq_full &&
-                                (wq_count >= BURST || ending);
+    wire            can_burst = !rst && !mem_awvalid && !wsending &&
+                                !bq_full && (wq_count >= BURST || ending);
     assign mem_awaddr = awaddr;
     assign mem_awlen = len - 8'd1;
     always @(posedge clk) begin
-        if (rst) begin
+        if (mem_rst) begin
             mem_awvalid <= 1'b0; wsending <= 1'b0; wq_r <= 7'd0;
             ends_r <= 5'd0; bq_w <= 4'd0;
         end else begin
             if (can_burst) begin
                 len <= ready_len;
-                awaddr <= addr(wq_slot[wq_r[5:0]], wq_off[wq_r[5:0]]);
+                awaddr <= wq_addr[wq_r[5:0]];
                 burst_slot <= wq_slot[wq_r[5:0]];
                 last_of_frame <= ending && to_end <= BURST;
                 mem_awvalid <= 1'b1;
@@ -211,7 +234,7 @@ module np2hw_frame_mem_axi #(
     assign mem_bready = 1'b1;
     always @(posedge clk) begin
         wr_done <= 1'b0;
-        if (rst) begin
+        if (mem_rst) begin
             bq_r <= 4'd0;
         end else if (mem_bvalid) begin
             if (bq_end[bq_r[2:0]]) begin
@@ -224,10 +247,11 @@ module np2hw_frame_mem_axi #(
 
     // ================================================================= read
     reg  [31:0]          left = 32'd0;          // samples still to go out
-    reg  [OFF-1:0]       words = {OFF{1'b0}};   // words a frame read takes
-    reg  [FRAMES*SB-1:0] which = {FRAMES*SB{1'b0}};
-    reg  [OFF-1:0]       asked [0:FRAMES-1];    // words asked for, each
-    reg  [7:0]           owed  [0:FRAMES-1];    // asked for, not yet in
+    // each frame read: the next byte to ask for, the words still to ask
+    // for, and those asked for and not yet in
+    reg  [31:0]          raddr [0:FRAMES-1];
+    reg  [OFF-1:0]       rest  [0:FRAMES-1];
+    reg  [7:0]           owed  [0:FRAMES-1];
     reg  [3:0]           rlane = 4'd0;
     // the bursts asked for, in order: whose, how long
     reg  [7:0]           aq_who [0:15];
@@ -236,6 +260,14 @@ module np2hw_frame_mem_axi #(
     reg  [7:0]           ask_who = 8'd0;
     reg  [7:0]           ask_len = 8'd0;
     reg  [31:0]          araddr = 32'd0;
+    // a read is begun only once no beat of one before is still to come:
+    // asked for, it waits; a stream starting over stops the asking
+    wire                 rd_busy = mem_arvalid || aq_w != aq_r;
+    reg                  pend = 1'b0, asking = 1'b0;
+    reg  [31:0]          pend_pixels = 32'd0;
+    reg  [OFF-1:0]       pend_words = {OFF{1'b0}};
+    reg  [31:0]          pend_base [0:FRAMES-1];
+    wire                 begin_read = pend && !rd_busy && !rst;
     assign mem_araddr = araddr;
     assign mem_arlen = ask_len - 8'd1;
     assign mem_rready = 1'b1;
@@ -251,7 +283,7 @@ module np2hw_frame_mem_axi #(
         reg [6:0]  w = 7'd0, r = 7'd0;
         wire in = mem_rvalid && aq_who[aq_r] == g;
         always @(posedge clk) begin
-            if (rst || rd_start) begin
+            if (mem_rst || begin_read) begin
                 w <= 7'd0; r <= 7'd0;
             end else begin
                 if (in) begin
@@ -267,48 +299,80 @@ module np2hw_frame_mem_axi #(
     end endgenerate
     assign rd_valid = left != 32'd0 && &has;
 
-    // whose turn it is, and whether its queue takes a whole burst more
+    // Whose turn it is, and whether its queue takes a whole burst more,
+    // in two registered steps -- which frames have room, then which asks
+    // -- so a request is made from registers alone. Room is judged from
+    // the state a cycle before it is read, so after a request or a new
+    // read, the decision waits until it reads what they changed.
     integer k;
+    reg  [FRAMES-1:0] room = {FRAMES{1'b0}};
     reg            fits;
     reg  [7:0]     pick, pick_len;
-    reg  [OFF-1:0] rest;
     always @* begin
         fits = 1'b0; pick = 8'd0; pick_len = 8'd0;
         for (k = FRAMES - 1; k >= 0; k = k - 1) begin : look
             integer j;
             j = (turn + k) % FRAMES;
-            rest = words - asked[j];
-            if (rest != 0 && held[j*7 +: 7] + owed[j] + BURST <= RQ) begin
+            if (room[j]) begin
                 fits = 1'b1; pick = j[7:0];
-                pick_len = rest < BURST ? rest[7:0] : BURST;
+                pick_len = rest[j] < BURST ? rest[j][7:0] : BURST;
             end
         end
     end
+    reg            dvalid = 1'b0, cool = 1'b0;
+    reg  [7:0]     dpick = 8'd0, dlen = 8'd0;
+    // room for one more burst asked for, judged a cycle late: one fewer
+    // than the queue of them holds, for the one that cycle may add
+    reg            aq_room = 1'b1;
 
+    wire ask = dvalid && asking && !pend && !rst && !mem_arvalid && aq_room;
     always @(posedge clk) begin
-        if (rst) begin
+        if (mem_rst) begin
             left <= 32'd0; mem_arvalid <= 1'b0; aq_w <= 4'd0; aq_r <= 4'd0;
+            pend <= 1'b0; asking <= 1'b0;
+            dvalid <= 1'b0; cool <= 1'b0; room <= {FRAMES{1'b0}};
+            aq_room <= 1'b1;
             for (k = 0; k < FRAMES; k = k + 1) begin
-                asked[k] <= {OFF{1'b0}}; owed[k] <= 8'd0;
-            end
-        end else if (rd_start) begin
-            left <= rd_pixels;
-            words <= (rd_pixels + SPW - 1) / SPW;
-            which <= rd_slots;
-            rlane <= 4'd0;
-            mem_arvalid <= 1'b0; aq_w <= 4'd0; aq_r <= 4'd0;
-            for (k = 0; k < FRAMES; k = k + 1) begin
-                asked[k] <= {OFF{1'b0}}; owed[k] <= 8'd0;
+                rest[k] <= {OFF{1'b0}}; owed[k] <= 8'd0;
             end
         end else begin
-            if (!mem_arvalid && fits && aq_w - aq_r != 4'd15) begin
-                ask_who <= pick;
-                ask_len <= pick_len;
-                araddr <= addr(which[pick*SB +: SB], asked[pick]);
-                asked[pick] <= asked[pick] + pick_len;
-                owed[pick] <= owed[pick] + pick_len;
+            for (k = 0; k < FRAMES; k = k + 1)
+                room[k] <= rest[k] != 0
+                           && held[k*7 +: 7] + owed[k] + BURST <= RQ;
+            cool <= ask || begin_read;
+            aq_room <= aq_w - aq_r < 4'd14;
+            dvalid <= fits && !cool && !ask && !begin_read && !rst;
+            dpick <= pick; dlen <= pick_len;
+            // the stream's side: a read asked for, begun, or abandoned
+            if (rst) begin
+                left <= 32'd0; pend <= 1'b0; asking <= 1'b0;
+            end else if (rd_start) begin
+                pend <= 1'b1;
+                pend_pixels <= rd_pixels;
+                pend_words <= (rd_pixels + SPW - 1) / SPW;
+                for (k = 0; k < FRAMES; k = k + 1)
+                    pend_base[k] <= slot_base(rd_slots[k*SB +: SB]);
+            end else if (begin_read) begin
+                pend <= 1'b0; asking <= 1'b1;
+                left <= pend_pixels;
+                rlane <= 4'd0;
+                for (k = 0; k < FRAMES; k = k + 1) begin
+                    raddr[k] <= pend_base[k];
+                    rest[k] <= pend_words;
+                    owed[k] <= 8'd0;
+                end
+            end
+            // the memory's side, whatever the stream does: an address
+            // out stays out until it is taken, every beat is taken
+            if (ask) begin
+                ask_who <= dpick;
+                ask_len <= dlen;
+                araddr <= raddr[dpick];
+                raddr[dpick] <= raddr[dpick] + {dlen, 3'b000};
+                rest[dpick] <= rest[dpick] - dlen;
+                owed[dpick] <= owed[dpick] + dlen;
                 mem_arvalid <= 1'b1;
-                turn <= (pick + 8'd1) % FRAMES;
+                turn <= (dpick + 8'd1) % FRAMES;
             end
             if (mem_arvalid && mem_arready) begin
                 mem_arvalid <= 1'b0;
@@ -317,11 +381,10 @@ module np2hw_frame_mem_axi #(
             end
             if (mem_rvalid) begin
                 owed[aq_who[aq_r]] <= owed[aq_who[aq_r]] - 8'd1
-                    + ((!mem_arvalid && fits && aq_w - aq_r != 4'd15
-                        && pick == aq_who[aq_r]) ? pick_len : 8'd0);
+                    + ((ask && dpick == aq_who[aq_r]) ? dlen : 8'd0);
                 if (mem_rlast) aq_r <= aq_r + 4'd1;
             end
-            if (out) begin
+            if (out && !rst) begin
                 left <= left - 32'd1;
                 rlane <= word_done ? 4'd0 : rlane + 4'd1;
             end

@@ -47,6 +47,14 @@
 // and a frame of another size than the one before, for frames of two sizes
 // are not one history.
 //
+// A RESET IS THE STREAM'S. `rst` starts the store over -- no history, the
+// count from zero, the read in progress abandoned -- whenever its stream
+// does, a link lost and found among them, while the memory behind the seam
+// may be in the middle of answering: the binding finishes what it has
+// promised its memory, and a frame it answers whole afterwards is of the
+// history before, so it never counts, and the ring goes on from the slot it
+// had reached, never back over one still being answered.
+//
 // THE MEMORY IS BEHIND A SEAM. The frames live wherever the binding on the
 // seam ports keeps them -- block RAM (np2hw_frame_mem_bram), or external
 // memory -- under a sequential contract, since frames are only ever written
@@ -107,10 +115,25 @@ module np2hw_frame_store #(
     output wire                     rd_ready,
     input  wire [FRAMES*BITS-1:0]   rd_data
 );
+    // Every beat in through a skid, so all that follows starts at a flop
+    // whatever drives the store -- an entry whose framing is decided
+    // combinationally from its counters, say -- and the input's ready is
+    // a register too.
+    wire                b_valid, b_ready, b_sof, b_eol, b_last;
+    wire [BITS-1:0]     b_data;
+    wire [CTX_BITS-1:0] b_ctx;
+    np2hw_skid #(.W(CTX_BITS + BITS + 3)) u_in (
+        .clk(clk), .rst(rst),
+        .s_data({in_ctx, in_last, in_eol, in_sof, in_data}),
+        .s_valid(in_valid), .s_ready(in_ready),
+        .m_data({b_ctx, b_last, b_eol, b_sof, b_data}),
+        .m_valid(b_valid), .m_ready(b_ready));
+
     // ---- what each slot holds: its frame's size, context and number
     reg [31:0]          size_of [0:SLOTS-1];
     reg [CTX_BITS-1:0]  ctx_of  [0:SLOTS-1];
     reg [15:0]          num_of  [0:SLOTS-1];
+    reg [31:0]          beats_of [0:SLOTS-1];   // its samples, counted
 
     // ---- write: every frame into the next slot of the ring
     reg [SB-1:0] next = {SB{1'b0}};     // the slot the next frame takes
@@ -118,21 +141,25 @@ module np2hw_frame_store #(
     reg          writing = 1'b0;        // a frame begun, its last not yet in
     reg [15:0]   count = 16'd0;         // frames begun since reset
     reg [31:0]   last_size = 32'd0;     // the frame before's
-    reg [15:0]   in_x = 16'd0;          // the beat's place in its row
-    reg [15:0]   in_w = 16'd0;          // the frame's width, once a row ends
-    reg [15:0]   in_y = 16'd0;          // rows ended in the frame
-    wire take = in_valid && in_ready;
+    // one past the beat's place in its row, and one past the rows ended
+    // in the frame, so the size a beat draws is a choice between
+    // registers; the width once a row ends
+    reg [15:0]   in_x1 = 16'd1, in_y1 = 16'd1;
+    reg [31:0]   in_n1 = 32'd1;         // one past the beats of the frame
+    reg [15:0]   in_w = 16'd0;
+    reg          rowed = 1'b0;          // a row of the frame has ended
+    wire take = b_valid && b_ready;
     // the frame's size as its last beat draws it: {rows, width}
-    wire [15:0] beat_x = in_sof ? 16'd0 : in_x;
-    wire [15:0] beat_y = in_sof ? 16'd0 : in_y;
-    wire [31:0] drawn = {beat_y + 16'd1,
-                         (!in_sof && in_y != 16'd0) ? in_w : beat_x + 16'd1};
-    assign in_ready = wr_ready;
-    assign wr_valid = in_valid;
-    assign wr_data  = in_data;
-    assign wr_sof   = in_sof;
-    assign wr_last  = in_last;
-    assign wr_slot  = in_sof ? next : wslot;
+    wire [15:0] beat_x1 = b_sof ? 16'd1 : in_x1;
+    wire [15:0] beat_y1 = b_sof ? 16'd1 : in_y1;
+    wire        beat_rowed = !b_sof && rowed;
+    wire [31:0] drawn = {beat_y1, beat_rowed ? in_w : beat_x1};
+    assign b_ready = wr_ready;
+    assign wr_valid = b_valid;
+    assign wr_data  = b_data;
+    assign wr_sof   = b_sof;
+    assign wr_last  = b_last;
+    assign wr_slot  = b_sof ? next : wslot;
 
     // ---- the frames whole: the newest, and how many in a row are
     reg [SB-1:0] newest = {SB{1'b0}};
@@ -142,7 +169,9 @@ module np2hw_frame_store #(
     // ---- read: the frame of frames the consumer is taking
     reg          reading = 1'b0;
     reg [SB-1:0] r_new = {SB{1'b0}};
-    reg [15:0]   r_w = 16'd0, r_h = 16'd0, r_num = 16'd0;
+    reg [15:0]   r_num = 16'd0;
+    reg [31:0]   r_beats = 32'd0;
+    reg [15:0]   r_w1 = 16'd0, r_h1 = 16'd0;   // one short of each
     reg [CTX_BITS-1:0] r_ctx = {CTX_BITS{1'b0}};
     reg [15:0]   x = 16'd0, y = 16'd0;
 
@@ -164,6 +193,14 @@ module np2hw_frame_store #(
         end
     endfunction
 
+    // A read starts as soon as there is history and nothing is being
+    // read; the frames begun past the newest whole one must not reach the
+    // oldest it takes
+    wire starts = !rst && !reading && !cold;
+    wire behind = starts &&
+        ((wslot >= newest) ? wslot - newest : wslot + SLOTS - newest)
+            > SLOTS - FRAMES;
+
     // A history is one run of consecutive frames of one size: its EPOCH
     // tags every slot written in it, so a frame the binding finishes after
     // a later one has started the history over is never counted in it. A
@@ -172,25 +209,32 @@ module np2hw_frame_store #(
     // can say the frame is whole, which is a cycle after its last beat at
     // the soonest -- and it is the new history's first.
     reg [7:0] epoch = 8'd0;
+    reg [7:0] epoch1 = 8'd1, epoch2 = 8'd2;     // the two after it
     reg [7:0] epoch_of [0:SLOTS-1];
-    wire      begins = take && in_sof;
-    wire      ends = take && in_last;
+    wire      begins = take && b_sof;
+    wire      ends = take && b_last;
     wire      cut = begins && writing;
     wire      resized = ends && drawn != last_size;
     wire      restart = cut || resized;
-    wire [7:0] epoch_next = epoch + (cut ? 8'd1 : 8'd0)
-                                  + (resized ? 8'd1 : 8'd0);
+    wire [7:0] epoch_next = (cut && resized) ? epoch2
+                          : (cut || resized) ? epoch1 : epoch;
     wire      counts = wr_done && epoch_of[wr_done_slot] == epoch;
     always @(posedge clk) begin
         if (rst) begin
-            next <= {SB{1'b0}}; wslot <= {SB{1'b0}}; writing <= 1'b0;
+            // the ring keeps its place: a frame written before the reset
+            // may yet be answered whole, and its slot is behind the next
+            writing <= 1'b0;
             count <= 16'd0; whole <= 8'd0; overrun <= 1'b0;
-            last_size <= 32'd0; epoch <= epoch + 8'd1;
-            in_x <= 16'd0; in_w <= 16'd0; in_y <= 16'd0;
+            last_size <= 32'd0;
+            epoch <= epoch1; epoch1 <= epoch2; epoch2 <= epoch2 + 8'd1;
+            in_x1 <= 16'd1; in_y1 <= 16'd1; in_n1 <= 32'd1;
+            in_w <= 16'd0; rowed <= 1'b0;
         end else begin
+            // the source reaching a frame being read, or a read starting
+            // on frames it has reached: one driver for the flag
+            if ((begins && read_holds(next)) || behind) overrun <= 1'b1;
             if (begins) begin
-                if (read_holds(next)) overrun <= 1'b1;
-                ctx_of[next] <= in_ctx;
+                ctx_of[next] <= b_ctx;
                 num_of[next] <= count;
                 count <= count + 16'd1;
                 wslot <= next;
@@ -201,19 +245,26 @@ module np2hw_frame_store #(
             if (begins || resized)
                 epoch_of[wr_slot] <= epoch_next;
             epoch <= epoch_next;
+            if (cut && resized) begin
+                epoch1 <= epoch2 + 8'd1; epoch2 <= epoch2 + 8'd2;
+            end else if (cut || resized) begin
+                epoch1 <= epoch2; epoch2 <= epoch2 + 8'd1;
+            end
             if (ends) begin
                 last_size <= drawn;
                 size_of[wr_slot] <= drawn;
+                beats_of[wr_slot] <= b_sof ? 32'd1 : in_n1;
             end
             if (take) begin
-                writing <= !in_last;
-                if (in_eol) begin
-                    in_x <= 16'd0;
-                    in_y <= beat_y + 16'd1;
-                    if (beat_y == 16'd0) in_w <= beat_x + 16'd1;
+                writing <= !b_last;
+                in_n1 <= (b_sof ? 32'd1 : in_n1) + 32'd1;
+                if (b_eol) begin
+                    in_x1 <= 16'd1; in_y1 <= beat_y1 + 16'd1;
+                    if (!beat_rowed) in_w <= beat_x1;
+                    rowed <= 1'b1;
                 end else begin
-                    in_x <= beat_x + 16'd1;
-                    in_y <= beat_y;
+                    in_x1 <= beat_x1 + 16'd1; in_y1 <= beat_y1;
+                    rowed <= beat_rowed;
                 end
             end
             // a frame is whole once the binding says every beat of it is
@@ -235,38 +286,35 @@ module np2hw_frame_store #(
         rd_start <= 1'b0;
         if (rst) begin
             reading <= 1'b0;
-        end else if (!reading && !cold) begin
-            // the frames begun past the newest whole one must not reach
-            // the oldest this read takes
-            if (((wslot >= newest) ? wslot - newest : wslot + SLOTS - newest)
-                    > SLOTS - FRAMES)
-                overrun <= 1'b1;
+        end else if (starts) begin
             reading <= 1'b1;
             rd_start <= 1'b1;
             r_new <= newest;
-            {r_h, r_w} <= size_of[newest];
             r_ctx <= ctx_of[newest];
             r_num <= num_of[newest];
+            r_beats <= beats_of[newest];
+            r_w1 <= size_of[newest][15:0] - 16'd1;
+            r_h1 <= size_of[newest][31:16] - 16'd1;
             x <= 16'd0; y <= 16'd0;
         end else if (beat) begin
             if (out_last) begin
                 reading <= 1'b0;
-            end else if (x == r_w - 1) begin
+            end else if (x == r_w1) begin
                 x <= 16'd0; y <= y + 16'd1;
             end else begin
                 x <= x + 16'd1;
             end
         end
     end
-    assign rd_pixels = r_w * r_h;
+    assign rd_pixels = r_beats;
     // the beats are offered only once the read has been asked for
     wire live = reading && !rd_start;
     assign out_valid = live && rd_valid;
     assign rd_ready  = live && out_ready;
     assign out_data  = rd_data;
     assign out_sof   = x == 16'd0 && y == 16'd0;
-    assign out_eol   = x == r_w - 1;
-    assign out_last  = out_eol && y == r_h - 1;
+    assign out_eol   = x == r_w1;
+    assign out_last  = out_eol && y == r_h1;
     assign out_ctx    = r_ctx;
     assign out_source = r_num;
 endmodule

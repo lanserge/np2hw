@@ -29,7 +29,22 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   read is fetched ahead into a queue of its own only as far as the queue
   has room, so a read is never paused. Bursts are sixteen beats at most, as
   a Zynq's AXI3 ports take them. It is held to the store's one model, under
-  a memory that answers late and lands a write only when it answers it.
+  a memory that answers late, lands a write only when it answers it, and
+  holds the master to the protocol. Its master has a reset of its own,
+  `mem_rst`, the memory's, which the port states as its reset: the store's
+  `rst` is the stream's, and when the stream starts over mid-burst every
+  address out is still taken, every burst promised sent whole, every
+  answer owed taken, and the ring goes on from the slot it had reached, so
+  a frame answered whole after the reset counts in no history. Every
+  request is made from registers -- each frame read's next address and
+  the words it still has to ask for, the slots' bases worked out once a
+  frame, the frame's samples counted as they come rather than its size
+  multiplied -- so the store meets a 7 ns clock on a Zynq-7020 out of
+  context, where it missed by 4.7 ns. Every beat comes in through a skid,
+  so the store's logic starts at a flop whatever drives it -- a board's
+  entry decides its framing combinationally from its counters -- and the
+  block-RAM binding's latency fact is 5. Its `overrun` has one driver; it
+  had two, which a design that wired the flag out would have refused.
 - **A design holding modelled leaves is proved from its models**
   (`np2hw.pipeline.proof`). The stream is followed from the design's input
   to its output: each composite of model blocks built whole runs its

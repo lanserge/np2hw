@@ -13,7 +13,8 @@
       },
       "inputs": [
         {"name": "clk"},
-        {"name": "rst", "description": "Active high."},
+        {"name": "rst", "description": "Active high: the stream's, starting the store over whenever its stream starts over."},
+        {"name": "mem_rst", "when": "implementation == 'axi'", "description": "Active high: the memory's, the one reset of the master on it -- a master reset alone mid-burst leaves its memory waiting."},
         {"name": "in", "stream": ["sof", "eol", "last", "ctx"], "width": "BITS", "context_bits": "CTX_BITS", "description": "The frames, as their source sends them: each frame's size the one its beats draw, its context taken with its first beat."}
       ],
       "outputs": [
@@ -26,6 +27,7 @@
          "description": "The external memory the frames live in: bursts of sixteen beats at most, one ID, every burst inside one 4K page."}
       ],
       "model": "np2hw.hdl.models:frame_store",
+      "facts": {"clocks": {"mem": ["clk", "mem_rst"]}},
       "implementations": {
         "bram": {
           "description": "The frames in block RAM, one memory a slot, PIXELS samples deep.",
@@ -34,8 +36,9 @@
                      "CTX_BITS": "CTX_BITS", "PIXELS": "PIXELS"},
           "sources": ["np2hw.hdl:np2hw_frame_store_bram.v",
                       "np2hw.hdl:np2hw_frame_store.v",
+                      "np2hw.hdl:np2hw_skid.v",
                       "np2hw.hdl:np2hw_frame_mem_bram.v"],
-          "facts": {"latency": 4}
+          "facts": {"latency": 5}
         },
         "axi": {
           "description": "The frames in external memory over AXI4, from BASE: a frame is whole once its writes are answered, and each frame read is fetched ahead into a queue of its own.",
@@ -44,6 +47,7 @@
                      "CTX_BITS": "CTX_BITS", "PIXELS": "PIXELS", "BASE": "BASE"},
           "sources": ["np2hw.hdl:np2hw_frame_store_axi.v",
                       "np2hw.hdl:np2hw_frame_store.v",
+                      "np2hw.hdl:np2hw_skid.v",
                       "np2hw.hdl:np2hw_frame_mem_axi.v"],
           "facts": {"latency": 400}
         }

@@ -142,7 +142,8 @@ def simulate(tmp_path, sizes, gaps, slots, consumer_wait, seed=11, delay=0):
         .replace("{delay}", str(max(delay, 1)))
         .replace("{late}", "1" if delay else "0"))
     sources = [hdl.path("np2hw_frame_store"),
-               hdl.path("np2hw_frame_mem_bram")]
+               hdl.path("np2hw_frame_mem_bram"),
+               hdl.path("np2hw_skid")]
     subprocess.run(["iverilog", "-g2005", "-o", str(tmp_path / "sim"),
                     str(tmp_path / "tb.v"), *map(str, sources)],
                    check=True, capture_output=True, text=True)

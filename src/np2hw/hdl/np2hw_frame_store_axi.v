@@ -5,7 +5,9 @@
 // memory: np2hw_frame_store on the AXI4 binding of its seam,
 // np2hw_frame_mem_axi. The ports are the frame store's own, as a design is
 // wired to them, and the memory's; what this implementation adds is only
-// where the frames live, slot by slot from BASE.
+// where the frames live, slot by slot from BASE, and the memory's own
+// reset, mem_rst: `rst` starts the store over, mem_rst the master on the
+// memory, and only the memory's reset may.
 module np2hw_frame_store_axi #(
     parameter BITS = 12,
     parameter FRAMES = 4,
@@ -16,6 +18,7 @@ module np2hw_frame_store_axi #(
 ) (
     input  wire                     clk,
     input  wire                     rst,
+    input  wire                     mem_rst,
     input  wire                     in_valid,
     output wire                     in_ready,
     input  wire [BITS-1:0]          in_data,
@@ -88,7 +91,7 @@ module np2hw_frame_store_axi #(
         .rd_valid(rd_valid), .rd_ready(rd_ready), .rd_data(rd_data));
     np2hw_frame_mem_axi #(.BITS(BITS), .FRAMES(FRAMES), .SLOTS(SLOTS),
                           .PIXELS(PIXELS), .BASE(BASE)) u_mem (
-        .clk(clk), .rst(rst),
+        .clk(clk), .rst(rst), .mem_rst(mem_rst),
         .wr_valid(wr_valid), .wr_ready(wr_ready), .wr_data(wr_data),
         .wr_sof(wr_sof), .wr_last(wr_last), .wr_slot(wr_slot),
         .wr_done(wr_done), .wr_done_slot(wr_done_slot),

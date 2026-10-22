@@ -26,9 +26,10 @@ pytestmark = pytest.mark.skipif(shutil.which("verilator") is None,
                                 reason="verilator not on PATH")
 
 W, H, BITS, DEPTH, SLOTS = 8, 4, 10, 2, 8
-# the store's latency, the pipeline's depth behind it, and some room for
-# the harness's way of counting cycles
-MARGIN = 4 + 16
+# the store's latency, as its implementation states it, the pipeline's
+# depth behind it, and some room for the harness's way of counting cycles
+MARGIN = composite.find("np2hw.hdl.frames:frame_store").obj[
+    "implementations"]["bram"]["facts"]["latency"] + 16
 
 
 def _design(library):

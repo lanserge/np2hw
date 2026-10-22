@@ -48,9 +48,12 @@ def margin(implementation):
 # each write answered and each read begun some cycles late, at random -- and
 # a write lands only when it is answered, which is all AXI promises: a
 # binding that calls a frame whole before its writes are answered reads
-# what was there before.
+# what was there before. It holds the master to the protocol, and says
+# "AXI:" where it is broken: a valid dropped before its handshake, or an
+# address changed under it, and a burst's last beat anywhere but last.
 MEMORY = """
-module tb_axi_mem #(parameter WORDS = 4096, parameter SEED = 1) (
+module tb_axi_mem #(parameter WORDS = 4096, parameter SEED = 1,
+                    parameter BLATE = 0) (
     input  wire clk,
     input  wire [31:0] awaddr, input wire [7:0] awlen, input wire awvalid,
     output reg  awready = 0,
@@ -70,16 +73,35 @@ module tb_axi_mem #(parameter WORDS = 4096, parameter SEED = 1) (
     reg [63:0] pend [0:255];
     reg [31:0] ra [0:15]; reg [7:0] rl [0:15]; integer rdue [0:15];
     integer ar_w = 0, ar_r = 0, rbeat = 0;
+    reg [7:0] wl [0:15];
+    // what the master offered and was not taken, at the last edge
+    reg aw_held = 0, ar_held = 0, w_held = 0;
+    reg [31:0] aw_was = 0, ar_was = 0; reg [7:0] awl_was = 0, arl_was = 0;
     always @(posedge clk) begin
         now = now + 1;
-        if (awvalid && awready) begin wa[aw_w % 16] = awaddr; aw_w = aw_w + 1; end
+        if (aw_held && (!awvalid || awaddr != aw_was || awlen != awl_was))
+            $display("AXI: write address dropped or changed before taken at %0d", now);
+        if (ar_held && (!arvalid || araddr != ar_was || arlen != arl_was))
+            $display("AXI: read address dropped or changed before taken at %0d", now);
+        if (w_held && !wvalid)
+            $display("AXI: write data dropped before taken at %0d", now);
+        if (wvalid && wready && wlast != (wbeat == wl[aw_r % 16]))
+            $display("AXI: wlast on beat %0d of a %0d-beat burst at %0d",
+                     wbeat, wl[aw_r % 16] + 1, now);
+        aw_held = awvalid && !awready; aw_was = awaddr; awl_was = awlen;
+        ar_held = arvalid && !arready; ar_was = araddr; arl_was = arlen;
+        w_held = wvalid && !wready;
+        if (awvalid && awready) begin
+            wa[aw_w % 16] = awaddr; wl[aw_w % 16] = awlen; aw_w = aw_w + 1;
+        end
         if (wvalid && wready) begin
             pend[(b_w % 16) * 16 + wbeat] = wdata;
             wbeat = wbeat + 1;
             if (wlast) begin
                 pend_a[b_w % 16] = wa[aw_r % 16]; pend_n[b_w % 16] = wbeat;
                 wbeat = 0; aw_r = aw_r + 1;
-                bdue[b_w % 16] = now + 3 + ($random(seed) & 31); b_w = b_w + 1;
+                bdue[b_w % 16] = now + 3 + BLATE + ($random(seed) & 31);
+                b_w = b_w + 1;
             end
         end
         if (bvalid && bready) begin
@@ -110,6 +132,7 @@ endmodule
 """
 
 MEMORY_PORTS = """,
+        .mem_rst(rst),
         .mem_awaddr(mem_awaddr), .mem_awlen(mem_awlen),
         .mem_awsize(), .mem_awburst(), .mem_awcache(), .mem_awprot(),
         .mem_awvalid(mem_awvalid), .mem_awready(mem_awready),
@@ -358,8 +381,11 @@ def run_rtl(tmp_path, frames, stim, outputs, implementation="bram", seed=1):
     subprocess.run(["iverilog", "-g2005", "-o", str(tmp_path / "sim"),
                     str(tmp_path / "tb.v"), *sources],
                    check=True, capture_output=True, text=True)
-    subprocess.run(["vvp", "-n", str(tmp_path / "sim")], cwd=tmp_path,
-                   check=True, capture_output=True, text=True)
+    run = subprocess.run(["vvp", "-n", str(tmp_path / "sim")], cwd=tmp_path,
+                         check=True, capture_output=True, text=True)
+    broken = [line for line in run.stdout.splitlines()
+              if line.startswith("AXI:")]
+    assert not broken, broken[:5]
     got, overrun = [], None
     for line in (tmp_path / "out.txt").read_text().splitlines():
         kind, *rest = line.split()
