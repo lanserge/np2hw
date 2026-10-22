@@ -154,8 +154,11 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   facts its port declares; the context block's registers supply the rest,
   joined into the one layout every core of the pipeline carries
   (`compose.context_layout`, `compose.carried_layout`), and a fact the
-  stream carries has no register. The RTL twin reads each output's size
-  from its `out_ctx`. A wrapper of one core (`control_top`, the
+  stream carries has no register. A design reads a stream's layout off a
+  node's port, an output's as well as an input's -- `context`,
+  `context_bits` and `context_at`, each fact of the vocabulary's low bit
+  in it or -1 -- so a module packing or unpacking it is told where each
+  fact goes. The RTL twin reads each output's size from its `out_ctx`. A wrapper of one core (`control_top`, the
   Switchboard and AXI4-Stream wrappers, the testbenches) offers each
   context field as a register port, the size among them, and packs them
   into `in_ctx` (`verilog.offered_params`, `verilog.context_word`).

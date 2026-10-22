@@ -113,3 +113,33 @@ def test_a_design_asks_whether_a_node_has_a_port(library):
     for impl, external in (("'bram'", False), ("'axi'", True)):
         design = composite.load(f"{name}.lib:top", {"impl": impl})
         assert bool(design.parameters["external"]) is external
+
+
+def test_a_design_reads_where_each_fact_rides_in_a_streams_context(library):
+    """A module packing a stream's context -- a board's entry, from a
+    header -- is told where each fact goes, read from the stream it feeds;
+    and one taking a pipeline's output is told how wide its context is. The
+    layout is the vocabulary's, stated nowhere else."""
+    def files(name):
+        params = {
+            "at_width": "isp.in.context_at['width']",
+            "at_tick": "isp.in.context_at['tick']",
+            "at_phase": "isp.in.context_at['phase']",
+            "bits_in": "isp.in.context_bits",
+            "bits_out": "isp.out.context_bits",
+            "out_facts": "'tick' in isp.out.context"}
+        return {"pipes": _brought(0), "board": {"board": {
+            "description": "a pipeline whose context a design reads",
+            "parameters": {k: {"default": v, "description": k}
+                           for k, v in params.items()},
+            "inputs": [{"name": "in"}], "outputs": [{"name": "out"}],
+            "nodes": {"isp": {"block": f"{name}.pipes:brought"}},
+            "connections": [["in", "isp.in"], ["isp.out", "out"]]}}}
+    name = library(files)
+    got = composite.load(f"{name}.board:board").parameters
+    # width 16, height 16, tick 4 as the stream carries them; no phase
+    assert (got["at_width"], got["at_tick"], got["at_phase"]) == (0, 32, -1)
+    assert got["bits_in"] == 36
+    # every core of the pipeline carries every fact it has: the stream's
+    # three and the registers' -- here none -- in one word
+    assert got["bits_out"] == 36 and got["out_facts"]

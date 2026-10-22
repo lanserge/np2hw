@@ -822,7 +822,31 @@ class _Loader:
     # -- facts of a node's ports, and composites built whole --------------- #
 
     FACTS = ("bits", "channels", "data_bits", "max_width", "max_height",
-             "context", "context_bits", "frames")
+             "context", "context_bits", "context_at", "frames")
+
+    #: The facts of a stream's context: its names, its CTX member's width,
+    #: and where each fact of the vocabulary sits in it.
+    CONTEXT_FACTS = ("context", "context_bits", "context_at")
+
+    def context_fact(self, layout, fact: str):
+        """A context fact of a stream whose CTX member is `layout`:
+        ``context`` its facts' names; ``context_bits`` its width;
+        ``context_at`` each fact of the design's vocabulary by name, the
+        low bit it is packed at, or -1 where the stream does not carry it
+        -- what a module packing or unpacking it is told, so the layout
+        has one owner, the vocabulary."""
+        from np2hw.stream import context_bits
+        if fact == "context":
+            return [name for name, _, _ in layout]
+        if fact == "context_bits":
+            return context_bits(layout)
+        at, lo = {}, 0
+        for name, bits, _ in layout:
+            at[name] = lo
+            lo += int(bits)
+        known = [c.name for c in self.vocabulary.signals] \
+            if self.vocabulary is not None else []
+        return {name: at.get(name, -1) for name in [*known, *at]}
 
     def port_fact(self, target: str, where: str):
         """``node.port.fact`` -- a fact of the stream at a composite's port,
@@ -846,21 +870,16 @@ class _Loader:
                         f"{where}: {target}: the stream entering "
                         f"{node.found.ref}'s {port} states no {fact}")
                 return facts[fact]
-            if fact == "context":
-                # the facts that ride with the stream entering: a design
-                # wires one to the port only where it is in this list
-                return list(facts.get("context", ()))
-            if fact == "context_bits":
-                # the width of its CTX member: those facts, packed as the
-                # design's vocabulary lays them out
-                from np2hw.stream import context_bits
+            if fact in self.CONTEXT_FACTS:
+                # the facts that ride with the stream entering, packed in
+                # its CTX member as the design's vocabulary lays them out
                 names = list(facts.get("context", ()))
                 if names and self.vocabulary is None:
                     raise CompositionError(
                         f"{where}: {target}: the stream carries "
                         f"{names}, and no vocabulary lays them out")
-                return context_bits(self.vocabulary.layout(names)) \
-                    if names else 0
+                return self.context_fact(
+                    self.vocabulary.layout(names) if names else (), fact)
             frames = int(facts.get("frames", 0))
             if fact == "frames":
                 return frames
@@ -868,8 +887,7 @@ class _Loader:
             return channels if fact == "channels" else \
                 int(facts["bits"]) * channels * max(1, frames)
         if port in outputs:
-            if fact in ("max_width", "max_height", "frames", "context",
-                        "context_bits"):
+            if fact in ("max_width", "max_height", "frames"):
                 raise CompositionError(
                     f"{where}: {target}: {fact} is declared where a stream "
                     "enters; an output's is not traced yet")
@@ -883,6 +901,12 @@ class _Loader:
                         f"{node.found.ref} drives {port}")
                 return self.port_fact(_join(node.path, f"{driver}.{fact}"),
                                       where)
+            if fact in self.CONTEXT_FACTS:
+                # built whole, every core of it carries the design's one
+                # layout, and hands it on with each frame
+                from np2hw.pipeline import compose
+                return self.context_fact(
+                    compose.context_layout(self.subdesign(node.path)), fact)
             _, generated = self.elaborate(node.path, where)
             out = generated.meta["boundary"]["outputs"][port]
             return {"data_bits": out["data_bits"],
