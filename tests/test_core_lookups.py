@@ -166,6 +166,28 @@ def test_a_small_constant_table_is_logic(tmp_path):
     assert _sim(tmp_path, core, frame, {}) == want.ravel().tolist()
 
 
+WIDE = Rom([(k << 40) | (k * 12345) for k in range(1, 9)], name="wide")
+
+
+def wide_table(img):
+    """Entries past Verilog's 32-bit default, their top bits read."""
+    return ((WIDE[img.astype(np.int32) & 7] >> 36) & 0xFF).astype(np.uint16)
+
+
+def test_a_constant_wider_than_32_bits_is_written_at_its_width(tmp_path):
+    """An unsized Verilog decimal is a 32-bit integer: a wider constant
+    written that way is truncated by a simulator and refused by Vivado.
+    Each is written sized, and the table's top bits come out as the
+    model's."""
+    import re
+    core = _compile(wide_table, name="wide")
+    unsized = [int(m) for m in re.findall(r"= (\d+);", core["verilog"])]
+    assert all(v < 1 << 31 for v in unsized), unsized
+    frame = np.random.default_rng(5).integers(0, 1 << 10, (H, W))
+    want = wide_table(frame.astype(np.uint16)).astype(np.int64)
+    assert _sim(tmp_path, core, frame, {}) == want.ravel().tolist()
+
+
 BIG = Rom([(i * 37) % 1000 for i in range(1024)], name="big")
 
 

@@ -18,6 +18,17 @@ from .hw import cat_fields
 from .passes import Unit
 
 
+def _literal(value: int) -> str:
+    """A constant as Verilog reads it: an unsized decimal is a 32-bit
+    integer, so one that does not fit says its width -- signed, with room
+    for its sign -- and a tool takes it whole instead of truncating it (or,
+    as Vivado does, refusing it)."""
+    if -(1 << 31) <= value < 1 << 31:
+        return str(value)
+    bits = abs(value).bit_length() + 1
+    return f"{bits}'sd{value}" if value >= 0 else f"-{bits}'sd{-value}"
+
+
 def _signed(v: Value) -> bool:
     return v.type.lo < 0
 
@@ -74,7 +85,7 @@ class _Printer:
         if k == "hw.param":
             return f"param_{n.attr('name')}"
         if k == "hw.const":
-            return self.wire(v, str(n.attr("value")), "c")
+            return self.wire(v, _literal(int(n.attr("value"))), "c")
         if k == "hw.regread":
             return f"r_{n.attr('name')}"
         if k == "hw.memread":
