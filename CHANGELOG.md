@@ -166,6 +166,10 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   and write it. A core latches `in_ctx` with a frame's first beat and hands
   `out_ctx` on with the frame: the same fields, the size the frame it puts
   out has, every other field as the frame brought it, each in a register.
+  A size a core works out rather than passes on -- a window's part of the
+  frame, an output a border smaller -- is worked out from the latched
+  size the cycle after the frame's first beat, a stage of its own, and
+  such a core keeps at least two stages, so its first beat out carries it.
   An image's `context` is its layout, by default the size alone. The size a
   model is traced at is the most the core holds (a line buffer's depth, a
   frame store's), and a generated module has no `WIDTH`/`HEIGHT` parameters

@@ -701,8 +701,10 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
         if kind == "fixed":
             handed[axis], out_end[axis] = c(k), c(lag + k - 1)
             continue
+        # passed on as it arrives, or worked out -- from the latched size,
+        # a cycle on (_settled_load)
         handed[axis] = (arriving[axis] if k == 0 else g.op(
-            "hw.clip", g.op("hw.sub", arriving[axis], c(k)), lo=0,
+            "hw.clip", g.op("hw.sub", held[axis], c(k)), lo=0,
             hi=(1 << POS) - 1))
         out_end[axis] = (per_frame(f"out_end_{axis[0]}", axis,
                                    lambda n, k=k, lag=lag: g.op(
@@ -853,7 +855,10 @@ def _stencil_control(unit, g, c, AND, NOT, EQ, SEL, reg_symbol, in_valid,
     load = _size_load(g, unit, reg_symbol, AND(go, anchor))
     roots = _substitute(g, unit.roots, _either(
         substitute, _frame_values(g, unit, reg_symbol, SEL, load)))
-    sizes = _handed(g, unit, reg_symbol, handed, load, {"rows": H, "cols": W})
+    worked = any(kind == "less" and k for kind, k in extent.values())
+    sizes = _handed(g, unit, reg_symbol, handed,
+                    _settled_load(g, unit, reg_symbol, load) if worked
+                    else load, {"rows": H, "cols": W})
     unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
                   **sizes}
     unit.roots["out_ctx"] = _out_ctx(g, unit, reg_symbol, sizes, load)
@@ -914,6 +919,22 @@ def _size_load(g, unit, reg_symbol, taken):
     unit.regs.append(g.node("hw.reg", [g.op("hw.const", value=1), taken],
                             {"name": "started"}))
     return g.op("hw.or", taken, g.op("hw.not", started))
+
+
+def _settled_load(g, unit, reg_symbol, load):
+    """The size registers' load a cycle late, for a size handed on that is
+    worked out rather than passed: worked out from the latched size the
+    cycle after the frame's first beat -- its own stage, not a chain behind
+    the context's arrival in the same cycle as the latch -- and loaded
+    then. The core then keeps at least two stages, so its first beat out,
+    when the next core reads the context, leaves on the same edge the size
+    lands on, never before."""
+    name = "size_load_late"
+    reg_symbol(name, 0, 1, 0)
+    unit.regs.append(g.node("hw.reg", [load, g.op("hw.const", value=1)],
+                            {"name": name}))
+    unit.facts["min_stages"] = 2
+    return g.op("hw.regread", name=name)
 
 
 def _handed(g, unit, reg_symbol, handed: dict, starts, traced: dict) -> dict:
@@ -1041,8 +1062,9 @@ def control() -> Pass:
                 return g.op("hw.clip", SEL(g.op("hw.ge", at, frame_n),
                                            c(0), held),
                             lo=0, hi=(1 << POS) - 1)
-            handed = {"rows": kept(incoming[rows], y0, h),
-                      "cols": kept(incoming[cols], x0, w)}
+            # worked out from the latched size, a cycle on (_settled_load)
+            handed = {"rows": kept(limit[rows], y0, h),
+                      "cols": kept(limit[cols], x0, w)}
         else:
             unit.facts["extent"] = {"rows": ("less", 0), "cols": ("less", 0)}
             handed = {"rows": incoming[rows], "cols": incoming[cols]}
@@ -1113,7 +1135,9 @@ def control() -> Pass:
         roots = _substitute(g, unit.roots, _either(
             position, _frame_values(g, unit, reg_symbol, SEL, load)))
         img = unit.facts["image"]
-        sizes = _handed(g, unit, reg_symbol, handed, load,
+        sizes = _handed(g, unit, reg_symbol, handed,
+                        _settled_load(g, unit, reg_symbol, load)
+                        if "window" in unit.facts else load,
                         {"rows": img.height, "cols": img.width})
         unit.roots = {**roots, **{f"flag_{k}": v for k, v in flags.items()},
                       **sizes}
@@ -1148,7 +1172,9 @@ def schedule(clk_ns=None, dev=None) -> Pass:
     budget is refused: no register can land inside one."""
 
     def run_(unit: Unit) -> Unit:
-        unit.facts["stages"] = 1
+        least = unit.facts.get("min_stages", 1)
+        unit.facts["stages"] = least
+        unit.facts.setdefault("stage_of", {})
         # a constant table's memory read takes a stage whatever the budget:
         # with none, the only cuts are the reads'
         # the datapath and the flags beside it: what the output stage reads
@@ -1196,7 +1222,8 @@ def schedule(clk_ns=None, dev=None) -> Pass:
             if fam.ns(d) > budget:
                 s, d = s + 1, cost
             stage[id(n)], depth[id(n)] = s, d
-        unit.facts["stages"] = max(stage.get(id(v.node), 0) for v in outs) + 1
+        unit.facts["stages"] = max(
+            least, max(stage.get(id(v.node), 0) for v in outs) + 1)
         unit.facts["stage_of"] = stage
         return unit
 

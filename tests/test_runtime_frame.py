@@ -142,8 +142,8 @@ module tb;
         .out_eol(out_eol), .out_last(out_last), .out_data(out_data),
         .out_ctx(out_ctx));
     always @(posedge clk) if (out_valid && out_ready)
-        $fdisplay(f, "%0d %0d %0d %0h", out_data, out_eol, out_last,
-                  out_ctx);
+        $fdisplay(f, "%0d %0d %0d %0h %0d", out_data, out_eol, out_last,
+                  out_ctx, out_sof);
     task send(input integer at, input integer n);
         begin
             for (i = 0; i < n; i = i + 1) begin
@@ -174,8 +174,13 @@ endmodule
     rows = (tmp_path / "out.txt").read_text().split("\n")
     rows = [r.split() for r in rows if r.strip()]
     beats = [tuple(map(int, r[:3])) for r in rows]
-    handed = [unpack_context(layout, int(r[3], 16)) for r in rows if r[2] == "1"]
-    return beats, [(c["width"], c["height"]) for c in handed]
+    # each frame's context, on the beat the stream contract carries it --
+    # its first, where the next core reads it -- and unchanged at its last
+    first = [unpack_context(layout, int(r[3], 16)) for r in rows if r[4] == "1"]
+    last = [unpack_context(layout, int(r[3], 16)) for r in rows if r[2] == "1"]
+    size = lambda cs: [(c["width"], c["height"]) for c in cs]
+    assert size(first) == size(last), (size(first), size(last))
+    return beats, size(first)
 
 
 def _check(tmp_path, fn, params, values, model_args, name, channels=1,
@@ -265,6 +270,21 @@ def test_a_window_keeps_what_its_registers_place(tmp_path):
     than the window ending at its own edges."""
     args = tuple(WINDOW[n] for n in ("y0", "x0", "h", "w"))
     _check(tmp_path, crop, _window_params(), WINDOW, args, "rt_crop")
+
+
+CORNER = {"y0": 0, "x0": 0, "h": 9, "w": 14}
+
+
+def test_a_crops_size_rides_its_first_beat_however_soon_it_leaves(tmp_path):
+    """A crop works out the size it hands on -- the window's part of the
+    frame -- from the latched size, a cycle after the frame's first beat,
+    so the arithmetic is a stage of its own and not a chain behind the
+    context's arrival. Its first beat out must still carry it: with the
+    window at the frame's corner and frames back to back, that beat leaves
+    as soon as the core lets it, and each frame's context is its own."""
+    args = tuple(CORNER[n] for n in ("y0", "x0", "h", "w"))
+    _check(tmp_path, crop, _window_params(), CORNER, args, "rt_crop_corner",
+           sizes=[(24, 16), (10, 6), (20, 12), (8, 4), (24, 16)], blank=0)
 
 
 def test_a_window_passes_a_packed_word_whole(tmp_path):
