@@ -98,11 +98,24 @@ def _const(g, ts, a):
     return (Type((), a["container"], v, v),)
 
 
+def register_container(bits: int, signed: bool) -> tuple:
+    """The container a register's value is in: the NumPy scalar the oracle
+    is handed (np2hw.ir.np_dtype), the smallest NumPy integer holding its
+    width -- not weak, so `uint8` data plus an `int8` register promotes to
+    `int16` as NumPy promotes it."""
+    size = next(b for b in (8, 16, 32, 64) if b >= bits)
+    return ("i" if signed else "u", size)
+
+
 def _param(g, ts, a):
     bits, signed = a["bits"], a["signed"]
     lo = -(1 << (bits - 1)) if signed else 0
     hi = (1 << (bits - (1 if signed else 0))) - 1
-    return (Type((), WEAK, lo, hi),)
+    # a register's own container unless the read says otherwise: weak for a
+    # value the NumPy run computes over Python ints (a bound expression's
+    # facts), exact once canonicalising has placed the wraps
+    c = a.get("container") or register_container(bits, signed)
+    return (Type((), c, lo, hi),)
 
 
 def _arith(fn):

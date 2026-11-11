@@ -217,7 +217,7 @@ def quadrature(video, pos, tag):
     frame phase, a register) is the design's to say, not this model's."""
     v = video.astype(np.int32)
     f = [v[3:], v[2:-1], v[1:-2], v[:-3]]               # f[k]: frame n - k
-    phase_of = [tag[(pos - k) & 3] for k in range(4)]
+    phase_of = [tag[(pos + 4 - k) & 3] for k in range(4)]   # pos may be unsigned
 
     def phase(j):
         return np.where(phase_of[0] == j, f[0],

@@ -11,8 +11,9 @@ A slice is index math and an access: `x[1:-1]` declares a variable of the
 slice's length and reads the buffer through `var + 1`; a stride and a
 register start are more index math (`2 * var + py`). `np.pad` is a larger
 buffer with new variables for its axes. Constants and registers are
-buffers with no axes -- a Python int and a register WEAK, a NumPy scalar
-with its own dtype, as NumPy 2 has them.
+buffers with no axes -- a Python int WEAK, a NumPy scalar with its own
+dtype, as NumPy 2 has them; a register is the NumPy scalar the oracle is
+handed for it (np2hw.ir.np_dtype).
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ import numpy as np
 
 from ..ir import Image2D, Param, PhaseRef
 from .graph import BOOL, WEAK, Graph, GraphError, Value
+from .model import register_container
 
 # importing registers the model kinds
 from . import model as _model  # noqa: F401
@@ -63,8 +65,10 @@ class Tracer:
     def const(self, value: int, container=WEAK) -> Value:
         return self.g.op("model.const", value=int(value), container=container)
 
-    def register(self, p: Param) -> Value:
-        """A register: one named declaration, one read."""
+    def register(self, p: Param, weak: bool = False) -> Value:
+        """A register: one named declaration, one read -- in the container
+        the NumPy run hands it in (np2hw.ir.np_dtype), or WEAK where the
+        NumPy run reads it as a Python int (a bound expression's facts)."""
         sym = self.g.symbols.get(p.name)
         if sym is None:
             read = self.g.op("model.param", name=p.name, bits=p.bits,
@@ -73,6 +77,12 @@ class Tracer:
         elif (sym["object"].bits, bool(sym["object"].signed)) != \
                 (p.bits, bool(p.signed)):
             raise Unsupported(f"two registers named {p.name!r}")
+        if weak:
+            if "weak_read" not in sym:
+                sym["weak_read"] = self.g.op(
+                    "model.param", name=p.name, bits=p.bits,
+                    signed=bool(p.signed), container=WEAK)
+            return sym["weak_read"]
         return sym["read"]
 
     def table(self, name: str, obj, size: int, container, lo: int,
@@ -335,7 +345,8 @@ class Array:
             raise Unsupported(f"a lookup in a {len(parent.shape)}-D array")
         lo = -(1 << (parent.bits - 1)) if parent.signed else 0
         hi = (1 << (parent.bits - (1 if parent.signed else 0))) - 1
-        tab = self.t.table(parent.name, parent, parent.shape[0], ("i", 64),
+        tab = self.t.table(parent.name, parent, parent.shape[0],
+                           register_container(parent.bits, parent.signed),
                            lo, hi)
         return self._op("model.access", tab, self.v)
 

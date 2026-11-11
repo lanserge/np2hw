@@ -11,6 +11,17 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Added
 
+- **A register is traced as the NumPy scalar the NumPy run is handed for
+  it** (`np_dtype(bits, signed)`, the smallest NumPy integer holding its
+  width), so the hardware wraps where NumPy does and nowhere else: `uint8`
+  data plus an `int8` register promotes to `int16`, and a register array's
+  arithmetic wraps at its type. A fact read in a bound input's expression
+  is weak, as that run is over Python ints.
+
+- **`Param.astype`**: a register converted as its NumPy scalar converts --
+  `black.astype(np.int32) * 256` widens before the multiply, where
+  `black * 256` wraps at the register's width, in NumPy and in the core.
+
 - **The tee's branch A may hold its stream** (`HOLD_A`, `tee(...,
   hold_a=True)`): for a stream that can wait -- a frame store's, paced by
   its consumer, never a sensor's -- A joins every frame it is enabled for

@@ -113,6 +113,9 @@ class _Rebuild:
                 self.g.symbols[attrs["name"]]["read"] = out
             return out
         if k == "model.param":
+            # exact, as the leaves are: the wraps its container imposes
+            # are placed from the traced types, node by node
+            attrs["container"] = EXACT
             out = g.node(k, ops, attrs).value
             self.g.symbols[attrs["name"]]["read"] = out
             return out

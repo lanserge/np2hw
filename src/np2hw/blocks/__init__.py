@@ -705,7 +705,7 @@ class Block:
                 # traced value it reads as, so the arithmetic is the trace's
                 # -- exact, and refused where the trace cannot do it.
                 lookup = (by_fact.__getitem__ if binding.facts == (binding.text,)
-                          else lambda f: by_fact[f]._traced())
+                          else lambda f: by_fact[f]._traced(weak=True))
                 given[binding.name] = value = binding.value(lookup)
                 binding.check(*_value_range(value), self.name)
             values = _View(given)

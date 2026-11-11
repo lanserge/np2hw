@@ -98,9 +98,11 @@ Arithmetic on what was accessed: `+ - *`, `//` and `>>` by constants,
 `clip`, `abs`, comparisons, `where`. Every
 value carries two facts: its exact integer RANGE, from which width and sign
 follow, and its NumPy CONTAINER -- the dtype NumPy holds it in under
-NumPy 2's rules (a Python int or a register is weak and adopts the other
-operand's dtype). The container says where NumPy wraps: `uint8 - 128`
-wraps, and the hardware wraps exactly there and nowhere else.
+NumPy 2's rules (a Python int is weak and adopts the other operand's
+dtype; a register is the NumPy scalar the NumPy run is handed for it, the
+smallest NumPy integer holding its width, so `uint8` data plus an `int8`
+register promotes to `int16`). The container says where NumPy wraps:
+`uint8 - 128` wraps, and the hardware wraps exactly there and nowhere else.
 
 A variable used as data -- `row * row`, a lookup by position -- is the
 counter's value on a wire, with the range its count gives.
@@ -506,7 +508,9 @@ Assignment to arbitrary regions is out of scope.
 ### 5. Containers
 
 Every model node carries its container, as traced: NumPy 2's rules, a
-Python int or a register weak. Canonicalising inserts a WRAP exactly where
+Python int weak, a register its NumPy scalar type (`np2hw.ir.np_dtype`) --
+or weak where the NumPy run reads it as a Python int, a fact in a bound
+input's expression. Canonicalising inserts a WRAP exactly where
 a value's range leaves its container, and after it containers play no part:
 hardware widths come from ranges alone. `astype` is a change of container,
 a wrap when the range leaves it.

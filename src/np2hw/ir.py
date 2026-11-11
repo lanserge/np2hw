@@ -171,13 +171,25 @@ class Param:
     # no arithmetic but the COMPLEMENT a phase needs (`1 - py`, `py ^ 1`),
     # a PhaseRef, so a slice start written with it stays a phase.
 
-    def _traced(self):
-        """This register as a value of the trace running, or None."""
+    def _traced(self, weak: bool = False):
+        """This register as a value of the trace running, or None: in the
+        NumPy scalar type the NumPy run hands it in (np_dtype), or, `weak`,
+        as the Python int a bound expression reads it as."""
         from .core.trace import Array, active
         t = active()
         if t is None or self.shape:
             return None
-        return Array(t, t.register(self))
+        return Array(t, t.register(self, weak=weak))
+
+    def astype(self, dtype):
+        """The register converted, as NumPy converts the scalar the NumPy
+        run is handed for it (np_dtype): `black.astype(np.int32) * 256`
+        does not wrap at the register's width."""
+        v = self._traced()
+        if v is None:
+            raise TypeError(f"register {self.name!r} has a value only inside "
+                            "a trace; the NumPy run is handed its NumPy scalar")
+        return v.astype(dtype)
 
     def _arith(op, reflected=False):
         def method(self, other):

@@ -23,13 +23,17 @@ os.makedirs(BUILD, exist_ok=True)
 
 def _param_arg(p, pv):
     """Reconstruct fn's argument for Param `p` from scalar-register values `pv`
-    (keyed by scalar name). Scalar Param -> int; matrix Param -> ndarray."""
+    (keyed by scalar name), as the NumPy run is handed it (np_dtype, as the
+    CLI and Params.bind do): a scalar of the register's NumPy type, an
+    array of it for a matrix Param."""
+    from np2hw.ir import np_dtype
+    dt = np_dtype(p.bits, p.signed)
     if getattr(p, "shape", ()):
-        out = np.zeros(p.shape, dtype=np.int64)
+        out = np.zeros(p.shape, dtype=dt)
         for idx in np.ndindex(*p.shape):
             out[idx] = pv[f"{p.name}_" + "_".join(str(i) for i in idx)]
         return out
-    return int(pv[p.name])
+    return dt.type(int(pv[p.name]))
 
 
 def _oracle(fn, A, params, pv, bits=8):
