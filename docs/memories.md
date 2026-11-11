@@ -112,9 +112,11 @@ bind. A composition can gather these into its build report; revela does.
   read in the stage that uses them, and a larger one as an initialised
   memory read through a register, which the tools build as a ROM. Either
   way they are not behind the seam.
-- **The clock-crossing FIFO** (`cdc_fifo`) is a dual-clock memory, which
-  is a different macro and a different contract; its seam is a separate
-  one (Next).
+- **The dual-clock memories** -- the clock-crossing FIFO (`cdc_fifo`) and
+  the readout (`np2hw_readout`), a stream's frames read on the bus's clock --
+  are a different macro and a different contract: block RAM, written on one
+  clock and read on the other ([clock-crossings.md](clock-crossings.md)).
+  Their seam is a separate one (Next).
 - **Verification on silicon.** Everything here is proven bit-identical
   in simulation and on an FPGA. That a given foundry macro honours the
   contract is the integrator's to verify, and this document is the

@@ -60,6 +60,17 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   among them (`np2hw.pipeline.run.legs`), and a fold's result goes on in a
   chain as its stream's frame.
 
+- **The readout leaf** (`np2hw.readout:readout`, over the fixed module
+  `np2hw_readout`): a stream's frames read by software over AXI4-Lite on
+  the bus's clock -- each frame written into a memory of two halves on the
+  stream's clock, the half being written never the half read, the frames
+  published counted and crossed Gray coded. Its window is word 0 the count,
+  then a slot of 32-bit words an entry, a value two's complement where it
+  is signed; the layout is published as its fact `layout`, and the
+  window's size is its address width, which a bus decoder places. It is
+  sized by the stream's own facts -- `isp.stats.max_width`, ... -- never by
+  numbers a design restates.
+
 - **A pipeline's output states its traced frame**: `max_width`,
   `max_height` and `signed` beside its width and channels, in the build's
   boundary and as a design's port facts -- a fold's output, its result's.

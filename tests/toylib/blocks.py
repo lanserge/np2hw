@@ -73,6 +73,19 @@ def meter(pixel, p, bit_depth):
     return np.array([(pixel >= p.level).sum(), (pixel < p.level).sum()])
 
 
+@toyblock(version=(1, 0), description="pixels counted below a level and at it",
+          inputs=(StreamPort("in"),),
+          outputs=(StreamPort("out", "two entries: the pixels below the "
+                                     "level, then those at or above it"),),
+          params=[Param("level", bits=8, default=128,
+                        description="what counts as bright")])
+def counts(pixel, p, bit_depth):
+    """A fold: the frame into its result, a stream of its own."""
+    acc = np.zeros(2, np.int64, like=pixel)
+    np.add.at(acc, (pixel >= p.level).astype(np.int64), 1)
+    return acc
+
+
 @toyblock(version=(1, 0), description="add two biases and the phase's low bit",
           inputs=(StreamPort("in"),), outputs=(StreamPort("out"),),
           params=[Param("bias", bits=10, signed=True, frac=2, shape=(2,),

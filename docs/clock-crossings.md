@@ -80,6 +80,29 @@ synchronised, says otherwise. A CDC checker that flags the memory is
 seeing the structure and not the protection; the pointer synchronisers
 are the protection, and they are what to point it at.
 
+## The readout: frames software reads
+
+`np2hw_readout` (the leaf `np2hw.readout:readout`) is the other crossing:
+a stream's frames -- a fold's statistics, most often -- written on the
+stream's clock and read over AXI4-Lite on the bus's. Its memory holds two
+frames and is the crossing, as the FIFO's is: block RAM, written on `clk`
+and read on `aclk`, the half being written never the half read. The one
+path besides it is the count of frames published, Gray coded on `clk` and
+synchronised through two flops on `aclk`, which says which half holds the
+last frame and is the only value software must trust across the clocks.
+Its file, generated with the leaf and scoped to `np2hw_readout`, bounds
+that path as the pointers' are bounded:
+
+```tcl
+set_max_delay -datapath_only -from [get_cells {frames_gray_reg[*]}] \
+              -to [get_cells {frames_sync1_reg[*]}] <one aclk period>
+```
+
+Software reads word 0 -- the count -- then the words it wants, then the
+count again; a count that changed means the half it read may have been
+rewritten as it read, and it reads again. Nothing in the hardware waits
+for a reader, and a stopped stream clock leaves the last frame readable.
+
 ## Reset
 
 **Both sides carry their own reset and a link reset must assert both** —

@@ -17,6 +17,7 @@ from np2hw.design import composite                                 # designs
 from np2hw import pipeline                                         # pipelines
 from np2hw.pipeline import compose, run
 from np2hw.core.cemit import compile_c                             # a model as C
+from np2hw.readout import readout                                  # frames to software
 from np2hw.testing import (Beat, frame_to_beats, beats_to_words,   # verification
                            check_framing, reset_stream, run_frame,
                            AxiLiteMaster, axis_video_map)
@@ -111,7 +112,10 @@ Python functions return the file with the values a use sets (`"parameters"`)
 and its interface; a result that instantiates one lists it in `"requires"`,
 and `np2hw.hdl.closure(result)` is the text with everything it requires.
 `np2hw_fork` is the one `compose()` instantiates itself, wherever a stream
-feeds two or more consumers that hold it.
+feeds two or more consumers that hold it. `np2hw_readout` sits under the leaf
+`np2hw.readout:readout` -- a stream's frames read by software over AXI4-Lite on
+the bus's clock, sized by the stream's traced facts
+([clock-crossings.md](clock-crossings.md)).
 Generated Verilog is for what genuinely varies: a traced model, a
 composition.
 

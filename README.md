@@ -82,7 +82,7 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/supported-ops.md](docs/supported-ops.md) | Exact list of traced operators/methods/`np.*` functions (and what isn't yet) |
 | [docs/parameters.md](docs/parameters.md) | Config registers: `Param`, `Params` namespace, defaults, matrix kernels, bool/bypass, live control |
 | [docs/streaming-and-bitwidths.md](docs/streaming-and-bitwidths.md) | Streaming model, line buffers, edge handling, dtype/bitwidth semantics |
-| [docs/clock-crossings.md](docs/clock-crossings.md) | The `cdc_fifo` crossing: what a timing and CDC flow must be told, and the reset contract |
+| [docs/clock-crossings.md](docs/clock-crossings.md) | The `cdc_fifo` and readout crossings: what a timing and CDC flow must be told, and the reset contract |
 | [docs/memories.md](docs/memories.md) | The memory seam: line buffers as a bindable module, the macro contract, `sync_memory` |
 | [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOL/last framing, continuous frames, each frame's size at run time |
 | [docs/ipxact.md](docs/ipxact.md) | IP-XACT: packaging a component, and the stream's own bus definition |
@@ -131,6 +131,9 @@ Design rationale (the "why" behind each mechanism) lives in
   a consuming core names a model file and geometry, and the Verilog core is
   traced during that project's own build, byte-identical on every run; or it
   names a pipeline (`design`), and gets the pipeline's verified design pack.
+- **Statistics**: a fold's result is a stream of its own, and the readout leaf
+  (`np2hw.readout`) hands its frames to software over AXI4-Lite on the bus's
+  clock, sized by the stream's traced facts.
 - **Stream plumbing** for the boundaries a traced core sits between: `skid`
   (a registered boundary, so one core's combinational depth stops being the
   next one's), `tee` (one stream, two consumers, never stalling -- a consumer
