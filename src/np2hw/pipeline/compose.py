@@ -1123,16 +1123,22 @@ def _output_boundary(design, built, name) -> dict:
     can be divided by three to recover. So the channel count is published
     beside the width, and whoever unpacks the word reads both rather than
     dividing and hoping."""
-    channels = 1
+    channels, frame = 1, {}
     for source, sink in netlist(design).edges:
         if sink.node is None and sink.port == name and source.node:
             result = built.get(source.node)
             if result is not None:
-                channels = int((result.core["interface"].get("output") or {})
+                core = result.core
+                channels = int((core["interface"].get("output") or {})
                                .get("channels", 1))
+                # the frame it puts out, as traced -- a fold's, its
+                # result's -- and whether its values can be negative
+                frame = {"max_width": int(core["out_cols"]),
+                         "max_height": int(core["out_rows"]),
+                         "signed": bool(core["signed"])}
             break
     data_bits = _output_stream(design, built, name).data_bits
-    out = {"data_bits": data_bits, "channels": channels}
+    out = {"data_bits": data_bits, "channels": channels, **frame}
     if channels and data_bits % channels == 0:
         out["channel_bits"] = data_bits // channels
     return out

@@ -101,8 +101,8 @@ each beside the models, and each fails on any difference.
 Verilator -- every leg, each input to each output it reaches, a fork's every
 branch among them -- then writes the design pack (`np2hw.pipeline.pack`): the
 Verilog, the register map, SystemRDL, the register documentation,
-`<name>_build.json` (top, latency, geometry, boundary widths, memories)
-and a FuseSoC `.core`.
+`<name>_build.json` (top, latency, geometry, each output's traced width,
+frame and sign, memories) and a FuseSoC `.core`.
 `--no-control` stops at the datapath, `--sync-memory` refuses a line buffer
 that reads combinationally, `--vlnv` names the core.
 

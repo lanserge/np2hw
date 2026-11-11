@@ -60,6 +60,10 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   among them (`np2hw.pipeline.run.legs`), and a fold's result goes on in a
   chain as its stream's frame.
 
+- **A pipeline's output states its traced frame**: `max_width`,
+  `max_height` and `signed` beside its width and channels, in the build's
+  boundary and as a design's port facts -- a fold's output, its result's.
+
 - **`np2hw pipeline run --c`**: every block of the chain run as its model
   printed as C, on the same frames, registers and context, and held to the
   models word for word beside `--rtl`. `Block.compile_c` builds a block's

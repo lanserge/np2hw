@@ -822,7 +822,7 @@ class _Loader:
     # -- facts of a node's ports, and composites built whole --------------- #
 
     FACTS = ("bits", "channels", "data_bits", "max_width", "max_height",
-             "context", "context_bits", "context_at", "frames")
+             "context", "context_bits", "context_at", "frames", "signed")
 
     #: The facts of a stream's context: its names, its CTX member's width,
     #: and where each fact of the vocabulary sits in it.
@@ -880,6 +880,8 @@ class _Loader:
                         f"{names}, and no vocabulary lays them out")
                 return self.context_fact(
                     self.vocabulary.layout(names) if names else (), fact)
+            if fact == "signed":
+                return bool(facts.get("signed", False))
             frames = int(facts.get("frames", 0))
             if fact == "frames":
                 return frames
@@ -887,7 +889,7 @@ class _Loader:
             return channels if fact == "channels" else \
                 int(facts["bits"]) * channels * max(1, frames)
         if port in outputs:
-            if fact in ("max_width", "max_height", "frames"):
+            if fact == "frames":
                 raise CompositionError(
                     f"{where}: {target}: {fact} is declared where a stream "
                     "enters; an output's is not traced yet")
@@ -909,9 +911,16 @@ class _Loader:
                     compose.context_layout(self.subdesign(node.path)), fact)
             _, generated = self.elaborate(node.path, where)
             out = generated.meta["boundary"]["outputs"][port]
+            if fact in ("max_width", "max_height", "signed") \
+                    and fact not in out:
+                raise CompositionError(
+                    f"{where}: {target}: {port} is the stream entering, "
+                    f"passed through; its {fact} is where it enters")
             return {"data_bits": out["data_bits"],
                     "channels": out["channels"],
-                    "bits": out.get("channel_bits", out["data_bits"])}[fact]
+                    "bits": out.get("channel_bits", out["data_bits"]),
+                    **{k: out[k] for k in ("max_width", "max_height",
+                                           "signed") if k in out}}[fact]
         raise CompositionError(
             f"{where}: {target}: {node.found.ref} has no port {port!r} "
             f"(inputs {sorted(inputs)}, outputs {sorted(outputs)})")
