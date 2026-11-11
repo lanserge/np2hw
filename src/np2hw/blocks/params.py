@@ -33,12 +33,6 @@ Three kinds of state, deliberately kept distinct
                instead and takes no register. Never duplicated as a per-block
                CSR -- one owner per fact, not one per block.
 
-``StatsWindow`` STATISTICS. A memory-mapped RAM window in a separate address
-               region, read in bulk rather than as scattered CSR words, and
-               double-buffered per frame: the host reads frame N while frame N+1
-               accumulates. NOT commit-on-vsync -- that is a config mechanism and
-               means the opposite thing.
-
 Fixed-point convention
 ----------------------
 
@@ -589,71 +583,6 @@ class Vocabulary:
 
 
 # --------------------------------------------------------------------------- #
-# StatsWindow -- bulk-read statistics memory
-# --------------------------------------------------------------------------- #
-
-@dataclass(frozen=True)
-class StatsWindow:
-    """A double-buffered, memory-mapped statistics RAM.
-
-    Statistics are structurally unlike config: the host reads hundreds of words
-    in bulk after each frame, and it must read a coherent snapshot. So they get
-    their own address region, a RAM window rather than scattered CSRs, and
-    double buffering -- frame N is readable while frame N+1 accumulates. The
-    buffer swaps at end-of-frame; there is no commit-on-vsync, because nothing
-    is being written by the host.
-
-    Args:
-        name: lower_snake_case identifier, unique within the block.
-        words: number of 32-bit words in ONE buffer. Rounded up to a power of two
-            when allocated, so the decode stays a bit-slice compare.
-        description: what the window contains and how it is laid out.
-        layout: ordered field names within one record, e.g.
-            ``("sum_r", "sum_g", "sum_b", "count")``. ``words`` must be a whole
-            number of records.
-    """
-
-    name: str
-    words: int
-    description: str = ""
-    layout: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _check_name(self.name, "statistics window")
-        if self.words <= 0:
-            raise ValueError(f"stats window {self.name!r}: words must be positive")
-        if not self.description:
-            raise ValueError(f"stats window {self.name!r}: description is required")
-        for fname in self.layout:
-            _check_name(fname, "statistics field")
-        if self.layout and self.words % len(self.layout):
-            raise ValueError(
-                f"stats window {self.name!r}: {self.words} words is not a whole number "
-                f"of {len(self.layout)}-word records")
-
-    @property
-    def record_words(self) -> int:
-        return len(self.layout) or 1
-
-    @property
-    def records(self) -> int:
-        return self.words // self.record_words
-
-    @property
-    def size_bytes(self) -> int:
-        """Bytes occupied by BOTH buffers, rounded to a power of two.
-
-        Address space is free; a clean decode is not.
-        """
-        one = 1 << max(0, (self.words * 4 - 1).bit_length())
-        return one * 2
-
-    @property
-    def buffer_bytes(self) -> int:
-        return self.size_bytes // 2
-
-
-# --------------------------------------------------------------------------- #
 # ParamSet -- one block's declaration, in local terms only
 # --------------------------------------------------------------------------- #
 
@@ -685,7 +614,7 @@ class ParamSet:
     Shaped Params expand row-major into consecutive words.
     """
 
-    def __init__(self, block: str, version: tuple[int, int], params=(), stats=(),
+    def __init__(self, block: str, version: tuple[int, int], params=(),
                  consumes: tuple[str, ...] = (), description: str = ""):
         self.block = _check_name(block, "block")
         if not (len(version) == 2 and all(0 <= v <= 255 for v in version)):
@@ -694,7 +623,6 @@ class ParamSet:
         self.version = (int(version[0]), int(version[1]))
         self.description = description
         self.consumes = tuple(consumes)
-        self.stats = tuple(stats)
         self.params = tuple(params)
 
         seen: set[str] = set()
@@ -708,12 +636,6 @@ class ParamSet:
                 seen.add(leaf.name)
                 self._registers.append(Register(leaf, offset))
                 offset += 4
-        for window in self.stats:
-            if window.name in seen:
-                raise ValueError(
-                    f"block {block!r}: statistics window {window.name!r} collides with "
-                    "a register name")
-            seen.add(window.name)
         self._by_name = {r.name: r for r in self._registers}
 
     # -- identity ------------------------------------------------------------- #
@@ -773,7 +695,7 @@ class ParamSet:
 
     def __repr__(self) -> str:
         return (f"ParamSet({self.block!r}, v{self.version[0]}.{self.version[1]}, "
-                f"{len(self._registers)} registers, {len(self.stats)} stats windows)")
+                f"{len(self._registers)} registers)")
 
     # -- np2hw bridge --------------------------------------------------------- #
 
@@ -888,7 +810,6 @@ class BlockInstance:
     path: str
     paramset: ParamSet
     base: int
-    stats_bases: dict[str, int] = field(default_factory=dict)
 
     @property
     def instance(self) -> str:
@@ -909,21 +830,16 @@ class AddressAllocator:
 
     Config blocks are packed from ``config_base`` upward, each aligned to
     :data:`BLOCK_ALIGN`, so decoding a block is ``addr[N-1:8] == constant``.
-    Statistics windows are allocated in a separate region from ``stats_base``,
-    each aligned to its own power-of-two size, because they are RAM windows read
-    in bulk rather than CSR words.
 
     Address space is free. Alignment that makes the decoder a bit-slice compare
     is not, and neither is a register map a reviewer can read.
     """
 
-    def __init__(self, config_base: int = 0x0000, stats_base: int = 0x8000):
+    def __init__(self, config_base: int = 0x0000):
         if config_base % BLOCK_ALIGN:
             raise ValueError(f"config_base 0x{config_base:x} must be {BLOCK_ALIGN}-aligned")
         self.config_base = config_base
-        self.stats_base = stats_base
         self._next_config = config_base
-        self._next_stats = stats_base
         self._instances: list[BlockInstance] = []
         self._paths: set[str] = set()
 
@@ -936,19 +852,7 @@ class AddressAllocator:
         base = self._next_config
         self._next_config = base + paramset.size_bytes
 
-        stats_bases: dict[str, int] = {}
-        for window in paramset.stats:
-            size = window.size_bytes
-            start = (self._next_stats + size - 1) // size * size   # natural alignment
-            stats_bases[window.name] = start
-            self._next_stats = start + size
-        if self._next_stats > self.stats_base and self._next_config > self.stats_base:
-            raise ValueError(
-                f"config region overflowed into the statistics region at "
-                f"0x{self.stats_base:x}; raise stats_base")
-
-        inst = BlockInstance(path=path, paramset=paramset, base=base,
-                             stats_bases=stats_bases)
+        inst = BlockInstance(path=path, paramset=paramset, base=base)
         self._instances.append(inst)
         return inst
 
@@ -962,5 +866,4 @@ class AddressAllocator:
 
     def address_bits(self) -> int:
         """Bits needed to address everything allocated so far."""
-        top = max(self._next_config, self._next_stats)
-        return max(1, (top - 1).bit_length())
+        return max(1, (self._next_config - 1).bit_length())

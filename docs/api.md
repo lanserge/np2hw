@@ -11,7 +11,7 @@ from np2hw import Reg, RegBlock, RegInstance, AddrMap, systemrdl   # register ma
 from np2hw import axil_regfile, control_wrap                       # control plane
 from np2hw import skid, tee, cdc_fifo, frame_history               # plumbing
 from np2hw.blocks import block, configblock, StreamPort, Binding     # blocks
-from np2hw.blocks.params import Param, ParamSet, Context, StatsWindow
+from np2hw.blocks.params import Param, ParamSet, Context
 from np2hw.blocks.stream import StreamSpec
 from np2hw.design import composite                                 # designs
 from np2hw import pipeline                                         # pipelines
@@ -134,9 +134,8 @@ module.
 ## Blocks (`np2hw.blocks`)
 
 A block is a NumPy model plus what its arithmetic cannot say: its registers
-and scalar inputs (`np2hw.blocks.params`: `Param`, `ParamSet`,
-`StatsWindow`, LOCAL offsets only, a composer assigning each instance its
-base) and the names of its stream ports (`StreamPort`; widths are traced,
+and scalar inputs (`np2hw.blocks.params`: `Param`, `ParamSet`, LOCAL
+offsets only, a composer assigning each instance its base) and the names of its stream ports (`StreamPort`; widths are traced,
 never declared). It knows nothing of the pipeline it is placed in: what
 feeds an input is the design's -- its register, or the pipeline context the
 design binds it to.

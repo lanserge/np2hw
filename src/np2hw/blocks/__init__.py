@@ -369,7 +369,7 @@ class Block:
             base,
             params=ParamSet(block=base.params.block,
                             version=base.params.version,
-                            params=rebuilt, stats=list(base.params.stats),
+                            params=rebuilt,
                             consumes=base.params.consumes,
                             description=base.params.description),
             overrides={reg: dict(attrs) for reg, attrs in registers.items()},
@@ -448,7 +448,6 @@ class Block:
             self,
             params=ParamSet(block=self.params.block,
                             version=self.params.version, params=kept,
-                            stats=list(self.params.stats),
                             consumes=tuple(dict.fromkeys(
                                 (*self.params.consumes, *facts))),
                             description=self.params.description),
@@ -848,7 +847,7 @@ def model_header(function, what: str) -> list[str]:
     ]
 
 
-def configblock(name, *, version, description, params=(), stats=()):
+def configblock(name, *, version, description, params=()):
     """A block with registers but no pixel stream: a pipeline's context
     block, say.
 
@@ -860,13 +859,13 @@ def configblock(name, *, version, description, params=(), stats=()):
     return Block(
         model=None,
         params=ParamSet(block=name, version=version, params=list(params),
-                        stats=list(stats), description=description),
+                        description=description),
         inputs=(), outputs=(),
         not_traceable="it owns configuration and has no datapath to trace",
     )
 
 
-def block(*, version, description, name=None, params=(), stats=(),
+def block(*, version, description, name=None, params=(),
           inputs=(), outputs=(), not_traceable="", even_frame=False):
     """Declare a block. The decorated function IS the block's model.
 
@@ -902,7 +901,7 @@ def block(*, version, description, name=None, params=(), stats=(),
         return Block(
             model=function,
             params=ParamSet(block=name or function.__name__, version=version,
-                            params=list(params), stats=list(stats),
+                            params=list(params),
                             description=description),
             inputs=tuple(inputs),
             outputs=tuple(outputs),

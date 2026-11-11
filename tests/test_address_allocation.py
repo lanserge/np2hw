@@ -127,42 +127,6 @@ def test_no_two_blocks_overlap(stereo):
             f"(starts 0x{start:04x})")
 
 
-def test_statistics_live_in_a_separate_region(stereo):
-    """Statistics are structurally different and are addressed separately."""
-    config_top = max(s.instance.base + s.paramset.size_bytes for s in compose.stages(stereo))
-    windows = [(base, window)
-               for s in compose.stages(stereo)
-               for window in s.paramset.stats
-               for base in [s.instance.stats_bases[window.name]]]
-
-    assert windows, "the stereo pipeline should contain statistics windows"
-    for base, window in windows:
-        assert base >= compose.allocator(stereo).stats_base > config_top
-        # Naturally aligned, so the window decode is a bit-slice compare too.
-        assert base % window.size_bytes == 0
-
-
-def test_statistics_windows_are_double_buffered(stereo):
-    """Host reads frame N while frame N+1 accumulates: two buffers, not one."""
-    for stage in compose.stages(stereo):
-        for window in stage.paramset.stats:
-            assert window.size_bytes == window.buffer_bytes * 2
-            assert window.buffer_bytes * 8 >= window.words * 4
-
-
-def test_statistics_windows_do_not_overlap(stereo):
-    spans = sorted(
-        (s.instance.stats_bases[w.name], s.instance.stats_bases[w.name] + w.size_bytes,
-         f"{s.path}.{w.name}")
-        for s in compose.stages(stereo) for w in s.paramset.stats)
-    for (_, prev_end, prev), (start, _, current) in zip(spans, spans[1:]):
-        assert prev_end <= start, f"{prev} overlaps {current}"
-
-
-# --------------------------------------------------------------------------- #
-# The emitted register map
-# --------------------------------------------------------------------------- #
-
 def test_every_address_in_the_map_is_base_plus_local_offset(stereo):
     for block in compose.register_map(stereo)["blocks"]:
         for register in block["registers"]:
@@ -211,12 +175,8 @@ def test_map_round_trips_through_json(stereo, tmp_path):
 
 def test_map_declares_enough_address_bits(stereo):
     mapping = compose.register_map(stereo)
-    top = max(
-        max(r["address"] for b in mapping["blocks"] for r in b["registers"]),
-        max((w["base"] + w["size_bytes"]
-             for b in mapping["blocks"] for w in b["statistics"]), default=0),
-    )
-    assert top <= (1 << mapping["address_bits"])
+    top = max(r["address"] for b in mapping["blocks"] for r in b["registers"])
+    assert top < (1 << mapping["address_bits"])
 
 
 # --------------------------------------------------------------------------- #

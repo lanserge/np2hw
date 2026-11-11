@@ -6,7 +6,7 @@ import numpy as np
 
 from np2hw import saturate
 from np2hw.blocks import StreamPort, block, configblock
-from np2hw.blocks.params import Context, Param, StatsWindow, Vocabulary
+from np2hw.blocks.params import Context, Param, Vocabulary
 
 CONTEXT = (
     Context(name="width", bits=16, default=64, follows="width",
@@ -66,9 +66,7 @@ def triple(pixel, p, bit_depth):
           inputs=(StreamPort("in"),), outputs=(),
           not_traceable="a reduction, which np2hw does not trace",
           params=[Param("level", bits=8, default=128,
-                        description="what counts as bright")],
-          stats=[StatsWindow("counts", words=4, layout=("bright", "dark"),
-                             description="two records of two counts")])
+                        description="what counts as bright")])
 def meter(pixel, p, bit_depth):
     return np.array([(pixel >= p.level).sum(), (pixel < p.level).sum()])
 

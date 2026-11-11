@@ -221,6 +221,14 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Changed
 
+- **A design's register file is as wide as its registers.** No region is
+  reserved for statistics windows -- statistics are a fold's stream, read
+  through the readout -- so the control interface's address ports
+  (`s_axil_awaddr`, `s_axil_araddr`) and its window on the bus are what the
+  registers need -- 12 bits, one page, for revela's ISPs -- where every
+  design was at least 15 bits and 32 KB. The registers keep their
+  addresses.
+
 - **One compiler.** `np2hw.core` builds every model; the earlier compiler,
   its tracer (`np2hw.frontend`, `np2hw.trace`) and its emitters are gone,
   with the `NP2HW_CORE` switch. `to_ir(fn, image, *params, channels=1)`

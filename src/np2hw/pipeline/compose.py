@@ -29,7 +29,6 @@ Layout
     0x0100  first block instance
     0x0200  second block instance
     ...
-    0x8000  statistics region -- RAM windows, double-buffered, bulk read
 
 Every config block starts on a 256-byte boundary, so the address decoder is a
 bit-slice compare (``addr[15:8] == 8'h01``) rather than a pair of magnitude
@@ -76,7 +75,9 @@ from np2hw.blocks.stream import StreamSpec
 #   5  `composites`: every composite instance the design was built from,
 #      by path and reference ("" for the design itself), so a profile
 #      keyed relative to a composite can be anchored wherever it sits.
-MAP_FORMAT_VERSION = 5
+#   6  no `statistics`, per block or for the map: statistics are a fold's
+#      stream, read through the readout.
+MAP_FORMAT_VERSION = 6
 
 
 # One end of a connection. np2hw's: the netlist is np2hw's structure, and a
@@ -400,7 +401,7 @@ def stages(design) -> list[Stage]:
         return cached
     form = shape(design)
     carried = form.context
-    allocator = AddressAllocator(config_base=0x0000, stats_base=0x8000)
+    allocator = AddressAllocator(config_base=0x0000)
     out = []
     vocab = vocabulary(design)
     # A register that follows the frame's width or height resets to THIS
@@ -523,21 +524,6 @@ def register_map(design) -> dict:
                 "commit": "armed",
                 "description": param.description,
             })
-        windows = []
-        for window in paramset.stats:
-            windows.append({
-                "name": window.name,
-                "base": inst.stats_bases[window.name],
-                "buffer_bytes": window.buffer_bytes,
-                "size_bytes": window.size_bytes,
-                "words": window.words,
-                "records": window.records,
-                "record_words": window.record_words,
-                "layout": list(window.layout),
-                "access": "ro",
-                "buffering": "double",
-                "description": window.description,
-            })
         blocks.append({
             "path": s.path,
             "block": paramset.block,
@@ -570,7 +556,6 @@ def register_map(design) -> dict:
                                "one it was built against",
             },
             "registers": registers,
-            "statistics": windows,
         })
 
     return {
@@ -621,11 +606,6 @@ def register_map(design) -> dict:
                 "size": alloc.config_span,
                 "structure": "one 32-bit CSR per word, shadowed and committed "
                              "at the frame boundary",
-            },
-            "statistics": {
-                "base": alloc.stats_base,
-                "structure": "double-buffered RAM windows, read-only, read in "
-                             "bulk",
             },
         },
         "blocks": blocks,
@@ -1278,19 +1258,5 @@ def register_map_markdown(mapping: dict) -> str:
               f"| {register['default']} | {register['access']} "
               f"| {register['description']} |")
         a("")
-
-        for window in block["statistics"]:
-            a(f"### `{window['name']}` statistics window")
-            a("")
-            a(window["description"])
-            a("")
-            a(f"- Base `0x{window['base']:04x}`, {window['size_bytes']} bytes "
-              f"({window['buffering']}-buffered, {window['buffer_bytes']} bytes "
-              f"per buffer)")
-            a(f"- {window['records']} records of {window['record_words']} "
-              f"word(s): " + ", ".join(f"`{f}`" for f in window["layout"]))
-            a(f"- Access: {window['access']}. Read in bulk; the completed frame "
-              "is in buffer 0 while the next accumulates in buffer 1.")
-            a("")
 
     return "\n".join(out) + "\n"
