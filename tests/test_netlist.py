@@ -171,19 +171,13 @@ def test_a_tap_to_a_sink_is_allowed():
     assert "tap: sink never stalls" in compose.generate(pipeline).verilog
 
 
-def test_a_fork_between_two_real_datapaths_is_refused():
-    """Both would apply backpressure, and there is no buffering fork element.
-
-    Refusing is better than emitting a fork that deadlocks the first time one
-    branch stalls -- which is a bug that only appears under load.
-    """
-    with pytest.raises(ValueError, match="buffering fork element"):
-        # Only b reaches the output; c is a second real consumer of a.out, and
-        # that alone is the problem -- both would apply backpressure.
-        build(_netlist(
-            "forked", {"a": "gain", "b": "gain", "c": "gain"},
-            [("in", "a.in"), ("a.out", "b.in"), ("a.out", "c.in"),
-             ("b.out", "out")]))
+def test_a_stream_into_two_real_datapaths_is_a_fork():
+    """Both apply backpressure: each takes every beat through a fork, which
+    holds the beat until both have (tests/test_fork.py runs one)."""
+    build(_netlist(
+        "forked", {"a": "gain", "b": "gain", "c": "gain"},
+        [("in", "a.in"), ("a.out", "b.in"), ("a.out", "c.in"),
+         ("b.out", "out")]))
 
 
 def test_an_unknown_port_lists_what_the_block_has():

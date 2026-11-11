@@ -110,6 +110,8 @@ which are module parameters set where they are instantiated. The
 Python functions return the file with the values a use sets (`"parameters"`)
 and its interface; a result that instantiates one lists it in `"requires"`,
 and `np2hw.hdl.closure(result)` is the text with everything it requires.
+`np2hw_fork` is the one `compose()` instantiates itself, wherever a stream
+feeds two or more consumers that hold it.
 Generated Verilog is for what genuinely varies: a traced model, a
 composition.
 
@@ -202,9 +204,10 @@ register; blocks of two vocabularies are refused. The map's `licence` and
 the generated files' headers are what the models' sources state.
 `np2hw.pipeline.run` runs a chain -- the models, the models printed as C
 (`run_model(..., c_build=dir)`), and the RTL twin under Verilator beside
-them. `np2hw.pipeline.pack.emit(design, out, vlnv=None,
-control=True, clock_mhz=None, verify=True, sync_memory=False)` writes the
-design pack once the twin agrees with the models on every input's chain;
+them; `legs(design)` is every chain from an input to an output it reaches, a
+fork's every branch among them. `np2hw.pipeline.pack.emit(design, out,
+vlnv=None, control=True, clock_mhz=None, verify=True, sync_memory=False)`
+writes the design pack once the twin agrees with the models on every leg;
 `np2hw pipeline run|generate` (docs/cli.md) and the FuseSoC generator's
 `design` parameter call it.
 
@@ -243,9 +246,10 @@ it per sensor. Single-stream subsystems nest; a multi-stream one reports
 
 Checked before a line is emitted: every net's width **and domain** must match
 (a 12-bit Bayer stream and a 12-bit luma stream are identical to a compiler and
-nonsense to connect), and an output may feed one consumer that applies
-backpressure plus any number of sinks. Two blocking consumers need a buffering
-fork; that case is refused (Next: buffered forks).
+nonsense to connect). An output may feed any number of consumers: a sink is
+fed without being waited for, and two or more that apply backpressure are fed
+through a fork (`np2hw_fork`), each taking every beat, the beat moving on once
+all have.
 
 Returns a **meta dict** consumed by the adapters and testbenches:
 
@@ -314,13 +318,13 @@ net = Netlist("design", external_inputs=("in",), external_outputs=("out",))
 net.add(Node("a"))                       # inputs=("in",), outputs=("out",)
 net.add(Node("stats", outputs=()))       # a SINK: observes, never stalls
 net.connect("in", "a.in"); net.connect("a.out", "out")
-net.validate()                           # undriven / double-driver / cycle / fork
+net.validate()                           # undriven / double-driver / cycle
 net.order()                              # deterministic topological order
 ```
 
-The four validations are laws of the streaming handshake, enforced by its
-owner: an output may feed one blocking consumer plus any number of sinks, and
-a fork to two blocking consumers is refused rather than emitted as a deadlock.
+The validations are laws of the streaming handshake, enforced by its owner:
+every input driven, by one source, and no cycle. An output feeding two or
+more consumers that apply backpressure is a fork, which the composer builds.
 See `examples/netlist_rules.py`.
 
 ## A stream's recent past (`np2hw.frame_history`)

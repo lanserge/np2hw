@@ -127,11 +127,57 @@ def pixel_chain(pipeline, start: str | None = None, stop: str | None = None):
                 f"nothing downstream of {stage.path}.{outputs[0]} carries "
                 f"pixels" + (f"; --to {stop!r} is not on this chain"
                              if stop else ""))
+        if len(onward) > 1 and stop is not None:
+            # a fork: the leg the stop is on
+            onward = [c for c in onward
+                      if _reaches(pipeline, c.node, stop_instance)]
         if len(onward) > 1:
             raise ValueError(
                 f"{stage.path}.{outputs[0]} forks to "
                 f"{[str(c) for c in onward]}; name the leg with --to")
+        if not onward:
+            raise ValueError(f"--to {stop!r} is not downstream of "
+                             f"{stage.path}")
         chain.append(compose.stage(pipeline, onward[0].node))
+
+
+def _reaches(pipeline, node: str, target: str) -> bool:
+    """Whether `target` is `node` or downstream of it."""
+    graph = compose.netlist(pipeline)
+    seen, todo = set(), [node]
+    while todo:
+        n = todo.pop()
+        if n == target:
+            return True
+        if n in seen or n is None:
+            continue
+        seen.add(n)
+        for port in compose.stage(pipeline, n).block.ports.outputs:
+            todo += [c.node for c in graph.consumers(Endpoint(n, port))]
+    return False
+
+
+def legs(pipeline) -> list:
+    """Every leg of a design's pixels: (input, the chain from it to an
+    output), one for each output each input reaches -- a fork's every
+    branch among them."""
+    graph = compose.netlist(pipeline)
+    out = []
+    for name in pipeline.inputs:
+        for output in pipeline.outputs:
+            driver = next((src for src, dst in graph.edges
+                           if dst.node is None and dst.port == output), None)
+            if driver is None or driver.node is None:
+                continue
+            first = [c.node for c in graph.consumers(Endpoint(None, name))
+                     if c.node is not None and _reaches(pipeline, c.node,
+                                                         driver.node)]
+            if not first:
+                continue
+            out.append((name, pixel_chain(
+                pipeline, f"{first[0]}.{compose.stage(pipeline, first[0]).block.ports.inputs[0]}",
+                f"{driver.node}.{driver.port}")))
+    return out
 
 
 def _sole_consumer(pipeline, source: Endpoint):
@@ -419,6 +465,12 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
             continue
         built = stage.block.generate(
             spec, width, height, module_name=f"run_{stage.module_prefix}")
+        result = built.core.get("result")
+        if result is not None:
+            # a fold's result goes on as its stream's frame: the result's
+            # rows and columns, as its trace lays them, the values of an
+            # entry its channels
+            frame = _as_frame(frame, result, run)
         handed = compose.handed_on(built)
         one = frame[0] if run else frame
         got = (one.shape[:2], 1 if one.ndim == 2 else one.shape[-1])
@@ -436,6 +488,19 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
         # or the part of it a window kept
         height, width = got[0]
     return frame
+
+
+def _as_frame(result, shape: dict, run: bool) -> np.ndarray:
+    """A fold's result -- or a run of them -- as the frame its stream
+    carries: (rows, cols), and its entry's values on a last axis where
+    there are several."""
+    result = np.asarray(result)
+    lead = result.shape[:1] if run else ()
+    size = shape["rows"] * shape["cols"]
+    per = result[0].size if run else result.size
+    channels = per // size
+    return result.reshape(*lead, shape["rows"], shape["cols"],
+                          *((channels,) if channels > 1 else ()))
 
 
 # --------------------------------------------------------------------------- #

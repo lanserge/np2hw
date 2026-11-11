@@ -56,7 +56,7 @@ its frame is folded: a beat an entry, the folds' values side by side as a
 stack's channels, framed by the result's rows and columns (a histogram one
 row, a reduction whole one beat), carrying the folded frame's context with
 the result's size. Where it goes -- software's reading, another block --
-is the design's wiring.
+is the design's wiring -- beside the datapath it measures, through a fork.
 Each fold is an accumulator memory, cleared as the result streams out of
 it; a frame arriving before that is done waits, as for any core not ready.
 

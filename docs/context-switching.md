@@ -87,10 +87,9 @@ Scattered state is what turns banking into a rewrite.
 
 The input scheduler (N streams in, one tagged stream out, per-channel `ready`)
 is not traced from a model and is not application logic. It belongs to the
-same family as the buffered fork the netlist checks currently refuse for want
-of: **stream elements** — structural, handshake-owning components np2hw emits
-directly, like the adapters and the register file. When either is built, build
-the category, not a one-off.
+same family as the fork (`np2hw_fork`): **stream elements** — structural,
+handshake-owning components np2hw emits directly, like the adapters and the
+register file. Build it as one of that category, not a one-off.
 
 ## A sibling pattern: mixed-resolution capture
 

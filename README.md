@@ -134,7 +134,8 @@ Design rationale (the "why" behind each mechanism) lives in
 - **Stream plumbing** for the boundaries a traced core sits between: `skid`
   (a registered boundary, so one core's combinational depth stops being the
   next one's), `tee` (one stream, two consumers, never stalling -- a consumer
-  that falls behind tears its own branch and says so), `cdc_fifo` (the one
+  that falls behind tears its own branch and says so), a fork the composer
+  places wherever two consumers both hold a stream, `cdc_fifo` (the one
   crossing every design here contains: a recovered clock meeting the board's,
   owned so its discipline is checked rather than trusted), and
   `boundary_report` / `combinational_outputs`, which say where a composition

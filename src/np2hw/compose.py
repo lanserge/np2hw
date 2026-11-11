@@ -31,12 +31,10 @@ The streaming contract, in one place
 Every net carries `valid / ready / data` plus the framing flags. A transfer
 happens where `valid && ready`.
 
-An output may feed ONE consumer that applies backpressure, plus any number of
-SINKS -- modules that consume a stream and produce none, and therefore never
-stall. That is what makes a statistics tap free. Two consumers that both apply
-backpressure need an element that buffers one while the other stalls; there
-isn't one yet, so that case is refused rather than emitted as a fork that
-deadlocks the first time a branch stalls.
+An output may feed any number of consumers. SINKS -- modules that consume a
+stream and produce none -- never stall it and are fed without being waited
+for. Two or more that apply backpressure are fed through a fork
+(``np2hw_fork``): each takes every beat, and the beat moves on once all have.
 """
 from __future__ import annotations
 
@@ -519,6 +517,28 @@ def compose(module_name: str, instances, connections, ports,
             out.append((dst_inst, dst_port, edge))
         return out
 
+    # A source two or more consumers hold: a fork between them, each taking
+    # every beat through its own valid and ready (np2hw_fork).
+    forked = {key: stalls for key in sources
+              for stalls in [blocking(key)] if len(stalls) > 1}
+    branch = {(key, id(dst_inst), dst_port): i
+              for key, stalls in forked.items()
+              for i, (dst_inst, dst_port, _) in enumerate(stalls)}
+    if forked:
+        a("    // Forks: a stream held by two or more consumers, each taking")
+        a("    // every beat; its beat moves on once all have.")
+        for key, stalls in forked.items():
+            net = _net(key)
+            a(f"    wire [{len(stalls) - 1}:0] {net}_fork_valid, "
+              f"{net}_fork_ready;")
+            a(f"    np2hw_fork #(.N({len(stalls)})) {net}_fork (")
+            a(f"        .clk(clk), .rst(rst), .s_valid({net}_valid), "
+              f".s_ready({net}_ready),")
+            a(f"        .m_valid({net}_fork_valid), "
+              f".m_ready({net}_fork_ready));")
+        a("")
+
+
     for inst in instances:
         if inst.comment:
             a(f"    // ---- {inst.comment} ----")
@@ -553,10 +573,14 @@ def compose(module_name: str, instances, connections, ports,
         for edge, port in incoming:
             net = _net(edge.source)
             spec = interface["input"]
-            ready = (f"{net}_ready"
+            at = branch.get((edge.source, id(inst), port))
+            ready = (f"{net}_fork_ready[{at}]" if at is not None else
+                     f"{net}_ready"
                      if blocking(edge.source) and blocking(edge.source)[0][0] is inst
                      else f"{inst.name}_{port}_ready_unused")
-            a(f"        .{spec['prefix']}_valid  ({net}_valid),")
+            valid = (f"{net}_fork_valid[{at}]" if at is not None
+                     else f"{net}_valid")
+            a(f"        .{spec['prefix']}_valid  ({valid}),")
             a(f"        .{spec['prefix']}_ready  ({ready}),")
             a(f"        .{spec['prefix']}_data   ({net}_data),")
             for flag in spec["flags"]:
@@ -594,15 +618,21 @@ def compose(module_name: str, instances, connections, ports,
             a(f"    assign {net}_ready = 1'b1;")
             a("")
             continue
-        dst_inst, dst_port, edge = stalls[0]
-        if dst_inst is None:                 # a top-level output
-            a(f"    assign {dst_port}_valid = {net}_valid;")
+        for dst_inst, dst_port, edge in stalls:
+            if dst_inst is not None:         # an instance: wired above
+                continue
+            at = branch.get((key, id(None), dst_port))
+            valid, ready = ((f"{net}_fork_valid[{at}]",
+                             f"{net}_fork_ready[{at}]") if at is not None
+                            else (f"{net}_valid", f"{net}_ready"))
+            # a top-level output
+            a(f"    assign {dst_port}_valid = {valid};")
             a(f"    assign {dst_port}_data  = {net}_data;")
             for flag in stream_ports[dst_port].stream.flags:
                 a(f"    assign {dst_port}_{flag} = {net}_{flag};")
             if stream_ports[dst_port].stream.ctx:
                 a(f"    assign {dst_port}_ctx = {net}_ctx;")
-            a(f"    assign {net}_ready = {dst_port}_ready;")
+            a(f"    assign {ready} = {dst_port}_ready;")
             a("")
 
     dangling = []
@@ -624,7 +654,9 @@ def compose(module_name: str, instances, connections, ports,
     interface = _composed_interface(module_name, ports)
     interface["ports"] = published(pins)
     return {"verilog": "\n".join(L), "module": module_name,
-            "nets": sorted(sources), "interface": interface}
+            "nets": sorted(sources), "interface": interface,
+            # the fixed modules it instantiates (np2hw.hdl)
+            "requires": ("np2hw_fork",) if forked else ()}
 
 
 def _composed_interface(module_name: str, ports) -> dict:

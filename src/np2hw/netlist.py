@@ -16,13 +16,11 @@ Each validation is a hardware failure, not a tidiness rule:
   UNDRIVEN INPUT    a stream that never arrives; the node waits forever.
   TWO DRIVERS       a short: two sources resolving onto one wire.
   CYCLE             cannot be scheduled in a feed-forward pipeline.
-  UNBUFFERED FORK   an output may feed ONE consumer that applies backpressure,
-                    plus any number of SINKS (nodes with no outputs, which
-                    never stall). Two blocking consumers need an element that
-                    buffers one side while the other stalls; there is none yet,
-                    so the fork is refused rather than emitted as something
-                    that deadlocks the first time a branch stalls -- a bug that
-                    only appears under load.
+
+An output may feed any number of consumers. SINKS (nodes with no outputs)
+take every beat and never stall it; two or more that do apply backpressure
+take it through a fork (np2hw_fork), which holds the beat until every one
+of them has taken it.
 
 What a node MEANS -- which block, what its streams carry, where its registers
 sit -- is the application's. This module knows only names, ports and edges.
@@ -176,19 +174,6 @@ class Netlist:
                 raise ValueError(
                     f"{self.name}: external output {name!r} is not connected")
 
-        for node in self.nodes:
-            for port in node.outputs:
-                source = Endpoint(node.name, port)
-                blocking = [sink for sink in self.consumers(source)
-                            if not self.is_tap(sink)]
-                if len(blocking) > 1:
-                    raise ValueError(
-                        f"{self.name}: {source} drives "
-                        f"{[str(s) for s in blocking]}, which both apply "
-                        "backpressure. A fork between two real datapaths needs "
-                        "a buffering fork element, which does not exist yet; a "
-                        "tap to a sink node (one with no outputs) is free and "
-                        "any number are allowed.")
 
         self.order()                    # raises on a cycle
 

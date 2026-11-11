@@ -98,9 +98,11 @@ C (docs/backends.md) and `--rtl` the generated Verilog under Verilator,
 each beside the models, and each fails on any difference.
 
 `generate` proves the pipeline's Verilog bit-exact against its models under
-Verilator, then writes the design pack (`np2hw.pipeline.pack`): the Verilog,
-the register map, SystemRDL, the register documentation, `<name>_build.json`
-(top, latency, geometry, boundary widths, memories) and a FuseSoC `.core`.
+Verilator -- every leg, each input to each output it reaches, a fork's every
+branch among them -- then writes the design pack (`np2hw.pipeline.pack`): the
+Verilog, the register map, SystemRDL, the register documentation,
+`<name>_build.json` (top, latency, geometry, boundary widths, memories)
+and a FuseSoC `.core`.
 `--no-control` stops at the datapath, `--sync-memory` refuses a line buffer
 that reads combinationally, `--vlnv` names the core.
 

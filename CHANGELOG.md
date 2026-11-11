@@ -51,6 +51,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   anything the pixel datapath computes, windows included. The C backend
   prints a fold too.
 
+- **A stream may feed any number of consumers.** Where two or more hold it
+  -- a datapath and a fold beside it, say -- the composer forks it
+  (`np2hw_fork`, a fixed module): each takes every beat, in order, once,
+  and the beat moves on when all have; no branch's valid depends on a
+  ready. A sink still takes it without holding it. A design's pack proves
+  every leg, each input to each output it reaches, a fork's every branch
+  among them (`np2hw.pipeline.run.legs`), and a fold's result goes on in a
+  chain as its stream's frame.
+
 - **`np2hw pipeline run --c`**: every block of the chain run as its model
   printed as C, on the same frames, registers and context, and held to the
   models word for word beside `--rtl`. `Block.compile_c` builds a block's

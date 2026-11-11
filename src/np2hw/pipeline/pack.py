@@ -83,8 +83,8 @@ def emit(design, output_dir, vlnv: str | None = None, control: bool = True,
         # sensors has two chains, and both are verified before anything is
         # emitted.
         clk_ns = None if clock_mhz is None else 1000.0 / clock_mhz
-        for name in pipeline.inputs:
-            chain = runner.pixel_chain(pipeline, name, None)
+        # and every leg of a fork: each input to each output it reaches
+        for name, chain in runner.legs(pipeline):
             # a chain reading the stream's history is proved over a run of
             # frames, each with its own context, as the stream brings it --
             # and every chain at the clock it is cut for, the stages the
@@ -103,7 +103,9 @@ def emit(design, output_dir, vlnv: str | None = None, control: bool = True,
                     f"{pipeline.name}: the generated RTL DIFFERS from the "
                     f"model on the chain from {name!r}; refusing to emit "
                     "an unverified pack")
-            where = "" if len(pipeline.inputs) == 1 else f" from {name}"
+            leg = runner.legs(pipeline)
+            where = "" if len(leg) == 1 else \
+                f" from {name} to {chain[-1].path}"
             print(f"{pipeline.name}: twin bit-exact with the model"
                   f"{where} ({model.size} words)")
 

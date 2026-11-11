@@ -860,6 +860,9 @@ def generate(design, control: bool = True, clk_ns: float | None = None,
                       for name, _ in result.params},
     )
     modules.append((design.name, top["verilog"]))
+    from np2hw import hdl
+    # the fixed modules the top instantiates -- a fork -- carried with it
+    modules.extend((m, hdl.text(m)) for m in top.get("requires", ()))
 
     meta = {"nodes": [s.path for s in datapath(design)],
             "generated": sorted(built), "nets": top["nets"],
