@@ -110,5 +110,8 @@ A kernel is built for one frame size and builds itself again for another.
 A register window at the output (`img[p.y0:, p.x0:][:p.h, :p.w]`) is
 computed over the whole frame and kept by its registers, as NumPy's crop
 keeps it. Refused by name: a canvas whose planes do not tile a lattice, a
-register window placed by computed values. Checked by `tests/test_cemit.py`: every model the core tests compile
-to Verilog, and the shipped model files, against NumPy.
+register window placed by computed values. A block is printed the same way
+through `Block.compile_c` and run in its model's place by `Block.run(...,
+kernel=...)`; `np2hw pipeline run --c` runs a whole chain so. Checked by `tests/test_cemit.py`: every model the core tests compile
+to Verilog, and the shipped model files, against NumPy; and by
+`tests/test_block_c.py`, blocks and chains against their models.

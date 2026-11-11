@@ -102,6 +102,7 @@ Design rationale (the "why" behind each mechanism) lives in
 - **Trace NumPy → Verilog**: slicing/arithmetic/`astype`/`clip`/`np.pad`/`np.where`,
   flattened to a weighted tap map and lowered to a line IR (line buffers + shift
   registers, automatic delay-line counting, hash-consed sharing).
+- **The same model as C**, bit-exact, for a CPU (`compile_c`, `pipeline run --c`).
 - **Faithful dtypes**: `uint8` wraps unless widened with `astype`; signed via NumPy
   types; `.clip`/`.saturate`/`.truncate` for narrowing. The oracle is the same
   function on real NumPy dtypes.

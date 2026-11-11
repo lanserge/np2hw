@@ -360,7 +360,7 @@ def synthetic_context(pipeline, frames: int | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 
 def run_model(chain, frame: np.ndarray, values, context: dict,
-              bit_depth: int) -> np.ndarray:
+              bit_depth: int, c_build: str | Path | None = None) -> np.ndarray:
     """Run the chain's NumPy models in order. Every hop is the block's own
     :meth:`np2hw.blocks.Block.run`, so all its declaration-driven checks
     apply here too.
@@ -379,6 +379,11 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
     reads the history on the run, which comes out the frames shorter its
     history fills -- and the context of the frames it leaves out is left
     out with them.
+
+    With ``c_build``, a directory, each block runs as its model printed as
+    C (:meth:`np2hw.blocks.Block.compile_c`), built there at the frame it
+    is given: the same chain, the same frames, registers and context, the
+    C backend's result.
     """
     from np2hw.blocks.stream import StreamSpec
 
@@ -390,12 +395,16 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
     for stage in chain:
         consumed = {name: context[name]
                     for name in stage.block.params.consumes if name in context}
+        kernel = None if c_build is None else stage.block.compile_c(
+            spec, width, height, build=c_build)
         if not run:
             frame = stage.block.run(frame, values.get(stage.path),
-                                    bit_depth=spec.bit_depth, **consumed)
+                                    bit_depth=spec.bit_depth, kernel=kernel,
+                                    **consumed)
         elif stage.block.inputs[0].history:
             out = stage.block.run(frame, values.get(stage.path),
-                                  bit_depth=spec.bit_depth, **consumed)
+                                  bit_depth=spec.bit_depth, kernel=kernel,
+                                  **consumed)
             left_out = len(frame) - len(out)
             context = {k: (v[left_out:] if np.ndim(v) else v)
                        for k, v in context.items()}
@@ -403,7 +412,7 @@ def run_model(chain, frame: np.ndarray, values, context: dict,
         else:
             frame = np.stack([stage.block.run(
                 f, values.get(stage.path), bit_depth=spec.bit_depth,
-                **{k: (v[n] if np.ndim(v) else v)
+                kernel=kernel, **{k: (v[n] if np.ndim(v) else v)
                    for k, v in consumed.items()})
                 for n, f in enumerate(frame)])
         if not stage.block.traceable:

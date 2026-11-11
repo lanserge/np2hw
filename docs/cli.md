@@ -85,6 +85,7 @@ A pipeline is a composite of model blocks, named by reference
 np2hw pipeline run acme.isp:core in.npy out.png
 np2hw pipeline run acme.isp:core --from gamma.in mid.npy out.png   # a sub-chain
 np2hw pipeline run acme.isp:core --rtl in.npy out.npy              # the RTL twin too
+np2hw pipeline run acme.isp:core --c --rtl in.npy out.npy          # C and RTL both
 np2hw pipeline generate acme.isp:core --out build --clock-mhz 148.5
 ```
 
@@ -92,8 +93,9 @@ np2hw pipeline generate acme.isp:core --out build --clock-mhz 148.5
 view), the whole pipeline or the blocks between `--from` and `--to`;
 `--profile` layers a block's register values, `--set INSTANCE.REG=VALUE` one
 register, `--context SIGNAL=VALUE` one context signal, and `--explain` prints
-where every value came from. `--rtl` runs the generated Verilog under
-Verilator beside the models and fails on any difference.
+where every value came from. `--c` runs every block as its model printed as
+C (docs/backends.md) and `--rtl` the generated Verilog under Verilator,
+each beside the models, and each fails on any difference.
 
 `generate` proves the pipeline's Verilog bit-exact against its models under
 Verilator, then writes the design pack (`np2hw.pipeline.pack`): the Verilog,

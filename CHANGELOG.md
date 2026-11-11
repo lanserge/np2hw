@@ -34,6 +34,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   modulo 2**64; a register window at the output is kept as NumPy's crop
   keeps it.
 
+- **`np2hw pipeline run --c`**: every block of the chain run as its model
+  printed as C, on the same frames, registers and context, and held to the
+  models word for word beside `--rtl`. `Block.compile_c` builds a block's
+  kernel from the same trace `generate` turns into Verilog, and
+  `Block.run(..., kernel=...)` runs it in the model's place, with the
+  model run's checks; `run_model(..., c_build=DIR)` runs a chain so.
+
 - **The tee's branch A may hold its stream** (`HOLD_A`, `tee(...,
   hold_a=True)`): for a stream that can wait -- a frame store's, paced by
   its consumer, never a sensor's -- A joins every frame it is enabled for

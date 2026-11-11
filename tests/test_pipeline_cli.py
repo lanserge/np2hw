@@ -171,3 +171,34 @@ def test_generate_proves_the_models_inside_a_design_as_it_sets_them(
     assert cli.main(["pipeline", "generate", ref, "--node", "store",
                      "--out", str(tmp_path / "no")]) == 2
     assert "this design builds ['isp']" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(__import__("shutil").which("cc") is None,
+                    reason="needs a C compiler")
+@pytest.mark.parametrize("design, shape", [(DESIGN, (8, 64)),
+                                           (RGB, (48, 64))])
+def test_c_runs_the_models_as_c_and_matches_them(tmp_path, capsys, design,
+                                                 shape, monkeypatch):
+    """``--c``: every block printed as C, run on this CPU, and held to the
+    models word for word -- the output the models'."""
+    from np2hw.pipeline import run as runner
+    builds = []
+    real = runner.run_model
+
+    def spy(*args, c_build=None, **kwargs):
+        builds.append(c_build)
+        return real(*args, c_build=c_build, **kwargs)
+
+    monkeypatch.setattr(runner, "run_model", spy)
+    path = tmp_path / "in.npy"
+    np.save(path, np.random.default_rng(9).integers(0, 100, size=shape))
+    assert _run(design, path, tmp_path / "model.npy") == 0
+    assert _run(design, "--c", "--set", "g.gain=3", path,
+                tmp_path / "c.npy") == 0
+    words = shape[0] * shape[1]
+    assert f"c: bit-exact with the model ({words} words)" in \
+        capsys.readouterr().out
+    assert builds[0] is None and builds[1] is None and builds[2] is not None
+    assert _run(design, "--set", "g.gain=3", path, tmp_path / "m3.npy") == 0
+    np.testing.assert_array_equal(np.load(tmp_path / "c.npy"),
+                                  np.load(tmp_path / "m3.npy"))

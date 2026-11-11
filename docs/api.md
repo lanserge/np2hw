@@ -149,7 +149,9 @@ The decorated function IS the block: `Block.run(frame, values, bit_depth,
 **context)` runs it validated from the declarations -- each context signal
 a binding reads in its declared range, a frame with an odd dimension
 refused where the block says `even_frame` -- and `Block.generate(spec,
-width, height, module_name)` traces it into Verilog. `Block.configure()`
+width, height, module_name)` traces it into Verilog. `Block.compile_c(spec,
+width, height, build)` prints the same trace as C (`np2hw.core.cemit`), and
+`Block.run(..., kernel=k)` runs it in the model's place, with the same checks. `Block.configure()`
 gives the cached variant with register attributes overridden;
 `Block.bind({input: expression}, vocabulary)` the variant with scalar
 inputs bound, against the design's pipeline context -- each leaves the
@@ -197,8 +199,9 @@ AXI4-Lite register file with `control=True`). A pipeline's blocks bring
 their content's `Vocabulary`, which names the context block and its commit
 register; blocks of two vocabularies are refused. The map's `licence` and
 the generated files' headers are what the models' sources state.
-`np2hw.pipeline.run` runs a chain -- the models, and the RTL twin under
-Verilator beside them. `np2hw.pipeline.pack.emit(design, out, vlnv=None,
+`np2hw.pipeline.run` runs a chain -- the models, the models printed as C
+(`run_model(..., c_build=dir)`), and the RTL twin under Verilator beside
+them. `np2hw.pipeline.pack.emit(design, out, vlnv=None,
 control=True, clock_mhz=None, verify=True, sync_memory=False)` writes the
 design pack once the twin agrees with the models on every input's chain;
 `np2hw pipeline run|generate` (docs/cli.md) and the FuseSoC generator's

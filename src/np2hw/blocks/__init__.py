@@ -492,7 +492,7 @@ class Block:
     # -- generation ----------------------------------------------------------- #
 
     def run(self, pixel, values: dict | None = None, bit_depth: int = 12,
-            **context):
+            *, kernel=None, **context):
         """Run the model over a whole frame, validated from the DECLARATIONS.
 
         The declarations drive the validation -- a block whose math needs an
@@ -513,6 +513,9 @@ class Block:
                 a history input, the run of frames, ``(t, h, w[, c])``.
             values: register values for ``params.bind`` (defaults fill in).
             bit_depth: datapath width.
+            kernel: the model compiled for a CPU (:meth:`compile_c`), run
+                in its place with the same registers and context -- the
+                same checks, the same frames, the C backend's result.
             **context: pipeline context by name, e.g. ``frame_seq=5``: what
                 the block's bound inputs read. Everything it consumes
                 defaults to 0; a name it does not consume is refused, because
@@ -574,21 +577,35 @@ class Block:
                     f"frame {width}x{height} has an odd dimension; a "
                     "CFA-indexed block has no consistent Bayer phase unless "
                     "both dimensions are even")
+        if kernel is None:
+            def compute(ctx):
+                return self.model(pixel, self.bound_values(values, ctx),
+                                  bit_depth)
+        else:
+            # The kernel takes the registers as the trace took them -- each
+            # scalar register, and a register array as its entries where it
+            # is read at a constant place and whole where at a computed one
+            # -- and the context facts, and works out the bound inputs.
+            bound = self.params.bind(values)
+            registers = {**self.params.defaults(), **(values or {}),
+                         **{p.name: np.ravel(getattr(bound, p.name))
+                            for p in self.params.params if p.shape}}
+
+            def compute(ctx):
+                self.bound_values(values, ctx)    # the model run's refusals
+                return kernel(pixel, **registers, **ctx)
         if not any(isinstance(v, list) for v in ctx_values.values()):
-            return self.model(pixel, self.bound_values(values, ctx_values),
-                              bit_depth)
+            return compute(ctx_values)
         # Context a frame: each output frame is the model's at the context
         # of the frame it ends at -- the live one, the last it reads.
         def at(n):
             return {k: v[n] if isinstance(v, list) else v
                     for k, v in ctx_values.items()}
-        first = self.model(pixel, self.bound_values(values, at(frames - 1)),
-                           bit_depth)
+        first = compute(at(frames - 1))
         lag = frames - len(first)
         out = np.empty_like(first)
         for k in range(len(first)):
-            out[k] = self.model(pixel, self.bound_values(values, at(k + lag)),
-                                bit_depth)[k]
+            out[k] = compute(at(k + lag))[k]
         return out
 
     def bound_values(self, values: dict | None, context: dict):
@@ -633,25 +650,12 @@ class Block:
                 *((f, self.signal(f).bits, self.signal(f).follows)
                   for f in facts if f not in ("width", "height")))
 
-    def generate(self, spec, width: int, height: int, module_name: str,
-                 clk_ns: float | None = None,
-                 sync_memory: bool = False,
-                 context: tuple | None = None) -> "Generated":
-        """Trace the model into Verilog. Generic: every block uses this one.
-
-        There is no per-block generator and no hand-written Verilog anywhere in
-        this package. A block is its model plus its declarations, and this turns
-        the pair into a module.
-
-        The core holds frames up to ``width`` x ``height`` and takes each
-        frame's own size, and every value a frame brings that its bindings
-        read, in the context its stream carries: ``context``, the stream's
-        layout (np2hw.blocks.params.Vocabulary.layout), as a composer hands
-        it -- or, for a block built on its own, its frame's width and height
-        and the facts its bindings read. It hands the context on with the
-        frame, the size its own.
-        """
-        from np2hw import Image2D, to_ir, generate as np2hw_generate
+    def _traceable(self, spec, width: int, height: int,
+                   context: tuple | None = None):
+        """What a backend traces: the model as a function of the frame's
+        data word, its registers and the context facts its bindings read,
+        the image it is traced on, and those registers and facts."""
+        from np2hw import Image2D
 
         if not self.traceable:
             raise NotImplementedError(
@@ -716,6 +720,44 @@ class Block:
                 [*self.params.params, *(b.param for b in self.bindings)]))
             return self.model(pixel, values, spec.bit_depth)
 
+        return traced, image, registers, read
+
+    def compile_c(self, spec, width: int, height: int, build,
+                  context: tuple | None = None):
+        """The model printed as C and built for a CPU: the same trace
+        :meth:`generate` turns into Verilog, through np2hw's C backend
+        (:func:`np2hw.core.cemit.compile_c`). Hand it to :meth:`run` as
+        ``kernel`` to run it in the model's place."""
+        from np2hw.core.cemit import compile_c
+
+        traced, image, registers, read = self._traceable(spec, width, height,
+                                                         context)
+        traced.__name__ = self.name
+        return compile_c(traced, image, *registers, *read,
+                         channels=spec.channels, build=build)
+
+    def generate(self, spec, width: int, height: int, module_name: str,
+                 clk_ns: float | None = None,
+                 sync_memory: bool = False,
+                 context: tuple | None = None) -> "Generated":
+        """Trace the model into Verilog. Generic: every block uses this one.
+
+        There is no per-block generator and no hand-written Verilog anywhere in
+        this package. A block is its model plus its declarations, and this turns
+        the pair into a module.
+
+        The core holds frames up to ``width`` x ``height`` and takes each
+        frame's own size, and every value a frame brings that its bindings
+        read, in the context its stream carries: ``context``, the stream's
+        layout (np2hw.blocks.params.Vocabulary.layout), as a composer hands
+        it -- or, for a block built on its own, its frame's width and height
+        and the facts its bindings read. It hands the context on with the
+        frame, the size its own.
+        """
+        from np2hw import to_ir, generate as np2hw_generate
+
+        traced, image, registers, read = self._traceable(spec, width, height,
+                                                         context)
         # The channel count is the SPEC's -- threaded forward by the composer
         # from whatever the driving block's trace published, starting from the
         # pipeline input. Nothing here re-declares it; if the arithmetic

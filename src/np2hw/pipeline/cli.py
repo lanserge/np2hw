@@ -6,6 +6,7 @@
     np2hw pipeline run <design> --profile acme.sensors.s1:s1 in.npy out.npy
     np2hw pipeline run <design> --from gamma.in mid.npy out.png
     np2hw pipeline run <design> --rtl in.npy out.npy
+    np2hw pipeline run <design> --c in.npy out.npy
     np2hw pipeline generate <design> --out build --clock-mhz 155
 
 ``run`` treats a design as a library of image functions: the whole
@@ -36,8 +37,10 @@ def add_commands(commands) -> None:
     run = commands.add_parser(
         "run",
         help="run a pipeline (or a sub-chain of it) over an image file",
-        description="Run a design's NumPy models -- or, with --rtl, its "
-                    "generated Verilog under Verilator -- over one frame.")
+        description="Run a design's NumPy models over one frame -- and, "
+                    "with --c, the models printed as C, with --rtl, its "
+                    "generated Verilog under Verilator, each verified "
+                    "against the models word for word.")
     run.add_argument("design", help="a composite, package.module:name")
     run.add_argument("input", help=".npy (raw integers) or .png (8-bit view)")
     run.add_argument("output", help=".npy or .png, by extension")
@@ -57,6 +60,9 @@ def add_commands(commands) -> None:
                      default=[], metavar="SIGNAL=VALUE",
                      help="override one context signal at the injection "
                           "point (raw integer; repeatable)")
+    run.add_argument("--c", action="store_true",
+                     help="run the models printed as C on this CPU and "
+                          "verify them against the model word for word")
     run.add_argument("--rtl", action="store_true",
                      help="run the generated Verilog under Verilator and "
                           "verify it against the model word for word")
@@ -152,22 +158,43 @@ def _run(arguments) -> int:
 
     result = runner.run_model(chain, frame, values, context, bit_depth)
 
+    others = []
+    if arguments.c:
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="np2hw-c-") as build:
+            others.append(("c", runner.run_model(chain, frame, values, context,
+                                                 bit_depth, c_build=build)))
     if arguments.rtl:
-        rtl = runner.run_rtl(chain, frame, values, context, bit_depth)
-        total = result.size // (result.shape[-1] if result.ndim == 3 else 1)
-        if not np.array_equal(rtl, result):
-            bad = np.argwhere(~np.all(rtl == result, axis=-1)
-                              if result.ndim == 3 else (rtl != result))[:5]
-            where = ", ".join(f"({y},{x})" for y, x in bad)
-            print(f"rtl: DIFFERS from the model, first at {where}",
-                  file=sys.stderr)
-            runner.write_frame(arguments.output, rtl, bit_depth)
+        others.append(("rtl", runner.run_rtl(chain, frame, values, context,
+                                             bit_depth)))
+    # a run of frames has its frames ahead of each one's rows and columns
+    channels = result.shape[-1] if result.ndim == 3 + runner.reads_history(
+        chain) else 1
+    total = result.size // channels
+    for name, got in others:
+        if got.shape != result.shape or not np.array_equal(got, result):
+            where = _first_differences(got, result, channels)
+            print(f"{name}: DIFFERS from the model, {where}", file=sys.stderr)
+            runner.write_frame(arguments.output, got, bit_depth)
             return 1
-        print(f"rtl: bit-exact with the model ({total} words)")
-        result = rtl
+        print(f"{name}: bit-exact with the model ({total} words)")
 
     runner.write_frame(arguments.output, result, bit_depth)
     return 0
+
+
+def _first_differences(got, want, channels: int) -> str:
+    """Where two results first part: the first few pixels, or the shapes."""
+    import numpy as np
+
+    if got.shape != want.shape:
+        return f"its shape {got.shape} against {want.shape}"
+    differs = got != want
+    if channels > 1:
+        differs = differs.any(axis=-1)
+    where = ", ".join(str(tuple(int(i) for i in at))
+                      for at in np.argwhere(differs)[:5])
+    return f"first at {where}"
 
 
 def _within(ref: str, settings: list, node: str | None):
