@@ -39,6 +39,30 @@ def _pow2(k: int) -> int | None:
     return k.bit_length() - 1 if k > 0 and k & (k - 1) == 0 else None
 
 
+def _folds(out: Value):
+    """[(scatter node, the container its result wraps into, or None)] for
+    a result that is a fold -- or a stack of folds, side by side along its
+    last axis -- else None."""
+    def one(v):
+        n, wrap = v.node, None
+        if n.kind == "model.wrap":
+            wrap = n.attr("container")
+            n = n.operands[0].node
+        return (n, wrap) if n.kind == "model.scatter" else None
+    n = out.node
+    if n.kind == "model.stack":
+        got = [one(o) for o in n.operands]
+        if not all(got):
+            return None
+        if n.attr("axis") % len(out.type.axes) != len(out.type.axes) - 1:
+            raise Unsupported("a stack of folds along an axis other than its "
+                              "last: their entries side by side, an entry's "
+                              "values together")
+        return got
+    got = one(out)
+    return [got] if got else None
+
+
 # --------------------------------------------------------------------------- #
 # rewrite: the datapath
 # --------------------------------------------------------------------------- #
@@ -120,6 +144,34 @@ def rewrite(c: Canonical, dev=None):
                 stencil[key] = {"node": base, "pad": (pt, pl), "zero": zero,
                                 "taps": set()}
             stencil[key]["taps"].add((rc[0][1], rc[1][1]))
+        # The source read at the output's own pixel -- whole, as a value, or
+        # through its own variables -- by the datapath rather than by what a
+        # window stores: beside a window, the pixel its lag has reached,
+        # which only the source's own window has.
+        direct = False
+        if stencil and tsrc is None:
+            seen, todo = set(), [c.output.node]
+            while todo and not direct:
+                n = todo.pop()
+                if id(n) in seen or n.kind == "model.pad":
+                    continue                    # what a window stores: live
+                seen.add(id(n))
+                for i, o in enumerate(n.operands):
+                    if o.node is not src.node:
+                        todo.append(o.node)
+                    elif not (n.kind == "model.access" and i == 0):
+                        direct = True           # the source as a value
+                    elif all(r is not None and r[1] == 0 and r[0] == a
+                             for r, a in zip((var_start(x) for x in
+                                              n.operands[1:3]), driving)):
+                        direct = True           # read at its own pixel
+        if stencil and direct:
+            st = stencil.setdefault(id(src.node), {
+                "node": src.node, "pad": (0, 0), "zero": False,
+                "taps": set()})
+            st["taps"].add((0, 0))
+            if out_frame is None:
+                out_frame = tuple(driving)
         if stencil:
             if tsrc is not None or win is not None:
                 raise Unsupported("a window over a video, or within a window")
@@ -152,11 +204,17 @@ def rewrite(c: Canonical, dev=None):
                  if c.output.node.kind == "model.stack"
                  and out_axes == frame + [find(c.output.node.attr("var"))]
                  else None)
+        # A fold: every position of the frame into the entries of a result
+        # that belongs to the whole frame -- the core a sink, its result
+        # read back after the frame
+        folds = _folds(c.output)
+        if folds is not None and (tsrc is not None or win is not None):
+            raise Unsupported("a fold over a video, or over a window")
         if win is not None:
             if win.operands[0].node is not src.node:
                 raise Unsupported("a window over a computed value: window "
                                   "the source, and compute in the next block")
-        elif lanes is None and out_axes != frame:
+        elif folds is None and lanes is None and out_axes != frame:
             raise Unsupported("an output that is not the source's frame")
         g = Graph(intern=True, locations=False)
         g.vars = mg.vars
@@ -236,15 +294,26 @@ def rewrite(c: Canonical, dev=None):
                         width=width)
         params: dict = {}
         values: dict = {}
+        stored: dict = {}       # what a window stores: the input's pixel
 
         def port_in():
             return g.op("hw.port", name="in_data", bits=img.word_bits,
                         lo=0, hi=(1 << img.word_bits) - 1)
 
-        def one(n) -> Value:
+        def one(n, now: bool = False) -> Value:
+            """`n` as the datapath has it at the output's pixel -- or, `now`,
+            at the input's, which is what a window stores."""
             k = n.kind
-            ops = [values[id(o.node)] if id(o.node) in values else None
+            memo = stored if now else values
+            ops = [memo[id(o.node)] if id(o.node) in memo else None
                    for o in n.operands]
+            lagged = id(src.node) in stencil and not now
+            if lagged:
+                # the source as a value beside a window: its own window, at
+                # the output's pixel
+                ops = [src_tap() if o.node is src.node and not (
+                    k == "model.access" and i == 0) else v
+                    for i, (o, v) in enumerate(zip(n.operands, ops))]
             if k == "model.table":
                 return None                         # only its reads are lowered
             if n is src.node:
@@ -260,7 +329,8 @@ def rewrite(c: Canonical, dev=None):
             if k == "model.access":
                 if n.operands[0].node.kind == "model.table":
                     return lookup(n, ops[1])
-                if id(n.operands[0].node) in stencil:
+                if id(n.operands[0].node) in stencil and not (
+                        now and n.operands[0].node is src.node):
                     return tap(n)
                 return field_of(n)
             if k == "model.pad":
@@ -379,6 +449,13 @@ def rewrite(c: Canonical, dev=None):
                 return g.op("hw.read", out)
             return out
 
+        def src_tap() -> Value:
+            st = stencil[id(src.node)]
+            st.setdefault("value", port_in())
+            return g.op("hw.tap", key=id(src.node), a=st["max"][0],
+                        b=st["max"][1], lo=st["value"].type.lo,
+                        hi=st["value"].type.hi)
+
         def tap(n) -> Value:
             """A read of a window source at (start row, start column): the
             value `a` rows and `b` columns back from the newest in its
@@ -390,8 +467,12 @@ def rewrite(c: Canonical, dev=None):
             if "value" not in st:
                 # what the window keeps: the padded value, as this pixel has
                 # it -- or the source's whole word, read at an offset
-                kept = (values[id(base.operands[0].node)] if base.kind ==
-                        "model.pad" else port_in())
+                if base.kind == "model.pad":
+                    for m in walk([base.operands[0]]):
+                        stored[id(m)] = one(m, now=True)
+                    kept = stored[id(base.operands[0].node)]
+                else:
+                    kept = port_in()
                 if kept is None:
                     raise Unsupported("a window over a value the pointwise "
                                       "family does not compute")
@@ -465,7 +546,9 @@ def rewrite(c: Canonical, dev=None):
 
             return pick(0, vals)
 
-        if win is not None:
+        if folds is not None:
+            unit = _fold_unit(g, mg, folds, values, one, frame, c.output)
+        elif win is not None:
             if img.signed:
                 raise Unsupported("a signed source")
             bounds = tuple(one(o.node) for o in win.operands[1:])
@@ -521,6 +604,65 @@ def rewrite(c: Canonical, dev=None):
         return unit
 
     return Pass("rewrite", run_, levels={"hw"})
+
+
+def _fold_unit(g, mg, folds, values, one, frame, output) -> Unit:
+    """A fold's pixel datapath: per fold, the entry each pixel folds into
+    -- its keys made one index, row-major -- and its value, less the least
+    it can be, side by side in one word. The word streams through the
+    stages like any core's output, and the accumulate pass folds it."""
+    find = mg.vars.find
+    for n in walk([o for f, _ in folds for o in f.operands]):
+        values[id(n)] = one(n)
+    at = set(find(v) for v in frame)
+    parts, widths, lanes = [], [], []
+    bins = None
+    for f, wrap in folds:
+        v, *keys = f.operands
+        reach = {find(a) for o in f.operands for a in o.type.axes if a}
+        if reach != at:
+            raise Unsupported(
+                "a fold over other positions than the frame's: each pixel "
+                "folds once, so the value and its keys range over the frame")
+        counts = [mg.vars.count(a) for a in f.attr("axes")]
+        n = 1
+        for k in counts:
+            n *= k
+        if bins not in (None, n):
+            raise GraphError("folds side by side of unequal sizes")
+        bins = n
+        flat = None
+        for key, count in zip(keys, counts):
+            k = values[id(key.node)]
+            if flat is None:
+                flat = k
+                continue
+            e = _pow2(count)
+            flat = g.op("hw.add", g.op("hw.shl", flat, amount=e) if e is not None
+                        else g.op("hw.mul", flat, g.op("hw.const", value=count)),
+                        k)
+        hv = values[id(v.node)]
+        vlo = hv.type.lo
+        field = g.op("hw.sub", hv, g.op("hw.const", value=vlo)) if vlo else hv
+        t = f.value.type
+        lane = {"op": f.attr("op"), "init": f.attr("init"), "lo": t.lo,
+                "hi": t.hi, "vlo": vlo,
+                "vbits": max(1, field.type.hi.bit_length()),
+                "wrap": wrap}
+        if n > 1:
+            lane["kbits"] = max(1, (n - 1).bit_length())
+            parts.append(flat)
+            widths.append(lane["kbits"])
+        parts.append(field)
+        widths.append(lane["vbits"])
+        lanes.append(lane)
+    unit = Unit(g, {"data": g.op("hw.cat", *parts, fields=tuple(widths))})
+    unit.facts["folds"] = {
+        "lanes": lanes, "bins": bins,
+        "stacked": output.node.kind == "model.stack",
+        "shape": tuple(mg.vars.count(a) if a else 1
+                       for a in output.type.axes)}
+    return unit
 
 
 # --------------------------------------------------------------------------- #
@@ -969,9 +1111,18 @@ def control() -> Pass:
         one_bit = dict(lo=0, hi=1, bits=1)
         pos = dict(lo=0, hi=(1 << POS) - 1, bits=POS)
         port = lambda name: g.op("hw.port", name=name, **one_bit)
-        in_valid, in_sof, out_ready = (port("in_valid"), port("in_sof"),
-                                       port("out_ready"))
         c = lambda v: g.op("hw.const", value=v)
+        in_valid, in_sof = port("in_valid"), port("in_sof")
+        folds = unit.facts.get("folds")
+        if folds is None:
+            out_ready = port("out_ready")
+        else:
+            # its fold takes every beat, except while the frame before is
+            # streamed out -- and, for a memory, cleared after reset
+            # (accumulate)
+            g.symbols["busy"] = {"lo": 0, "hi": 1,
+                                 "init": 1 if folds["bins"] > 1 else 0}
+            out_ready = g.op("hw.not", g.op("hw.regread", name="busy"))
         AND = lambda x, y: g.op("hw.and", x, y)
         NOT = lambda x: g.op("hw.not", x)
         EQ = lambda x, y: g.op("hw.eq", x, y)
@@ -1338,6 +1489,225 @@ def materialise() -> Pass:
     return Pass("materialise", run_, levels={"hw"})
 
 
+def accumulate() -> Pass:
+    """A fold: its result streamed out, a beat an entry, once its frame is
+    folded.
+
+    Each fold folds into an ACCUMULATOR memory: a read, the value folded
+    in, a write -- two stages, the write of the beat before forwarded to a
+    read it lands too late for. At a frame's last beat a SWEEP reads every
+    entry in order and writes the fold's start back to it in the same
+    cycle (a read beside a write of its own address reads the old word):
+    each read is a beat of the result, held in the memory's read register
+    until it is taken, and the accumulator is clear when the last is. The
+    sweep after reset only clears. A one-entry fold accumulates in a
+    register and streams one beat a frame.
+
+    The result stream's frame is the result's: its rows and columns (a
+    histogram one row), every fold's value of an entry side by side in a
+    beat; its context the folded frame's, with the result's size. A frame
+    arriving while the last is streamed out -- or while the memory is
+    cleared after reset -- waits, as any stream does for a core that is
+    not ready."""
+
+    def run_(unit: Unit) -> Unit:
+        f = unit.facts
+        folds = f.get("folds")
+        if folds is None:
+            return unit
+        g = unit.g
+        c = lambda v: g.op("hw.const", value=v)
+        AND = lambda x, y: g.op("hw.and", x, y)
+        OR = lambda x, y: g.op("hw.or", x, y)
+        NOT = lambda x: g.op("hw.not", x)
+        EQ = lambda x, y: g.op("hw.eq", x, y)
+        SEL = lambda s_, x, y: g.op("hw.sel", s_, x, y)
+        bits = lambda x, lo, w: g.op("hw.bits", x, lo=lo, width=w)
+        port = lambda name: g.op("hw.port", name=name, bits=1, lo=0, hi=1)
+
+        def declare(name, lo, hi, init):
+            g.symbols[name] = {"lo": lo, "hi": hi, "init": init}
+            return g.op("hw.regread", name=name)
+
+        def reg(name, nxt, en, lo, hi, init):
+            out = declare(name, lo, hi, init)
+            unit.regs.append(g.node("hw.reg", [nxt, en], {"name": name}))
+            return out
+
+        def load(name, nxt, en):
+            unit.regs.append(g.node("hw.reg", [nxt, en], {"name": name}))
+
+        def read(name):
+            return g.op("hw.regread", name=name)
+
+        lanes, bins = folds["lanes"], folds["bins"]
+        shape = [n for n in folds["shape"]]
+        if len(lanes) > 1 or (folds["stacked"]):
+            shape = shape[:-1]                  # the values side by side
+        cols = shape[-1] if shape else 1
+        rows = bins // cols
+        word = read("out_data")
+        beat = read("out_valid")
+        last = read("out_last")
+        first = read("out_sof")
+        busy = read("busy")
+        memory = bins > 1
+        fold = AND(beat, NOT(busy))             # taken, as control gave it
+        out_ready = port("out_ready")
+        # each lane's fields of the word, as _fold_unit laid them
+        at, fields = 0, []
+        for lane in lanes:
+            key = None
+            if memory:
+                key = bits(word, at, lane["kbits"])
+                at += lane["kbits"]
+            v = bits(word, at, lane["vbits"])
+            at += lane["vbits"]
+            fields.append((key, g.op("hw.add", v, c(lane["vlo"]))
+                           if lane["vlo"] else v))
+
+        def folded(lane, base, v):
+            if lane["op"] == "add":
+                return g.op("hw.add", base, v)
+            cmp = "hw.gt" if lane["op"] == "max" else "hw.lt"
+            return SEL(g.op(cmp, v, base), v, base)
+
+        def stored(lane):
+            return max(1, (lane["hi"] - lane["lo"]).bit_length())
+
+        def kept(lane, exact):
+            """`exact` in the fold's word: less the least it can be. Where a
+            step can leave the accumulator's container, NumPy's `at` wraps
+            it back in -- and the entry's range is then the container's
+            own, so this, its low bits above the container's least, IS
+            that wrap."""
+            return g.op("hw.wrap", g.op("hw.sub", exact, c(lane["lo"])),
+                        bits=stored(lane), signed=False)
+
+        roots = {k: v for k, v in unit.roots.items()
+                 if k == "in_ready" or k.startswith("mem_")}
+        mems = f.setdefault("memories", [])
+        aw = max(1, (bins - 1).bit_length())
+        values = []                     # each lane's value in the out beat
+        taken = None                    # the result's beat taken
+        if not memory:
+            # the frame's value, and whether it waits to be taken
+            done = AND(fold, last)
+            taken = AND(busy, out_ready)
+            load("busy", done, OR(done, taken))
+            for j, (lane, (_, v)) in enumerate(zip(lanes, fields)):
+                sb = stored(lane)
+                acc = declare(f"acc{j}", 0, (1 << sb) - 1, 0)
+                base = SEL(first, c(lane["init"]),
+                           g.op("hw.add", acc, c(lane["lo"])))
+                new = kept(lane, folded(lane, base, v))
+                load(f"acc{j}", new, fold)
+                held = reg(f"res{j}", new, done, 0, (1 << sb) - 1, None)
+                values.append(g.op("hw.add", held, c(lane["lo"])))
+            out_valid = busy
+            flags = {"sof": c(1), "eol": c(1), "last": c(1)}
+        else:
+            b_valid = reg("b_valid", fold, c(1), 0, 1, 0)
+            b_last = reg("b_last", last, c(1), 0, 1, 0)
+            w_valid = reg("w_valid", b_valid, c(1), 0, 1, 0)
+            landing = AND(b_valid, b_last)
+            armed = declare("armed", 0, 1, 0)   # the reset's sweep is done
+            # The sweep, once the frame's last write has landed: each
+            # entry read -- a beat of the result, held in the memory's read
+            # register until taken -- and its start written back at once.
+            sw = declare("sweep", 0, bins, 0)
+            sc = declare("sweep_c", 0, cols - 1, 0)
+            held = declare("held", 0, 1, 0)     # a beat in the read register
+            room = OR(NOT(armed), OR(NOT(held), out_ready))
+            reading = AND(AND(busy, NOT(landing)),
+                          AND(g.op("hw.lt", sw, c(bins)), room))
+            load("sweep", SEL(busy, g.op("hw.clip", g.op(
+                "hw.add", sw, c(1)), lo=0, hi=bins), c(0)),
+                OR(reading, NOT(busy)))
+            load("sweep_c", SEL(OR(NOT(busy), EQ(sc, c(cols - 1))), c(0),
+                                g.op("hw.add", sc, c(1))),
+                 OR(reading, NOT(busy)))
+            taken = AND(held, out_ready)
+            load("held", AND(reading, armed), OR(reading, taken))
+            oe = reg("out_entry", g.op("hw.wrap", sw, bits=aw, signed=False),
+                     reading, 0, (1 << aw) - 1, None)
+            oc = reg("out_col", sc, reading, 0, cols - 1, None)
+            # done: the last beat taken -- or, after reset, the last entry
+            # cleared
+            done = OR(AND(taken, EQ(oe, c(bins - 1))),
+                      AND(AND(reading, NOT(armed)), EQ(sw, c(bins - 1))))
+            load("armed", c(1), done)
+            load("busy", SEL(AND(fold, last), c(1), c(0)),
+                 OR(AND(fold, last), done))
+            for j, (lane, (key, v)) in enumerate(zip(lanes, fields)):
+                sb = stored(lane)
+                name = f"acc{j}"
+                rd = g.op("hw.memread", name=name, lo=0, hi=(1 << sb) - 1)
+                top = (1 << lane["kbits"]) - 1
+                b_key = reg(f"b_key{j}", key, c(1), 0, top, None)
+                b_v = reg(f"b_v{j}", v, c(1), v.type.lo, v.type.hi, None)
+                w_key = declare(f"w_key{j}", 0, top, None)
+                w_s = declare(f"w_s{j}", 0, (1 << sb) - 1, None)
+                fresh = AND(w_valid, EQ(w_key, b_key))
+                base_s = SEL(fresh, w_s, rd)
+                new = kept(lane, folded(
+                    lane, g.op("hw.add", base_s, c(lane["lo"])), b_v))
+                load(f"w_key{j}", b_key, c(1))
+                load(f"w_s{j}", new, c(1))
+                at_sw = g.op("hw.wrap", sw, bits=aw, signed=False)
+                roots.update({
+                    f"mem_{name}_we": OR(b_valid, reading),
+                    f"mem_{name}_wa": SEL(reading, at_sw, b_key),
+                    f"mem_{name}_wd": SEL(reading,
+                                          c(lane["init"] - lane["lo"]), new),
+                    f"mem_{name}_re": OR(fold, reading),
+                    f"mem_{name}_ra": SEL(reading, at_sw, key)})
+                mems.append({"instance": f"u_{name}", "name": name,
+                             "bits": sb, "depth": bins, "aw": aw,
+                             "read": "sync", "seam": "acc"})
+                values.append(g.op("hw.add", rd, c(lane["lo"])))
+            out_valid = held
+            eol = EQ(oc, c(cols - 1))
+            flags = {"sof": EQ(oe, c(0)), "eol": eol,
+                     "last": EQ(oe, c(bins - 1))}
+        # every fold's value of the entry side by side, as a stack's
+        # channels are: one width, unsigned where there are several
+        if len(values) > 1 and any(v.type.lo < 0 for v in values):
+            raise Unsupported("folds side by side, one of them negative: a "
+                              "stream's channels are unsigned")
+        field = max(v.type.bits for v in values)
+        data = values[0] if len(values) == 1 else g.op(
+            "hw.cat", *values, field=field)
+        # the context the result carries: the folded frame's, as it was at
+        # its first beat, and the result's size
+        img = f["image"]
+        ctx_now = unit.roots["out_ctx"]
+        cbits = img.context_bits
+        kept_ctx = reg("res_ctx", ctx_now, AND(fold, first), 0,
+                       (1 << cbits) - 1, 0)
+        parts, lo_ = [], 0
+        for name, b, follows in img.context:
+            parts.append(c(cols) if follows == "width" else
+                         c(rows) if follows == "height" else
+                         bits(kept_ctx, lo_, b))
+            lo_ += b
+        roots.update({"out_valid": out_valid, "out_data": data,
+                      "out_ctx": g.op("hw.cat", *parts, fields=tuple(
+                          b for _, b, _ in img.context)),
+                      **{f"out_{k}": AND(out_valid, v)
+                         for k, v in flags.items()}})
+        unit.roots = roots
+        f.update(out_bits=data.type.bits, out_signed=data.type.lo < 0,
+                 out_size=(rows, cols),
+                 result={"shape": folds["shape"], "rows": rows,
+                         "cols": cols})
+        if len(values) > 1:
+            f.update(out_channels=len(values), out_field=field)
+        return unit
+
+    return Pass("accumulate", run_, levels={"hw"})
+
+
 def lower(c: Canonical, dev=None, clk_ns=None) -> Unit:
     """The canonical graph, lowered to a hardware module for the device
     `dev` (the default device when None), its stages fitting `clk_ns` when
@@ -1345,6 +1715,6 @@ def lower(c: Canonical, dev=None, clk_ns=None) -> Unit:
     unit = Unit(c.g, {"out": c.output})
     try:
         return run(unit, [rewrite(c, dev), control(), schedule(clk_ns, dev),
-                          materialise()])
+                          materialise(), accumulate()])
     except GraphError as e:
         raise Unsupported(f"lowering: {e}") from e

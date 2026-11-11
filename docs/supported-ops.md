@@ -34,8 +34,31 @@ RTL path errors, it's using something below the line.
 | `np.where(cond, A, B)` | `cond` must be a scalar **bool `Param`** (1-bit); `A`/`B` are same-shape branches → a 2:1 mux (bypass) |
 
 **Any other `np.*` call on a traced value raises `Unsupported`** (a
-`NotImplementedError`). So `np.sum`, `np.matmul`, `np.clip(...)` (the function), etc.
-are not traced — see "Next (roadmap)" below.
+`NotImplementedError`) -- reductions and folds aside, below. So `np.matmul`,
+`np.clip(...)` (the function), etc. are not traced — see "Next (roadmap)" below.
+
+## Reductions and folds
+
+A frame into a result that is the frame's -- statistics, a histogram, zone
+sums -- written as NumPy writes it:
+
+| Model | Support |
+|---|---|
+| `x.sum()`, `x.max()`, `x.min()` (and `np.sum`, `np.max`, `np.min`) | the whole value, or over `axis=` of the image's axes -- an entry for each position kept, the fold keyed by it -- in the container NumPy reduces in (`sum` of an unsigned value is `uint64`, of a signed one `int64`; `dtype=` takes another) |
+| `acc = np.zeros(n, dtype, like=pixel)` (or `np.full`, `np.ones`) | an accumulator: `like=` is NumPy's own routing, which puts it in the trace; a dtype is required |
+| `np.add.at(acc, key, value)`, `np.maximum.at`, `np.minimum.at` | each pixel's value folded into the entry its key names -- one key per axis of `acc`, a key the pixel computes or a constant; each step wrapped into `acc` as NumPy's `at` wraps it |
+| `np.stack([acc_a, acc_b], axis=-1)` | folds side by side: an entry's values together |
+
+The value and its keys range over the whole frame -- each pixel folds once --
+and may be anything the pixel's datapath computes, windows included. One
+write per accumulator. The result leaves as an ordinary output stream once
+its frame is folded: a beat an entry, the folds' values side by side as a
+stack's channels, framed by the result's rows and columns (a histogram one
+row, a reduction whole one beat), carrying the folded frame's context with
+the result's size. Where it goes -- software's reading, another block --
+is the design's wiring.
+Each fold is an accumulator memory, cleared as the result streams out of
+it; a frame arriving before that is done waits, as for any core not ready.
 
 ## Operands
 
@@ -56,8 +79,9 @@ These appear in the design pattern table
 ([design/05](../design/05-isp-operation-library.md)) as the *intended* library,
 but are **not implemented in the tracer yet**:
 
-- **Reductions**: `np.sum`, `np.mean`, `np.max`, `np.maximum` / `np.minimum`
-  (this is what stops a statistics block being traced)
+- **A reduction over a word's channels** (`x.sum(axis=-1)` of a multi-channel
+  value) -- every pixel keeps its own result, a stream rather than a fold --
+  and `np.mean` (a divide)
 - **`@` / `np.matmul`** (systolic array), **`np.convolve`**
 - **`np.clip` as a function** — use the `.clip(lo, hi)` **method**
 - **`.saturate(N)` / `.truncate(N)` / `.round_to(N)`** — use `.clip`, `//`, `.astype`

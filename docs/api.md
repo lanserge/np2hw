@@ -82,6 +82,7 @@ wrappers read are still there, but the **public surface is the typed one**:
 | `core.line_buffers` / `core.shift_depth` | delay-line cost (`M` / `N` are the emitter's private spelling) |
 | `core.out_bits`, `core.params` | output width; `(name, bits)` per register port, the frame's size among them |
 | `core.registers` | the model's own registers: `core.params` less the frame's size |
+| `core["result"]` | a fold's: the result's `shape`, and the `rows` and `cols` of the frame it streams out; None for any other core |
 
 ### `core.interface` — a module describing itself
 

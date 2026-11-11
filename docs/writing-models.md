@@ -52,7 +52,7 @@ neighborhood**, optionally followed by pointwise post-processing.
 Signedness and width follow NumPy via `np.result_type`, so `uint8 * -1 → int16`, etc.
 
 For the **complete, authoritative list** — every traced operator/method/`np.*`
-function, and explicitly what is **not** supported yet (reductions, `@`/matmul,
+function, and explicitly what is **not** supported yet (reductions over a word's channels, `@`/matmul,
 convolve, LUT, …) — see [supported-ops.md](supported-ops.md).
 
 ## Gotchas (the trace is stricter than NumPy)

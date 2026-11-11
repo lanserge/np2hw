@@ -62,7 +62,8 @@ Four things, and the comment on every emitted seam module says the same:
 3. **Collision.** `we` and `re` in the same cycle at the same address
    read the **old** word (read-before-write). This is not a corner case
    to wave through: a line delay writes column `c` while reading last
-   line's column `c`, every beat of every line. A macro whose collision
+   line's column `c`, every beat of every line, and a fold streaming its
+   result out reads each entry while writing its start back. A macro whose collision
    behaviour is undefined or read-new needs a bypass in its wrapper.
 4. **No reset.** `rd` is data, not state; nothing here clears it and
    nothing downstream depends on its value before the first read.
@@ -77,6 +78,7 @@ the seam's contract, which is why the module stays as small as it is.
 | any window -- padded (`mode="edge"` or zero), CFA phases, unpadded, a crop, a filter of a filter's result, `np.where` over a window | **registered**, read a column ahead | accepted, behind the seam, `<module>_linebuf` |
 | a video's past frames | **registered**, read a position ahead | accepted, behind its own seam, `<module>_mem`, same four rules |
 | a stream's recent past (`frame_history`) | **registered** | accepted, behind its own seam, `<module>_mem`, same four rules |
+| a fold's entries (`np.add.at`, a reduction over an axis) | **registered**, read beside a write of the beat before, which is forwarded | accepted, behind its own seam, `<module>_acc`, same four rules |
 
 What `sync_memory=True` states is a fact about the target: no SRAM macro
 implements a combinational read, so a design bound for silicon must not

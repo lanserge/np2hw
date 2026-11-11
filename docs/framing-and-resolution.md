@@ -25,6 +25,16 @@ This means power-up mid-stream, or a master that frames with TUSER, both work: t
 locks to the real frame. (See `examples/axi_video.py` — a multi-frame TUSER/HBLANK/VBLANK
 stream validated against NumPy.)
 
+## A fold's frame
+
+A fold -- `x.sum()`, `np.add.at(acc, key, v)` -- puts out a frame of its own
+once the frame it folds is in: the result's, a beat an entry, its rows and
+columns the result's (a histogram one row, a reduction whole one beat). Its
+`out_ctx` is the folded frame's context with the result's size, and its
+framing flags are the result's. A frame arriving while the last result is
+still streaming out waits, as for any core not ready
+([supported-ops.md](supported-ops.md)).
+
 ## Continuous (multi-frame) operation
 
 The cores **re-arm** at the end of a frame (counter wraps to 0) rather than latching a

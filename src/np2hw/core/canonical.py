@@ -135,6 +135,14 @@ class _Rebuild:
                 value, idx = rest[i * per], rest[i * per + 1:(i + 1) * per]
                 planes += [self.wrap(value, tc), *(self.index(x) for x in idx)]
             return g.node(k, [ops[0], *planes], attrs).value
+        if k == "model.scatter":
+            # each step wraps into the accumulator, which the node says
+            # itself (`into`): a maximum of wrapped steps is not the wrap of
+            # a maximum, so no wrap after it would do
+            attrs["into"] = attrs["container"]
+            attrs["container"] = EXACT
+            ops = [ops[0], *(self.index(x) for x in ops[1:])]
+            return g.node(k, ops, attrs).value
         if k == "model.and" and self._low_mask(n) is not None:
             return self._mask(ops, self._low_mask(n))
         if k == "model.shr" and ops[0].type.lo >= 0:

@@ -178,9 +178,6 @@ Developed independently; recurring support via
 first: **s.rabykin@gmail.com**. Sponsorable capability targets -- each a generic
 NumPy-level feature that unblocks everyone downstream, ISP or otherwise:
 
-- **Reductions** ([#1](https://github.com/lanserge/np2hw/issues/1)) -- per-zone
-  accumulate/min/max over a frame, which is what any statistics or metering
-  block needs.
 - **Buffered forks** ([#2](https://github.com/lanserge/np2hw/issues/2)) -- one
   stream feeding consumers that accept at different rates, with the elasticity
   stated and verified.

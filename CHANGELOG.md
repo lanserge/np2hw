@@ -34,6 +34,23 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   modulo 2**64; a register window at the output is kept as NumPy's crop
   keeps it.
 
+- **Folds: a frame into a result that is the frame's.** A model reduces
+  its frame -- `x.sum()`, `x.max()`, `x.min()`, whole or over `axis=` of
+  the image's axes, an entry for each position kept -- or folds each pixel into
+  the entry an accumulator's key names: `np.add.at`, `np.maximum.at` or
+  `np.minimum.at` into `np.zeros(n, dtype, like=pixel)` (`np.full`,
+  `np.ones`), NumPy's own `like=` routing the accumulator into the trace.
+  Each step wraps into the accumulator as NumPy's `at` wraps it; folds side
+  by side are an `np.stack` along the last axis. The result leaves as an
+  ordinary output stream once its frame is folded, a beat an entry, framed
+  by the result's rows and columns, the folded frame's context with the
+  result's size: where it goes is the design's wiring. Each fold folds
+  into an accumulator memory, and streaming the result out reads every entry
+  and writes its start back at once; a one-entry fold is a register. A frame
+  arriving while the last is streamed out waits. Its value and keys may be
+  anything the pixel datapath computes, windows included. The C backend
+  prints a fold too.
+
 - **`np2hw pipeline run --c`**: every block of the chain run as its model
   printed as C, on the same frames, registers and context, and held to the
   models word for word beside `--rtl`. `Block.compile_c` builds a block's

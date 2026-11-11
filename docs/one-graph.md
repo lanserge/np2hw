@@ -2,7 +2,7 @@
 
 Status: built, its decisions settled (see the end). The graph core, the
 tracer, canonicalising, and the lowering of pointwise models, windows,
-stages cut to a clock and reads across a video's frames are `np2hw.core`,
+stages cut to a clock, reads across a video's frames and folds are `np2hw.core`,
 which `to_ir` and `generate` drive; a model it does not reach is refused,
 by name.
 
@@ -283,7 +283,8 @@ The passes, each visiting every shared node once:
 
 Built so far: canonicalise (which shares by interning, so the second pass
 happens inside the first), then rewrite, control (the driving variables'
-counters and flags), schedule, materialise and print. The window rule is
+counters and flags), schedule, materialise, accumulate (a fold's memory
+and the stream its result leaves as, decision 8) and print. The window rule is
 applied within rewrite and control: rewrite finds each window source and
 its taps, control builds their line buffers, shift registers and edge rule
 on a step raster the lag and the flush come from.
@@ -383,7 +384,7 @@ design's timing is decided, as it always was. A port width that changes is
 called out. Compile time is reported, not gated.
 
 **Families one at a time**: pointwise, stencils, phase planes, channel
-words, frame reads, each complete when its examples pass.
+words, frame reads, folds, each complete when its examples pass.
 
 ## Prior art
 
@@ -606,6 +607,30 @@ stalled; the stream's backpressure is the only handshake.
 **Resets.** A register needs a reset only if its value is read without a
 reset flag saying it is valid; data registers qualified by `out_valid` have
 none.
+
+### 8. Folds
+
+A fold is every position of the frame folded into a result that is the
+frame's: `x.sum()`, `x.max()`, `x.min()` -- whole, or over the image's axes --
+and `np.add.at(acc, key, v)`, `np.maximum.at`, `np.minimum.at` into an
+accumulator made like the frame (`np.zeros(n, dtype, like=img)`, NumPy's own
+`like=` routing it into the trace). It is ONE node, `model.scatter`: the value
+and the keys its operands, the operation, the start and the accumulator's axes
+its attributes. Its type is the accumulator's: its range what an entry can
+reach -- none of the positions, or all of them -- wrapped into the
+accumulator's container where a step can leave it, as NumPy's `at` wraps each
+step (`into`, after canonicalising). A reduction over an axis is the fold keyed
+by the axes it keeps.
+
+Lowering keeps the fold's value and keys as the pixel datapath, packed in the
+word a stage carries; the **accumulate** pass folds that word, beat by beat,
+into an accumulator memory -- a read, the value folded in, a write, the write
+of the beat before forwarded to a read it lands too late for. At the frame's
+last beat it streams the result out, a beat an entry, each read writing the
+fold's start back: the result published and the accumulator cleared in one
+pass, a frame arriving meanwhile waiting. A one-entry fold is a register. The
+result is an ordinary stream, framed by the result's rows and columns, so where
+it goes is the design's.
 
 ### Left open, by design
 

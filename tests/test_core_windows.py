@@ -303,3 +303,40 @@ def test_a_window_cut_into_stages(tmp_path):
     core = _check(tmp_path, sharpen, (GAIN,), {"gain": 23}, (23,), seed=8,
                   clk_ns=5.0, name="sharpen")
     assert core["pipeline_stages"] > 1
+
+
+def beside(img):
+    """The source read straight, beside a window over it: the pixel the
+    window's lag has reached, not the one arriving."""
+    x = np.pad(img.astype(np.int32), 1, mode="edge")
+    return (np.abs(x[1:-1, 2:] - x[1:-1, :-2]) + (img >> 6)).astype(np.uint16)
+
+
+def stored_and_read(img):
+    """One value both stored by a window and read straight: the window
+    keeps it as it arrives, the datapath reads it at the output's pixel."""
+    y = img.astype(np.int32) >> 1
+    x = np.pad(y, 1, mode="edge")
+    return (np.abs(x[2:, 1:-1] - x[:-2, 1:-1]) + y).astype(np.uint16)
+
+
+@pytest.mark.parametrize("fn", [beside, stored_and_read])
+def test_a_value_read_straight_beside_a_window(tmp_path, fn):
+    _check(tmp_path, fn, name=fn.__name__)
+
+
+def field_beside(pixel):
+    """A channel of the word both windowed and read straight."""
+    a = pixel[..., 0].astype(np.int32)
+    x = np.pad(a, 1, mode="edge")
+    return (np.abs(x[1:-1, 2:] - x[1:-1, :-2]) + a + pixel[..., 1]).astype(
+        np.uint16)
+
+
+def test_a_channel_read_straight_beside_its_window(tmp_path):
+    core = _compile(field_beside, bits=2 * BITS, channels=2,
+                    name="field_beside")
+    frames = np.random.default_rng(8).integers(0, 1 << BITS, (3, H, W, 2))
+    want = [field_beside(f.astype(np.uint16)) for f in frames]
+    words = (frames[..., 0] | frames[..., 1] << BITS)
+    assert _sim(tmp_path, core, words) == _beats(want)

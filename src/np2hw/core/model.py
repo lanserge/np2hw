@@ -332,6 +332,43 @@ def _access(g, ts, a):
     return (Type(tuple(axes), buf.container, buf.lo, buf.hi),)
 
 
+def hits(g, ts) -> int:
+    """How many positions a scatter folds -- its value and keys broadcast,
+    as NumPy broadcasts them: the most any one entry can take."""
+    n = 1
+    for v in broadcast(g, *(t.axes for t in ts)):
+        if v is not None:
+            n *= g.vars.count(v)
+    return n
+
+
+def _scatter(g, ts, a):
+    """Each position of the value -- its first operand -- folded by `op`
+    into the entry its keys name, every entry starting at `init`: NumPy's
+    `ufunc.at` into an accumulator, or a reduction whole with no keys. As
+    NumPy does it, each step is the operation on the entry and the value,
+    then the result put back in the accumulator's container `into` --
+    wrapped there, where it leaves it. The result's axes are the
+    accumulator's own; its range, what an entry can reach: none of the
+    positions, or all of them, unless the wrap makes it the container's."""
+    v, keys = ts[0], ts[1:]
+    c, init, n = a["container"], a["init"], hits(g, ts)
+    into = a.get("into", c)
+    vlo, vhi = v.lo, v.hi
+    for k, axis in zip(keys, a["axes"]):
+        if k.lo < 0 or k.hi >= g.vars.count(axis):
+            raise GraphError(f"a key in [{k.lo}, {k.hi}] for an axis of "
+                             f"{g.vars.count(axis)}")
+    if a["op"] == "add":
+        lo, hi = init + n * min(vlo, 0), init + n * max(vhi, 0)
+    elif a["op"] == "max":
+        lo, hi = init, max(init, vhi)
+    else:
+        lo, hi = min(init, vlo), init
+    axes = tuple(g.vars.find(x) for x in a["axes"])
+    return (Type(axes, c, *fit(lo, hi, into)),)
+
+
 def _window(g, ts, a):
     """The source, kept inside a window its registers place: the same axes
     and values -- the frame it keeps is the window, the rest is dropped."""
@@ -373,5 +410,6 @@ for _k in (
     Kind("model.wrap", _P, 1, _wrap),
     Kind("model.bits", _P, 1, _bits),
     Kind("model.select", _P, None, _select),
+    Kind("model.scatter", _P, None, _scatter),
 ):
     register(_k)

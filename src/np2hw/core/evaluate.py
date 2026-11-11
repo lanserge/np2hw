@@ -95,6 +95,41 @@ def _select(g, n, vals):
     return out
 
 
+_FOLD = {"add": np.add, "max": np.maximum, "min": np.minimum}
+
+
+def _scatter(g, n, vals):
+    """`ufunc.at` into an accumulator starting at `init`, or the value
+    reduced whole: the value and its keys broadcast as NumPy broadcasts
+    them, every position folded into the entry its keys name."""
+    c = n.attr("container")
+    exact = c == ("x", 0)
+    # the accumulator NumPy keeps, each step wrapped into it
+    into = dict(n.attrs).get("into")
+    dtype = _dtype(into or c) if into or not exact else np.dtype(np.int64)
+    fold = _FOLD[n.attr("op")]
+    ops = n.operands
+    width = max(len(o.type.axes) for o in ops)
+    want = []
+    for dims in zip(*((None,) * (width - len(o.type.axes)) + tuple(o.type.axes)
+                      for o in ops)):
+        real = [g.vars.find(d) for d in dims if d is not None]
+        want.append(real[0] if real else None)
+    want = tuple(w for w in want if w is not None)
+    shape = tuple(g.vars.count(w) for w in want)
+    placed = [np.broadcast_to(_place(g, v, o.type.axes, want) if o.type.axes
+                              else np.asarray(v), shape)
+              for v, o in zip(vals, ops)]
+    value = np.asarray(placed[0])
+    acc_shape = tuple(g.vars.count(a) for a in n.attr("axes"))
+    acc = np.full(acc_shape or (1,), n.attr("init"), dtype=dtype)
+    keys = (tuple(np.asarray(k, dtype=np.int64) for k in placed[1:])
+            if acc_shape else (np.zeros(value.shape, np.int64),))
+    fold.at(acc, keys, value)
+    out = acc if acc_shape else acc[0]
+    return np.asarray(out).astype(np.int64) if exact else out
+
+
 def _stack(g, n, vals):
     return np.stack(vals, axis=n.attr("axis"))
 
@@ -128,6 +163,7 @@ _EVAL = {
     "model.wrap": _wrap,
     "model.bits": _bits,
     "model.select": _select,
+    "model.scatter": _scatter,
     "model.var": lambda g, n, v: np.arange(g.vars.count(n.attr("name"))),
 }
 

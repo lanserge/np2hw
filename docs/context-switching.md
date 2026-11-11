@@ -123,13 +123,13 @@ What it needs, in np2hw terms:
   honestly: no HIDDEN round-trip — memory becomes a declared element in the
   netlist, visible to the same validation as everything else, never an
   assumption inside a block.
-- **Reductions** (already on the roadmap for statistics) are what any motion
-  or match metric will need; a static-scene or globally-aligned first version
-  needs none.
+- **Reductions** -- folds of the frame (supported-ops.md) -- are what any
+  motion or match metric needs; a static-scene or globally-aligned first
+  version needs none.
 
 So the pattern adds no new contract — it adds two entries to the stream-element
-category (frame store in, frame store out) and seconds two roadmap items that
-other blocks already want (multi-input tracing, reductions).
+category (frame store in, frame store out) and seconds a roadmap item that
+other blocks already want (multi-input tracing).
 
 ## Rules in force now (they cost nothing)
 

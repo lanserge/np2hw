@@ -305,3 +305,25 @@ def test_a_register_window_keeps_what_numpy_crops(tmp_path):
         want = crop(img, *(np.uint16(v) for v in (y0, x0, h, w)))
         got = k(img, y0=y0, x0=x0, h=h, w=w)
         assert got.shape == want.shape and np.array_equal(got, want)
+
+
+FOLDS = _module(HERE / "test_core_folds.py")
+
+
+@pytest.mark.parametrize("name", ["total", "peak", "low", "hist", "zones",
+                                  "narrow", "side_by_side", "edges",
+                                  "clipped_peak", "mixed_widths",
+                                  "row_sums", "column_peaks", "row_lows",
+                                  "both_axes"])
+def test_folds(tmp_path, name):
+    m = FOLDS
+    _check(tmp_path, getattr(m, name), width=m.W, height=m.H, bits=m.BITS)
+
+
+def test_a_fold_with_a_register(tmp_path):
+    m = FOLDS
+
+    def brightest(img, black):
+        return m.brightest(img, m._P(black=black))
+    _check(tmp_path, brightest, (Param("black", bits=10),),
+           width=m.W, height=m.H, bits=m.BITS)

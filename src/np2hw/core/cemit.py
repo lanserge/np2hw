@@ -581,8 +581,104 @@ class _Printer:
 
     # -- the file --------------------------------------------------------------- #
 
+    def fold_source(self, fname: str, out_ctype: str, folds) -> tuple:
+        """A fold: every entry starts at the fold's start, every position of
+        the frame folds its value into the entry its keys name, in raster
+        order, as NumPy's `ufunc.at` does; then each entry is wrapped into
+        the result's container. One thread: the entries are shared."""
+        c = self.c
+        f0 = folds[0][0]
+        reach = [self.find(a) for a in f0.value.type.axes]       # entries
+        frame = []
+        for o in f0.operands:
+            for a in o.type.axes:
+                if a and self.find(a) not in frame:
+                    frame.append(self.find(a))
+        src_order = [self.find(a) for a in c.source.type.axes]
+        frame.sort(key=lambda v: src_order.index(v) if v in src_order
+                   else len(src_order))
+        for i, v in enumerate(frame):
+            self.names[v] = f"i{i}"
+        entries = 1
+        for a in reach:
+            entries *= self.count(a)
+        lanes = len(folds)
+        lo = min(f.value.type.lo for f, _ in folds)
+        hi = max(f.value.type.hi for f, _ in folds)
+        acc_t = ctype_for(lo, hi)[1]
+        ops_c = {"add": "+", "max": None, "min": None}
+
+        def body(nest: _Nest):
+            env = {v: _affine({v: 1}, 0, 0, self.count(v) - 1) for v in frame}
+            for j, (f, _) in enumerate(folds):
+                v, *keys = f.operands
+                val = self.val(nest, v, env)
+                flat = None
+                for key, axis in zip(keys, f.attr("axes")):
+                    k = self.val(nest, key, env)
+                    n = self.count(self.find(axis))
+                    flat = k.c(self.names) if flat is None else \
+                        f"({flat}) * {n} + {k.c(self.names)}"
+                at = f"(({flat or '0'}) * {lanes} + {j})"
+                w = self.span(val, _literal(lo), _literal(hi))
+                a, b = f"(({w})acc[{at}])", self.ref(val, w)
+                op = f.attr("op")
+                new = (f"{a} + {b}" if op == "add" else
+                       f"({b} > {a} ? {b} : {a})" if op == "max" else
+                       f"({b} < {a} ? {b} : {a})")
+                # Each step is put back in the accumulator's container, as
+                # NumPy's `at` puts it: where a step can leave it, the
+                # entry's range is the container's and `acc_t` IS that
+                # container, so the conversion is the wrap -- two's
+                # complement, as every compiler this builds with converts.
+                line = f"acc[{at}] = ({acc_t})({new});"
+                if frame:
+                    nest.bodies[nest.mode].append(line)
+                else:
+                    nest.top.append(line)
+
+        nest = _Nest(frame)
+        body(nest)
+        if frame:
+            xa, xb = 0, self.count(nest.inner)
+            for coef, const, n in nest.bounds:
+                xa = max(xa, -(const // coef))
+                xb = min(xb, -((const - n) // coef))
+            if nest.bounds and xa < xb:
+                nest.interior = (xa, xb)
+                nest.mode = "interior"
+                body(nest)
+        size = entries * lanes
+        pre = [f"{acc_t} acc[{size}];",
+               *(f"for (int64_t e = 0; e < {entries}; ++e) "
+                 f"acc[e * {lanes} + {j}] = ({acc_t}){_lit(f.attr('init'))};"
+                 for j, (f, _) in enumerate(folds))]
+        post = []
+        for j, (f, wrap) in enumerate(folds):
+            x = f"(({acc_t})acc[e * {lanes} + {j}])"
+            if wrap is not None:
+                kind_, bits = wrap
+                if bits < 64:
+                    m = _lit((1 << bits) - 1)
+                    x = (f"({x} & {m})" if kind_ == "u" else
+                         f"((({x} + {_lit(1 << (bits - 1))}) & {m}) - "
+                         f"{_lit(1 << (bits - 1))})")
+            post.append(f"for (int64_t e = 0; e < {entries}; ++e) "
+                        f"dst[e * {lanes} + {j}] = ({out_ctype}){x};")
+        out_shape = [self.count(self.find(a)) if a else 1
+                     for a in c.output.type.axes]
+        src_shape = [self.count(a) for a in c.source.type.axes]
+        text = self.assemble(nest, fname, out_ctype, src_shape, whole=True,
+                             pre=pre, post=post)
+        return text, out_shape, src_shape, ()
+
     def source(self, fname: str, out_ctype: str) -> tuple:
         c = self.c
+        from .lower import _folds
+        folds = _folds(c.output)
+        if folds is not None:
+            self.fold = True
+            return self.fold_source(fname, out_ctype, folds)
         # A window registers place keeps the source's frame and drops what
         # lies outside it: the frame is computed whole, and the caller keeps
         # the window -- by the registers that place it, as NumPy's crop does.
@@ -639,10 +735,14 @@ class _Printer:
         text = self.assemble(nest, fname, out_ctype, src_shape)
         return text, out_shape, src_shape, window
 
-    def assemble(self, nest: _Nest, fname, out_ctype, src_shape) -> str:
+    def assemble(self, nest: _Nest, fname, out_ctype, src_shape,
+                 whole: bool = False, pre=(), post=()) -> str:
+        """The function: `whole` runs every loop over its whole count --
+        a fold, which no thread shares -- with `pre` before the loops and
+        `post` after them."""
         src_t = ctype_for(self.c.source.type.lo, self.c.source.type.hi)[1]
         ind = "    "
-        lines = [f"{ind}{s}" for s in nest.top]
+        lines = [f"{ind}{s}" for s in [*pre, *nest.top]]
         loops = nest.loops
 
         def inner_loops(depth: int) -> list:
@@ -650,7 +750,8 @@ class _Printer:
             v = loops[-1]
             name = self.names[v]
             n = self.count(v)
-            lo_, hi_ = ("lo", "hi") if len(loops) == 1 else ("0", str(n))
+            lo_, hi_ = ("lo", "hi") if len(loops) == 1 and not whole \
+                else ("0", str(n))
             edge = [pad + ind + s for s in nest.bodies["edge"]]
             if nest.interior is None:
                 return [f"{pad}for (int64_t {name} = {lo_}; {name} < {hi_}; "
@@ -658,7 +759,7 @@ class _Printer:
             xa, xb = nest.interior
             mid = [pad + ind + s for s in nest.bodies["interior"]]
             clip = (lambda e: f"(({e}) < lo ? lo : ({e}) > hi ? hi : ({e}))") \
-                if len(loops) == 1 else (lambda e: e)
+                if len(loops) == 1 and not whole else (lambda e: e)
             a, b = clip(str(xa)), clip(str(xb))
             return [f"{pad}for (int64_t {name} = {lo_}; {name} < {a}; ++{name}) {{",
                     *edge, f"{pad}}}",
@@ -672,7 +773,8 @@ class _Printer:
             for d, v in enumerate(loops[:-1]):
                 pad = ind * (d + 1)
                 name = self.names[v]
-                lo_, hi_ = ("lo", "hi") if d == 0 else ("0", str(self.count(v)))
+                lo_, hi_ = ("lo", "hi") if d == 0 and not whole \
+                    else ("0", str(self.count(v)))
                 lines.append(f"{pad}for (int64_t {name} = {lo_}; {name} < {hi_};"
                              f" ++{name}) {{")
                 lines += [pad + ind + s for s in nest.at[d]]
@@ -681,6 +783,9 @@ class _Printer:
             lines += reversed(close)
         else:
             lines = [f"{ind}if (lo > 0) return;"] + lines
+        if whole:
+            lines = [f"{ind}if (lo > 0) return;"] + lines
+        lines += [f"{ind}{s}" for s in post]
         body = "\n".join(lines)
         decls = "\n".join(self.decls)
         return f"""/* generated by np2hw (C backend); do not edit */
@@ -814,7 +919,7 @@ def emit(c: Canonical, fname: str, out_ctype: str) -> tuple:
     text, out_shape, src_shape, window = p.source(fname, out_ctype)
     loops = [a for a in c.output.type.axes if a is not None]
     outer = 1
-    if p.names:
+    if p.names and not getattr(p, "fold", False):
         first = next(v for v, nm in p.names.items() if nm == "i0")
         outer = c.g.vars.count(first)
     return text, p.regs, out_shape, src_shape, outer, window

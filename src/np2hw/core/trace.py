@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..ir import Image2D, Param, PhaseRef
-from .graph import BOOL, WEAK, Graph, GraphError, Value
+from .graph import BOOL, WEAK, Graph, GraphError, Value, container_range
 from .model import register_container
 
 # importing registers the model kinds
@@ -97,7 +97,7 @@ class Tracer:
         return sym["read"]
 
     def operand(self, o) -> Value | None:
-        if isinstance(o, Canvas):
+        if isinstance(o, (Canvas, Accumulator)):
             return o.array().v
         if isinstance(o, Array):
             return o.v
@@ -364,9 +364,73 @@ class Array:
             shape = tuple(shape[0])
         return _reshape(self, tuple(int(n) for n in shape))
 
+    # -- reductions: every position into one value ---------------------------
+
+    def sum(self, axis=None, dtype=None, **kw):
+        """`x.sum()`, or over `axis`: in the container NumPy sums in -- a
+        64-bit integer of the value's sign, or `dtype`."""
+        _options(kw, "sum")
+        have = self.v.type.container
+        if dtype is not None:
+            c = _container_of(dtype)
+        elif have[0] == "u":
+            c = ("u", 64)
+        else:                                   # signed, bool, a Python int
+            c = ("i", 64)
+        return self._reduce("add", c, 0, axis)
+
+    def max(self, axis=None, **kw):
+        _options(kw, "max")
+        return self._reduce("max", self._held(), self.v.type.lo, axis)
+
+    def min(self, axis=None, **kw):
+        _options(kw, "min")
+        return self._reduce("min", self._held(), self.v.type.hi, axis)
+
+    def _held(self):
+        c = self.v.type.container
+        return ("i", 64) if c == WEAK else c
+
+    def _reduce(self, op, container, init, axis=None):
+        """Every position of the value into one -- a scatter with no key --
+        or, over `axis`, each position into the entry of the axes it keeps:
+        a scatter keyed by their own variables, as `np.add.at(acc, x, v)`
+        with `x` the position is. Its start is the operation's identity on
+        the value's range."""
+        g, ndim = self.t.g, self.ndim
+        axes = tuple(range(ndim)) if axis is None else \
+            tuple(int(a) for a in (axis if isinstance(axis, tuple)
+                                   else (axis,)))
+        if any(not -ndim <= a < ndim for a in axes):
+            raise Unsupported(f"a reduction over axis {axis} of a "
+                              f"{ndim}-D value")
+        gone = {a % ndim for a in axes}
+        if len(gone) != len(axes):
+            raise Unsupported(f"a reduction over axis {axis}: an axis twice")
+        own = self.v.type.axes
+        kept = [i for i in range(ndim) if i not in gone]
+        if any(own[i] is None for i in kept):
+            raise Unsupported("a reduction keeping an axis of size 1")
+        keys, entries = [], []
+        for i in kept:
+            v = g.op("model.var", name=own[i])
+            if ndim > 1:
+                v = g.op("model.expand", v, axes=tuple(
+                    own[i] if j == i else None for j in range(ndim)))
+            keys.append(v)
+            entries.append(g.vars.declare(g.vars.count(own[i]),
+                                          "entries of a reduction", "b"))
+        return self._op("model.scatter", self.v, *keys, op=op,
+                        init=int(init), axes=tuple(entries),
+                        container=container)
+
     # -- NumPy's protocols ---------------------------------------------------
 
     def __array_function__(self, func, types, args, kwargs):
+        if func in _REDUCTIONS:
+            return getattr(args[0], _REDUCTIONS[func])(*args[1:], **kwargs)
+        if func in _CREATIONS:
+            return Accumulator.made(self.t, func, args, kwargs)
         if func is np.pad:
             return self._pad(*args[1:], **kwargs)
         if func is np.where:
@@ -382,6 +446,13 @@ class Array:
         raise Unsupported(f"np.{func.__name__}")
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method == "at" and not kwargs:
+            if not isinstance(inputs[0], Accumulator):
+                raise Unsupported(
+                    f"np.{ufunc.__name__}.at into an array the model made "
+                    "itself: make it like the frame -- np.zeros(n, dtype, "
+                    "like=pixel) -- so the trace sees it")
+            return inputs[0].at(ufunc, *inputs[1:])
         if method != "__call__" or kwargs:
             raise Unsupported(f"{ufunc.__name__}.{method}")
         if ufunc is np.absolute and len(inputs) == 1:
@@ -412,6 +483,157 @@ class Array:
                      for n, (a, b) in zip(self.shape, widths))
         return self._op("model.pad", self.v, axes=axes, widths=widths,
                         mode=edge)
+
+
+def _options(kw, what):
+    if kw:
+        raise Unsupported(f"a {what} with options {sorted(kw)}")
+
+
+#: NumPy's reductions, by the method each is
+_REDUCTIONS = {np.sum: "sum", np.max: "max", np.amax: "max", np.min: "min",
+               np.amin: "min"}
+#: what an accumulator is made by, and what it starts at
+_CREATIONS = {np.zeros: 0, np.ones: 1, np.full: None}
+#: what each ufunc's `at` does to the entries it reaches
+_AT = {np.add: "add", np.maximum: "max", np.minimum: "min"}
+
+
+class Accumulator:
+    """`np.zeros(shape, dtype, like=pixel)`, then one `np.add.at(acc, key,
+    value)` -- or `maximum`, `minimum`: each position of the value folded
+    into the entry its key names. NumPy builds it by mutation; the graph
+    cannot, so the write is collected and becomes ONE node when the array
+    is used: a scatter, the value and the keys its operands."""
+
+    __array_priority__ = 1001
+
+    def __init__(self, t: Tracer, shape: tuple, container, init: int):
+        self.t, self.shape, self.container, self.init = t, shape, container, init
+        self.write = None
+        self._array = None
+
+    @classmethod
+    def made(cls, t, func, args, kwargs):
+        kwargs = {k: v for k, v in kwargs.items() if k != "like"}
+        if kwargs.pop("device", None) not in (None, "cpu"):
+            raise Unsupported("an accumulator on a device")
+        order = kwargs.pop("order", "C")
+        if order != "C":
+            raise Unsupported(f"an accumulator in order {order!r}")
+        names = ("shape", "fill_value", "dtype") if func is np.full \
+            else ("shape", "dtype")
+        given = dict(zip(names, args))
+        for k, v in kwargs.items():
+            if k not in names or k in given:
+                raise Unsupported(f"np.{func.__name__} with {k}=")
+            given[k] = v
+        shape = given["shape"]
+        shape = (int(shape),) if np.ndim(shape) == 0 else \
+            tuple(int(n) for n in shape)
+        init = _CREATIONS[func]
+        if init is None:
+            init = given["fill_value"]
+            if not isinstance(init, (int, np.integer)) or isinstance(init,
+                                                                      bool):
+                raise Unsupported("np.full with a value the model computes: "
+                                  "an accumulator starts at a constant")
+        dtype = given.get("dtype")
+        if dtype is None:
+            raise Unsupported(f"np.{func.__name__} with no dtype: a float; "
+                              "an accumulator is an integer -- say which")
+        container = _container_of(dtype)
+        lo, hi = container_range(container)
+        if not lo <= int(init) <= hi:
+            raise Unsupported(f"an accumulator of {np.dtype(dtype)} starting "
+                              f"at {init}")
+        return cls(t, shape, container, int(init))
+
+    @property
+    def ndim(self):
+        return len(self.shape)
+
+    def at(self, ufunc, key, value=None):
+        if ufunc not in _AT or value is None:
+            raise Unsupported(f"np.{ufunc.__name__}.at: an accumulator folds "
+                              "by np.add, np.maximum or np.minimum, with a "
+                              "value")
+        if self._array is not None:
+            raise Unsupported("an accumulator written after it was used")
+        if self.write is not None:
+            raise Unsupported(
+                "two writes into one accumulator: each pixel would fold "
+                "into it twice in a beat. Fold one value, its key telling "
+                "the entries apart")
+        keys = key if isinstance(key, tuple) else (key,)
+        if len(keys) != self.ndim:
+            raise Unsupported(f"{len(keys)} key(s) into a {self.ndim}-D "
+                              "accumulator: one per axis")
+        t = self.t
+        vals = []
+        for k, n in zip(keys, self.shape):
+            if isinstance(k, (int, np.integer)) and not isinstance(k, bool):
+                if not -n <= int(k) < n:
+                    raise IndexError(f"key {int(k)} outside an axis of {n}")
+                vals.append(t.const(int(k) % n))
+                continue
+            v = t.operand(k)
+            if v is None or v.type.container == BOOL:
+                raise Unsupported(f"a key of {type(k).__name__}: a key is an "
+                                  "integer the model computes, or a constant")
+            vals.append(v)
+        v = t.operand(value)
+        if v is None:
+            raise Unsupported(f"a value of {type(value).__name__} folded")
+        self.write = (_AT[ufunc], vals, v)
+
+    def array(self) -> "Array":
+        if self._array is None:
+            if self.write is None:
+                raise Unsupported("an accumulator nothing was folded into")
+            op, keys, v = self.write
+            g = self.t.g
+            axes = tuple(g.vars.declare(n, "entries of an accumulator", "b")
+                         for n in self.shape)
+            self._array = Array(self.t, g.op(
+                "model.scatter", v, *keys, op=op, init=self.init, axes=axes,
+                container=self.container))
+        return self._array
+
+    def __getattr__(self, name):
+        # used as an array: the node, from here on
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self.array(), name)
+
+    def __getitem__(self, key):
+        return self.array()[key]
+
+    def __array_function__(self, func, types, args, kwargs):
+        args = tuple(a.array() if a is self else a for a in args)
+        return self.array().__array_function__(func, types, args, kwargs)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        if method == "at" and inputs and inputs[0] is self and not kwargs:
+            return self.at(ufunc, *inputs[1:])
+        inputs = tuple(a.array() if a is self else a for a in inputs)
+        return self.array().__array_ufunc__(ufunc, method, *inputs, **kwargs)
+
+
+def _delegate(name):
+    def method(self, *args):
+        return getattr(self.array(), name)(*args)
+    method.__name__ = name
+    return method
+
+
+for _name in ("__add__", "__radd__", "__sub__", "__rsub__", "__mul__",
+              "__rmul__", "__and__", "__rand__", "__or__", "__ror__",
+              "__lt__", "__gt__", "__le__", "__ge__", "__eq__", "__ne__",
+              "__neg__", "__abs__", "__floordiv__", "__mod__", "__rshift__",
+              "__lshift__"):
+    setattr(Accumulator, _name, _delegate(_name))
+Accumulator.__hash__ = None
 
 
 def _expand(key, ndim: int) -> tuple:
@@ -610,7 +832,7 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
         out = fn(Array(t, src), *params)
     finally:
         _ACTIVE.pop()
-    if isinstance(out, Canvas):
+    if isinstance(out, (Canvas, Accumulator)):
         out = out.array()
     if not isinstance(out, Array):
         raise Unsupported(f"a model returning {type(out).__name__}")

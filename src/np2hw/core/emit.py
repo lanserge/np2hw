@@ -188,7 +188,8 @@ class _Printer:
 
 
 _SEAM_WHAT = {"linebuf": "a window's line buffer",
-              "mem": "a frame store"}
+              "mem": "a frame store",
+              "acc": "a fold's accumulator"}
 
 
 def _seam(name: str, kind: str, width: int, depth: int, aw: int) -> list:
@@ -277,8 +278,8 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
              "    output wire out_sof,",
              "    output wire out_eol,",
              "    output wire out_last,",
-             f"    output wire {sgn}[{f['out_bits'] - 1}:0] out_data",
-             ");"]
+             f"    output wire {sgn}[{f['out_bits'] - 1}:0] out_data"]
+    head.append(");")
     decls, body = [], []
     for m in mems:
         # a memory behind its seam: the module an integrator binds by name
@@ -335,6 +336,9 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
                         ["endmodule"] + seams)
     interface = _interface(img.word_bits, f["out_bits"], f["out_signed"],
                            params)
+    if f.get("result") is not None:
+        # a fold's: its stream's frame is the result's
+        interface["result"] = dict(f["result"])
     for stream in [interface["input"], interface["output"],
                    *interface["streams"]]:
         if stream is not None:
@@ -355,6 +359,8 @@ def generate(unit: Unit, module_name: str, dev=None) -> dict:
     return Core({
         "verilog": verilog,
         "interface": interface,
+        # a fold's result's shape (None for a stream's core)
+        "result": f.get("result"),
         "channels": f.get("out_channels", f.get("channels", 1)),
         "in_bits": img.word_bits,
         "out_bits": f["out_bits"],
