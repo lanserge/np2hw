@@ -26,59 +26,59 @@ def model(img, gain):                     # `img` first, then one arg per regist
 
 ## How tracing works (mental model)
 
-`np2hw` runs your function once on a traced stand-in for `img`. NumPy operators and
-`__array_function__`/`__array_ufunc__` record the operations into a graph, which is
-flattened into a **weighted tap map** `{(row, col): coeff}` and lowered to a line IR.
-From there: horizontal extent → a shift register, vertical extent → line buffers, and
-the delay lines are counted automatically. (Details in
-[`design/02`](../design/02-stream-array-tracing.md) and
-[`design/03`](../design/03-hash-cons-delay-lines.md).)
+`np2hw` runs your function once on a traced stand-in for `img`. NumPy's operators and
+`__array_function__`/`__array_ufunc__` record every operation into ONE graph -- what
+the model computed, nothing decided -- each value with its NumPy container and its
+exact range. Lowering then reads the hardware off the graph: a read of the frame at
+an offset is a window (line buffers for the rows, shift registers for the columns,
+sized by the spread of the reads), a read across frames is a frame store, a fold is
+an accumulator, everything else is the datapath. The whole story is
+[one-graph.md](one-graph.md).
 
-The practical consequence: **think in terms of one output pixel as a weighted sum of a
-neighborhood**, optionally followed by pointwise post-processing.
+The practical consequence: **write the NumPy you mean.** A filter applied to a
+filter's result is one window over the source; a value computed once and read at
+offsets is stored, recomputed at every tap where you recompute it. The circuit is
+the one the model states, and it is bit-exact because NumPy's own semantics are
+followed operation by operation.
 
 ## What you can use
 
 | Construct | Notes |
 |---|---|
-| Slicing `img[a:b, c:d]` | the neighborhood window (relative offsets become taps) |
-| `+ - *`, integer `//` (power-of-two → shift) | element-wise / scale |
-| `np.pad(x, k, mode="edge"\|"constant")` | same-size output with edge handling ([streaming-and-bitwidths.md](streaming-and-bitwidths.md)) |
-| `.astype(dtype)` | declares the signal width (see below) |
-| `.clip(lo, hi)` | saturating narrow |
-| `np.where(cond_param, A, B)` | a 2:1 bypass mux on a bool `Param` ([parameters.md](parameters.md)) |
+| Slicing `img[a:b, c:d]`, steps, a register start | windows, CFA planes |
+| `+ - *`, `& \|`, comparisons, `abs`, `>>`/`<<` by a constant | the datapath |
+| `//`, `%` by a power of two | shifts, low bits |
+| `np.pad(x, k, mode="edge"\|"constant")` | same-size output with edge handling |
+| `.astype(dtype)`, `.view(dtype)`, `.clip(lo, hi)`, `saturate(x, bits)` | containers and narrowing, as NumPy has them |
+| `np.where(cond, a, b)` | a mux on any condition the model computes |
+| `table[x]` | a lookup in a register array or a `Rom` |
+| `np.stack([...], axis=-1)` | channels of one word |
+| `coords(img)` | the pixel's position, as values |
+| `x.sum()`, `np.add.at(acc, key, v)` into `np.zeros(n, dtype, like=img)` | folds: the frame into a result of its own |
 | `Param` / `Params` | config registers (scalar, matrix, bool) |
 
-Signedness and width follow NumPy via `np.result_type`, so `uint8 * -1 → int16`, etc.
+Signedness and width follow NumPy 2 (`uint8 * -1 -> int16`, a `uint8` sum wraps).
 
-For the **complete, authoritative list** — every traced operator/method/`np.*`
-function, and explicitly what is **not** supported yet (reductions over a word's channels, `@`/matmul,
-convolve, LUT, …) — see [supported-ops.md](supported-ops.md).
+For the **complete, authoritative list** -- and what is refused -- see
+[supported-ops.md](supported-ops.md).
 
 ## Gotchas (the trace is stricter than NumPy)
 
-The NumPy reference is permissive; the RTL path is not. The compiler will raise a clear
-error, but it helps to know the rules:
+The NumPy reference is permissive; the RTL path is not. A refusal names what it
+refuses:
 
-- **One spatial cone, then pointwise.** A spatial (neighbourhood) sum can be followed by
-  pointwise ops, but you can't do a spatial op *after* a pointwise narrow. E.g. an
-  unsharp mask must be written as a **single** weighted sum then divide:
-  ```python
-  # GOOD: one cone, divide at the end
-  (32*center - blur_sum) // 16
-  # BAD: pointwise (//16) then another spatial add  -> "add after pointwise"
-  ```
-  (See `examples/isp/sharpen.py`.)
-- **`np.where(...)` is terminal-ish**: it builds a mux. You may chain `.astype`/`.clip`
-  after it (they push into both branches), but treat it as the output stage.
-- **Mixed-width tree** (combining sub-results of different declared widths) is rejected
-  with a clear error rather than silently guessing — widen with `.astype` to unify.
-- **`default` for registers**: `Param("gain", np.uint8, default=16)` makes the hardware
-  boot at a sane value (registers reset to 0 otherwise → black/no-op). See
-  [parameters.md](parameters.md).
+- **A window over a value that can be negative is refused.** Offset it into an
+  unsigned range first (`x + 128`), window it, and take the offset off after.
+- **Division and remainder are by powers of two** in hardware; shifts are by
+  constants. `x * k >> s` is the usual way to scale.
+- **A lookup's index must provably stay inside its table** -- mask or clip it:
+  hardware has no IndexError.
+- **Channels stacked into a word are unsigned** -- clip them first. Folds
+  stacked side by side too; a single fold, or a reduction, may be negative.
+- **`default` for registers**: `Param("gain", np.uint8, default=16)` makes the
+  hardware boot at a sane value (registers reset to 0 otherwise).
 
-If the NumPy runs but the RTL path errors, it's almost always one of the above — the
-error message names the offending op.
+If the NumPy runs but the RTL path errors, the message names the operation and why.
 
 ## Validate it
 

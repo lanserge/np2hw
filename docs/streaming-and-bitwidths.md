@@ -2,29 +2,31 @@
 
 ## The streaming model
 
-Hardware processes **one pixel per clock**, in raster order. A neighbourhood operation
-needs context around the current pixel, which the generated RTL provides with:
+Hardware processes **one pixel per clock**, in raster order. A model that reads
+the frame at offsets needs the pixels around the current one, which the core
+keeps:
 
-- **Horizontal extent** (columns within a row) → a **shift register** of depth
-  `max-col - min-col`.
-- **Vertical extent** (rows of context) → **line buffers**; a `V`-row window needs
-  `V-1` line buffers, each `WIDTH` deep (one full row). Where those arrays
-  land — block RAM, distributed RAM, or on silicon a macro bound to the
-  emitted `*_linebuf` module — is [memories.md](memories.md).
+- **columns** (offsets along a line) in a **shift register**, as deep as the
+  spread of the column offsets read;
+- **rows** in **line buffers**: a read spanning `V` rows keeps `V - 1` lines,
+  each the traced width deep. Where those arrays land -- block RAM,
+  distributed RAM, or on silicon a macro bound to the emitted `*_linebuf`
+  module -- is [memories.md](memories.md);
+- **frames** (a video's past) in a **frame store**, as deep as the spread of
+  the frame offsets read.
 
-The compiler derives these from the traced tap map and counts the delay lines
-automatically; shared sub-expressions are hash-consed so two ops over the same window
-share hardware. (Rationale: [`design/01`](../design/01-streaming-model.md),
-[`design/03`](../design/03-hash-cons-delay-lines.md).)
+Nothing declares any of it: the storage is the spread of the reads the model
+makes, and the output trails the input by the most any read reaches past the
+output's own pixel ([one-graph.md](one-graph.md), the window rule).
 
-Output is registered and ready/valid with backpressure: `stall = out_valid &&
-!out_ready` freezes the datapath, so the core composes with FIFOs and the SB/AXI
-adapters.
+The output is registered and ready/valid with backpressure: one `ready` holds
+every stage while the output stalls, so a core composes with FIFOs, forks and
+the SB/AXI adapters.
 
 ## Edge handling (same-size output)
 
-By default a 3×3-style op shrinks the image (valid-interior). To get **same-size**
-output, pad in NumPy and the compiler builds the matching edge hardware:
+A window over the frame shrinks it (`x[1:-1]` is the frame less its border).
+To keep its size, pad in NumPy and the core builds the matching edge rule:
 
 ```python
 x = np.pad(img.astype(np.uint16), 1, mode="edge")      # replicate borders
@@ -33,54 +35,49 @@ x = np.pad(img.astype(np.uint16), 1, mode="edge")      # replicate borders
 
 | `np.pad` mode | Hardware |
 |---|---|
-| `mode="edge"` (replicate) | top: broadcast first row into line buffers; bottom: a **flush** phase recirculates the last row; left: broadcast col 0 into the shift register; right: latch & replicate the last column |
-| `mode="constant"` (zero) | borders fed as 0 (vertical and horizontal) |
+| `mode="edge"` (replicate) | a row or column before the frame's first reads the first -- a select on the step's position; one past the last reads the last, fed back by the flush |
+| `mode="constant"` (zero) | the same selects, with zero in place of the edge |
 
-Edge flushes run **during blanking** (HBLANK between rows, VBLANK between frames), so no
-backpressure is needed as long as the blanking is at least the kernel's padding depth.
-(See `examples/edges.py`; the generated testbench inserts the right blanking.)
+The rows and columns past the frame's last are **flush steps**: steps that take
+no input pixel. Once a frame's last pixel is in, the core runs them in idle
+input cycles -- blanking, where a source has it -- and when the next frame
+arrives first, it holds that frame back through `in_ready` until they are
+done. No blanking is required; it only saves the wait.
 
 ## Bitwidths & dtypes (faithful semantics)
 
-`np2hw` tracks two things per signal: the NumPy-style **dtype** (what you see) and the
-hardware-actual **bitwidth** (for codegen). The rule that keeps RTL == NumPy:
-
-> **The effective width is `min(naturally-grown width, the declared dtype width)`** —
-> and a `uint8` value **wraps** (mod 256) unless you widen it first with `.astype`.
+Every value carries two facts: its **NumPy container** -- the dtype NumPy holds
+it in, by NumPy 2's rules -- and its **exact integer range**. The container says
+where NumPy wraps, and the hardware wraps exactly there and nowhere else; the
+range sizes every wire.
 
 So this **wraps at 8 bits**, exactly like NumPy on `uint8`:
+
 ```python
 def model(img):                       # img is uint8
     return img + img                  # uint8 + uint8 -> wraps
 ```
-and this **keeps full range** because you declared 16 bits:
+
+and this keeps the full range, because NumPy holds it in 16 bits:
+
 ```python
 def model(img):
-    x = img.astype(np.uint16)         # declare 16-bit
+    x = img.astype(np.uint16)
     return x + x                      # no wrap
 ```
 
-### Growth rules (for reference)
+A Python int is weak and takes the other operand's dtype; a register is the
+NumPy scalar the NumPy run is handed for it, the smallest integer holding its
+width, so `uint8` data plus an `int8` register promotes to `int16`, as NumPy
+promotes it.
 
-| op | result width |
-|---|---|
-| `add` | `max(N, M) + 1` |
-| `multiply` | `N + M` |
-| sum of `K` values | `N + ceil(log2 K)` |
-| `matmul` (K×K of N-bit) | `2N + ceil(log2 K)` |
+- **`astype` / `view`** change the container: a wrap where the value leaves it,
+  nothing where it fits.
+- **`.clip(lo, hi)` and `saturate(x, bits)`** saturate, where they are written.
+- **`>>` and `//` by a power of two** floor, as NumPy does, on signed values too.
 
-### Declaration vs narrowing
-
-- **`astype(dtype)` is a *declaration*** of "this signal is N bits" — mostly at the
-  input/output boundary. It's a free zero/sign-extension when widening, NumPy-style
-  truncation when narrowing, a no-op assertion when equal.
-- **Mid-pipeline narrowing is explicit**: `.clip(lo, hi)` (saturate to a range),
-  power-of-two `//` (arithmetic shift), and the boundary `astype` (truncate).
-
-Signedness follows NumPy: subtraction / negative weights produce signed results
-(Sobel, gradients work out of the box — see `examples/sobel.py`). Register values are
-passed to the reference as NumPy-typed scalars so signed registers promote identically
-([parameters.md](parameters.md)).
-
-Full rationale and the astype-vs-narrowing discussion:
-[`design/04-bitwidth-tracking.md`](../design/04-bitwidth-tracking.md).
+A wire is exactly as wide as its value's range needs -- not the container's
+width, which only says where a wrap happens. Signedness follows the range:
+subtraction and negative weights give signed values (gradients work out of the
+box), and register values reach the reference as NumPy-typed scalars, so signed
+registers promote identically ([parameters.md](parameters.md)).

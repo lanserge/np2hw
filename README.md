@@ -7,8 +7,8 @@
 **NumPy → streaming hardware (Verilog) compiler for image and 2-D pipelines.**
 
 Write streaming image-processing code as ordinary NumPy. `np2hw` *traces* it (like JAX/TVM)
-into a streaming line-based IR and emits synthesizable Verilog — with line buffers,
-shift registers, edge handling, config registers, and ZeroAsic-stack interfaces
+into one graph and emits synthesizable Verilog — with line buffers, shift registers,
+frame stores, edge handling, config registers, and ZeroAsic-stack interfaces
 generated for you. **The same NumPy function is the spec, the hardware, and the
 validation reference.**
 
@@ -53,7 +53,7 @@ Generated cores can be wired together with `compose()`, a composed module nests
 inside another, and `control_wrap()` puts an AXI-Lite register file in front of
 either. The hardest exerciser is a full ISP
 built on np2hw end to end — models, netlist, control plane and verification.
-(Next on the tracing roadmap: reductions, `@`/matmul, convolve — the
+(Next on the tracing roadmap: `@`/matmul, convolve — the
 authoritative list of what traces today is
 [docs/supported-ops.md](docs/supported-ops.md).)
 
@@ -100,11 +100,12 @@ Design rationale (the "why" behind each mechanism) lives in
 ## What it can do (built and validated)
 
 - **Trace NumPy → Verilog**: slicing/arithmetic/`astype`/`clip`/`np.pad`/`np.where`,
-  flattened to a weighted tap map and lowered to a line IR (line buffers + shift
-  registers, automatic delay-line counting, hash-consed sharing).
+  lookups, CFA planes, reads across frames, and folds (`x.sum()`, `np.add.at`) --
+  recorded as one graph and lowered to line buffers, shift registers, frame
+  stores and accumulators ([docs/one-graph.md](docs/one-graph.md)).
 - **The same model as C**, bit-exact, for a CPU (`compile_c`, `pipeline run --c`).
 - **Faithful dtypes**: `uint8` wraps unless widened with `astype`; signed via NumPy
-  types; `.clip`/`.saturate`/`.truncate` for narrowing. The oracle is the same
+  types; `.clip` and `saturate()` for narrowing. The oracle is the same
   function on real NumPy dtypes.
 - **Config registers**: `Param` (scalar/matrix/bool) with reset `default=`, a
   `Params` namespace for many-register ISPs, programmable kernels, `np.where` bypass.
@@ -155,9 +156,8 @@ The compiler, interfaces, register files, simulation backends and CLI are
 implemented and validated (NumPy == RTL, bit-exact, across the example suite).
 Pointwise expression DAGs cover LUT-with-gather and matrix arithmetic with
 register coefficients, so multi-channel packed streams (a CCM's shape) trace
-today. Pointwise models compile through the new one-graph core
-([docs/one-graph.md](docs/one-graph.md)); the rest lower through the present
-compiler, its reference. Next: reductions, >1 pixel/clock, and the FPGA bitstream
+today. Every model compiles through the one-graph core
+([docs/one-graph.md](docs/one-graph.md)). Next: >1 pixel/clock, and the FPGA bitstream
 flow via Logik
 — see [docs/zeroasic.md](docs/zeroasic.md) for the path to FPGA/Platypus.
 

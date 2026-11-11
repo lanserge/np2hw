@@ -23,10 +23,11 @@ software-stack half of the closed loop, working today.
 
 ## Next: bitstream via Logik
 
-To run on an FPGA, the SB-wrapped (synthesizable, yosys-clean) RTL goes through **Logik**
-(SiliconCompiler FPGA flow) with a target FPGA part, producing a bitstream. Not yet
-wired in `np2hw`; the natural addition is an `np2hw fpga model.py --part <fpga>`
-scaffold. The RTL is ready (it's the same module the sim backends compile).
+np2hw builds a bitstream today through Vivado (`np2hw.toolchain.vivado`; see
+[api.md](api.md), Toolchains), and revela runs on a PYNQ-Z2 from it. The open
+flow is the same RTL through **Logik** (SiliconCompiler's FPGA flow) with a
+target FPGA part -- an `np2hw fpga model.py --part <fpga>` scaffold. The RTL
+is ready: it is the same module the sim backends compile.
 
 ## Then: FPGA / Platypus emulation
 
@@ -53,7 +54,8 @@ the target part directly with ZeroAsic.
 | NumPy → SB-wrapped Verilog | ✅ done |
 | Run through Switchboard (Verilator/Icarus + queues), validated vs NumPy | ✅ done |
 | AXI-Lite / UMI register files, frame-synced, `control_top` | ✅ done |
-| Logik bitstream flow | ⛔ not wired (RTL is ready) |
+| Bitstream through Vivado, on a PYNQ-Z2 | ✅ done |
+| Logik bitstream flow | next (RTL is ready) |
 | FPGA / Platypus on hardware via PCIe | ⛔ needs board + ZeroAsic specifics |
 | Custom-RTL on ZeroAsic cloud emulation | ⛔ upload not yet public |
 

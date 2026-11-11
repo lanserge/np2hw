@@ -1,41 +1,40 @@
 # Supported operations
 
-The authoritative list of what the tracer (`trace.py`) currently turns into
-hardware. The trace is **stricter than NumPy**: anything not listed here is either
-rejected with a clear error, or (for an unhandled `np.*` function) raises
-`Unsupported`, a `NotImplementedError`
-— it never silently falls back to a NumPy result. If your model runs as NumPy but the
-RTL path errors, it's using something below the line.
+What the tracer (`np2hw.core.trace`) records and the lowering builds. The
+trace is **stricter than NumPy**: anything not listed is refused by name
+(`Unsupported`, a `NotImplementedError`) or by reason (`ValueError`) -- it
+never falls back to a NumPy result. Every value carries NumPy 2's container
+and its exact range, so the hardware wraps exactly where NumPy does
+([one-graph.md](one-graph.md), decision 5).
 
 ## Operators
 
 | Operator | Forms | Hardware |
 |---|---|---|
-| `+` | `a + b`, `a + int`, `Param + a` (and `int + a`) | adder; a `Param` adds a **bias register** |
-| `-` | `a - b`, `-a` | subtract / negate (result is signed) |
-| `*` | `a * b`, `int * a`, `Param * a` (and `int * a`) | multiply; `int` → scale, `Param` → register multiplier / per-tap coeff |
-| `//` | `a // 2**k` | arithmetic right shift (**power-of-two only**) |
-| `[]` | `a[r0:r1, c0:c1]` | neighbourhood window → taps (shift register + line buffers) |
-| `[::2]` | `a[py::2, px::2]`, `a[1-py::2, ...]` | one interleaved plane. The start may be a 1-bit `Param`, so which physical half a plane means is a register write, not a rebuild |
-| `[]=` | `out[py::2, px::2] = ...` on `np.empty_like(x)` | assemble the planes back into a full-size result. They must PARTITION the image; it lowers to **one** full-rate datapath with the coefficient selected by pixel position, not four quarter-rate paths |
+| `+ - *` | value with value, constant, or register | adder, subtractor, multiplier -- by `+-2**k` a shift |
+| `-x`, `abs(x)` / `np.abs` | | negate, absolute value |
+| `< > <= >= == !=` | | comparisons, a 1-bit result |
+| `&`, `\|` | value with value, constant, or register | bitwise; `x & (2**k - 1)` of a non-negative value is its low bits |
+| `>> k`, `<< k` | `k` a constant | wiring |
+| `// k`, `% k` | `k` a constant power of two in hardware (the C backend takes any) | a shift, low bits |
+| `[a:b, c:d]` | constant slices, steps, a register start (`x[p.py::2]`, `x[1 - p.py::2]`) | a window: line buffers and shift registers, sized from the spread of the reads |
+| `img[p.y0:, p.x0:][:p.h, :p.w]` | starts and lengths registers | a crop placed at run time |
+| `table[x]` | a 1-D register array (`Param(shape=(n,))`) or a constant table (`Rom`) read at a value the model computes | a mux, or a ROM; an index that can leave the table is refused |
+| `out[py::2, px::2] = ...` | on `np.empty_like` / `np.zeros_like` | planes assembled into one datapath, each pixel its plane's arithmetic |
 
-## Methods
+## Methods and functions
 
-| Method | Hardware |
+| | Support |
 |---|---|
-| `.astype(dtype)` | width **declaration** — zero/sign-extend (widen), truncate (narrow), or assert (equal) |
-| `.clip(lo, hi)` | saturate into `[lo, hi]` |
-
-## NumPy functions
-
-| Function | Support |
-|---|---|
-| `np.pad(x, width, mode=...)` | `mode="edge"` (replicate) or `"constant"` (zero, `constant_values=0` only); must be applied **directly to the image input** |
-| `np.where(cond, A, B)` | `cond` must be a scalar **bool `Param`** (1-bit); `A`/`B` are same-shape branches → a 2:1 mux (bypass) |
-
-**Any other `np.*` call on a traced value raises `Unsupported`** (a
-`NotImplementedError`) -- reductions and folds aside, below. So `np.matmul`,
-`np.clip(...)` (the function), etc. are not traced — see "Next (roadmap)" below.
+| `.astype(dtype)`, `.view(dtype)` | a change of container: a wrap where the value leaves it |
+| `.clip(lo, hi)`, `saturate(x, bits)` | constant bounds |
+| `.reshape(...)`, `np.reshape` | access through split and merged indexes; nothing moves |
+| `np.pad(x, w, mode="edge" \| "constant")` | any value; zero only for `"constant"` |
+| `np.where(cond, a, b)` | a condition the model computes, or a register; a Python bool picks at trace time |
+| `np.stack([...], axis=-1)` | channels of one word -- each unsigned |
+| `coords(img)`, `make_coords(img, rows, cols)` | the input's, or a declared output's, position as values |
+| `np.add`, `np.subtract`, `np.multiply`, comparisons, `np.bitwise_and/or`, `np.absolute` | as their operators |
+| a video, `Image2D(..., frames=n)`: `video[1:]`, `video[:-1]` | reads across frames; the store derived from the reads |
 
 ## Reductions and folds
 
@@ -60,70 +59,25 @@ is the design's wiring -- beside the datapath it measures, through a fork.
 Each fold is an accumulator memory, cleared as the result streams out of
 it; a frame arriving before that is done waits, as for any core not ready.
 
-## Operands
+## What is refused
 
-- the streamed image input (`Image2D`)
-- `Param` / `Params` — config registers (scalar, matrix, 1-bit bool); see [parameters.md](parameters.md)
-- `Const` / Python `int` — fold in as literals
+- a window over a value that can be negative -- offset it first;
+- `//` and `%` by a constant that is not a power of two, and a shift by a
+  register (the C backend takes the first);
+- a source declared signed;
+- folds side by side (`np.stack` of accumulators) where one can be
+  negative -- a word's channels are unsigned; keep that fold an output
+  of its own, where it may be signed, or offset it first;
+- a reduction over a word's channels (`x.sum(axis=-1)` of a multi-channel
+  value), `np.mean` (a divide);
+- `np.minimum` / `np.maximum` as functions, `np.clip` as a function -- use
+  `.clip`, `np.where`;
+- `@` / `np.matmul`, `np.convolve`, floating point.
 
-## Dtype & signedness
-
-Width and sign follow NumPy via `np.result_type` (`uint8 * -1 → int16`, etc.); the
-spatial sum is clipped to `min(natural width, declared width)`, so `uint8` **wraps**
-unless widened with `.astype`. Full rules:
-[streaming-and-bitwidths.md](streaming-and-bitwidths.md).
-
-## Next (roadmap)
-
-These appear in the design pattern table
-([design/05](../design/05-isp-operation-library.md)) as the *intended* library,
-but are **not implemented in the tracer yet**:
-
-- **A reduction over a word's channels** (`x.sum(axis=-1)` of a multi-channel
-  value) -- every pixel keeps its own result, a stream rather than a fold --
-  and `np.mean` (a divide)
-- **`@` / `np.matmul`** (systolic array), **`np.convolve`**
-- **`np.clip` as a function** — use the `.clip(lo, hi)` **method**
-- **`.saturate(N)` / `.truncate(N)` / `.round_to(N)`** — use `.clip`, `//`, `.astype`
-- **Floating point** (lookups by gather and multi-channel arithmetic -- a CCM -- do
-  trace: see below)
-
-Until then, express these with the supported ops — e.g. a fixed convolution is just an
-explicit **weighted sum of slices** (`sum(w[i,j] * x[i:.., j:..] ...)`), which is exactly
-what the [`examples/isp/`](../examples/isp) models do. A genuinely needed op is a
-candidate for the next pattern to add to the tracer.
+A fixed convolution is a weighted sum of slices, which is what the
+[`examples/isp/`](../examples/isp) models do.
 
 ## See also
 
-- [writing-models.md](writing-models.md) — the model-file convention + gotchas
-- [design/05-isp-operation-library.md](../design/05-isp-operation-library.md) — the aspirational pattern library (roadmap)
-
-## Pointwise expression DAGs (LUTs, forks, recombination)
-
-A model may FORK the pixel value, GATHER from a 1-D register array with a
-data-derived index, and recombine -- the piecewise-linear LUT shape:
-
-```python
-seg  = x >> S;  frac = x & (2**S - 1)
-y    = knots[seg] + ((knots[seg + 1] - knots[seg]) * frac >> S)
-```
-
-Registers reach an expression two ways: through a gather, or directly as a
-LEAF -- a scalar `Param` (or one element of a shaped one) multiplied and
-added like any traced value, which is how a matrix multiply's coefficients
-arrive:
-
-```python
-a2 = (a * m[0, 0] + b * m[0, 1]) >> F        # m: signed Param, shape (2, 2)
-```
-
-Each leaf becomes an input port, its range taken from its declared width
-and signedness.
-
-Supported inside an expression: `+ - *` (value with value, constant, or
-Param leaf), `>>` / `// 2**k`, `& (2**k - 1)` (a bit-slice; general AND is
-not hardware this cheap), `.clip`, and `param[traced_index]`. Every wire is
-sized from its node's exact value range; the gather index's range is proven
-INSIDE the table at trace time, or the model refuses to trace -- hardware
-has no IndexError. v1 expression models are strictly pointwise (no line
-buffers). See `examples/pointwise_lut.py` and `examples/pointwise_mix.py`.
+- [writing-models.md](writing-models.md) -- the model-file convention
+- [one-graph.md](one-graph.md) -- how a model becomes hardware
