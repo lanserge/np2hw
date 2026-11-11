@@ -87,7 +87,7 @@ non-`uv` setup (`PYTHONPATH=src python3 …`) also works — see
 | [docs/framing-and-resolution.md](docs/framing-and-resolution.md) | SOF/EOL/last framing, continuous frames, each frame's size at run time |
 | [docs/ipxact.md](docs/ipxact.md) | IP-XACT: packaging a component, and the stream's own bus definition |
 | [docs/interfaces.md](docs/interfaces.md) | AXI4-Stream Video, Switchboard, AXI-Lite/UMI register files, `control_top` |
-| [docs/backends.md](docs/backends.md) | numpy / iverilog / cxxrtl / switchboard (verilator, icarus) |
+| [docs/backends.md](docs/backends.md) | numpy / iverilog / cxxrtl / switchboard (verilator, icarus), and the model as C |
 | [docs/view.md](docs/view.md) | Live viewer: camera/screen sources, sliders, FPS |
 | [docs/zeroasic.md](docs/zeroasic.md) | Switchboard stack, Logik/FPGA, Platypus, cloud emulation |
 | [docs/api.md](docs/api.md) | Python API: `to_ir`, `generate`, adapter generators |
@@ -194,10 +194,6 @@ NumPy-level feature that unblocks everyone downstream, ISP or otherwise:
   exact graph reachability on the traced IR, not a netlist heuristic -- and
   emit operand isolation plus flop clock-enables for it, with the savings
   proven by toggle counts in simulation, not asserted.
-- **Portable C emitter** ([#6](https://github.com/lanserge/np2hw/issues/6)) --
-  the same pipeline as a plain C function, bit-exact against the NumPy that
-  generated the Verilog: a golden model that runs beside the hardware, from
-  the one source of truth.
 - **Measured device profiles** ([#8](https://github.com/lanserge/np2hw/issues/8))
   -- np2hw prices a pipeline before it emits it, from a handful of per-device
   constants, and a wrong constant is a failed build or a wasted register. Those

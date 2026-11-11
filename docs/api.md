@@ -16,6 +16,7 @@ from np2hw.blocks.stream import StreamSpec
 from np2hw.design import composite                                 # designs
 from np2hw import pipeline                                         # pipelines
 from np2hw.pipeline import compose, run
+from np2hw.core.cemit import compile_c                             # a model as C
 from np2hw.testing import (Beat, frame_to_beats, beats_to_words,   # verification
                            check_framing, reset_stream, run_frame,
                            AxiLiteMaster, axis_video_map)

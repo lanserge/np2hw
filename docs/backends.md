@@ -12,6 +12,10 @@ oracle, and two independent simulators plus the Switchboard stack all agree with
 | `switchboard` (= `sb`) | `verilator` (default) | SB-wrapped core in Verilator + SB queues | medium | `[switchboard]` extra, `verilator` |
 | `switchboard` | `icarus` | SB-wrapped core in Icarus + SB queues | slow | `[switchboard]` extra, `iverilog` |
 
+Beside these, the model runs as **C** on the CPU (`compile_c`, `np2hw pipeline
+run --c`; below): not a simulation of the hardware, the same graph printed as a
+C function, bit-exact against NumPy.
+
 ```bash
 np2hw run m.py in.png out.png                                  # numpy
 np2hw run m.py in.gif out.gif --backend sim --sim cxxrtl      # fast RTL (video)
@@ -72,3 +76,39 @@ sending a whole frame before reading would deadlock).
 - **Developing a model / quick check** → `numpy`, or `sim --sim iverilog` for one image.
 - **Video / performance / the live viewer** → `sim --sim cxxrtl`.
 - **Proving it inside the ZeroAsic stack** → `switchboard --sb-tool verilator`.
+- **A golden model beside the hardware, at CPU speed** → C (`compile_c`, `pipeline run --c`).
+
+## C -- the model on a CPU (`np2hw.core.cemit`)
+
+Not a simulation of the hardware: the canonical model graph -- the one the
+Verilog is lowered from -- printed as a plain C11 function, computing what
+the model computes, bit for bit, at CPU speed.
+
+```python
+from np2hw import Image2D
+from np2hw.core.cemit import compile_c
+
+k = compile_c(model, Image2D("img", 640, 480, bits=8), *params)
+out = k(frame, threads=4, gain=24)      # registers by name
+```
+
+Each node is printed as `evaluate.py` runs it, at a position: a read of the
+source or a table is a load, a read of a pad its edge rule, a read of a
+computed value that value computed at the index. Loops are the output's
+variables (an axis of up to 16 positions -- channels -- is unrolled); each
+statement sits in the outermost loop it depends on; along the innermost
+loop, the positions no pad read can leave run with no clamps, between two
+edge loops. Every statement is typed by the narrowest integer holding its
+exact range, its operands converted first, so C's promotions never change a
+value -- except a sum, difference, product or negation wider than 64 bits,
+which NumPy wraps in its 64-bit container: that one is computed modulo
+2**64 in `uint64_t`, exact in the low 64 bits the wrap keeps. The function's ABI is caller-owned -- `src`, `dst`, the registers in
+order, and a range of the outermost loop, which is how threads take bands
+-- and its file has no dependency beyond `<stdint.h>`.
+
+A kernel is built for one frame size and builds itself again for another.
+A register window at the output (`img[p.y0:, p.x0:][:p.h, :p.w]`) is
+computed over the whole frame and kept by its registers, as NumPy's crop
+keeps it. Refused by name: a canvas whose planes do not tile a lattice, a
+register window placed by computed values. Checked by `tests/test_cemit.py`: every model the core tests compile
+to Verilog, and the shipped model files, against NumPy.

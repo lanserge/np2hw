@@ -22,6 +22,18 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   `black.astype(np.int32) * 256` widens before the multiply, where
   `black * 256` wraps at the register's width, in NumPy and in the core.
 
+- **A C backend** (`np2hw.core.cemit.compile_c`): the canonical model
+  graph printed as a plain C11 function and loaded through ctypes, bit-exact
+  against the model -- windows, edge and zero pads, phase planes, channel
+  words, register arrays and constant tables, reads across frames.
+  Statements sit in the outermost loop they depend on, the pad-free
+  interior of the innermost loop runs without clamps, and threads take bands
+  of the outermost loop: a 5 x 5 cone runs at 1.2 Gpx/s on one core of an
+  AVX-512 laptop, a hundred times its NumPy. A sum, difference, product or
+  negation wider than 64 bits, which NumPy's int64 wraps, is computed
+  modulo 2**64; a register window at the output is kept as NumPy's crop
+  keeps it.
+
 - **The tee's branch A may hold its stream** (`HOLD_A`, `tee(...,
   hold_a=True)`): for a stream that can wait -- a frame store's, paced by
   its consumer, never a sensor's -- A joins every frame it is enabled for
