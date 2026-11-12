@@ -552,7 +552,7 @@ class _Selects:
 _BUFFERS = {"model.source", "model.pad", "model.table", "model.param"}
 _POINTWISE = {"model.add", "model.sub", "model.mul", "model.floordiv",
               "model.mod", "model.shr", "model.and", "model.or", "model.neg",
-              "model.max", "model.min",
+              "model.max", "model.min", "model.xor",
               "model.abs", "model.eq", "model.ne", "model.lt", "model.le",
               "model.gt", "model.ge", "model.where", "model.clip",
               "model.astype", "model.bits", "model.wrap"}
@@ -567,6 +567,7 @@ _FOLDS = {"model.add": lambda n, a, b: a + b,
           "model.shr": lambda n, a: a >> n.attr("amount"),
           "model.floordiv": lambda n, a: a // n.attr("divisor"),
           "model.mod": lambda n, a: a % n.attr("divisor"),
+          "model.xor": lambda n, a, b: a ^ b,
           "model.max": lambda n, a, b: max(a, b),
           "model.min": lambda n, a, b: min(a, b)}
 

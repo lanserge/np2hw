@@ -33,6 +33,7 @@ _BINARY = {"model.add": "hw.add", "model.sub": "hw.sub", "model.mul": "hw.mul",
            "model.and": "hw.and", "model.or": "hw.or", "model.lt": "hw.lt",
            "model.gt": "hw.gt", "model.le": "hw.le", "model.ge": "hw.ge",
            "model.eq": "hw.eq", "model.ne": "hw.ne", "model.max": "hw.max",
+           "model.xor": "hw.xor",
            "model.min": "hw.min"}
 
 

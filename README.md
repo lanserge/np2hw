@@ -100,9 +100,12 @@ Design rationale (the "why" behind each mechanism) lives in
 ## What it can do (built and validated)
 
 - **Trace NumPy → Verilog**: slicing/arithmetic/`astype`/`clip`/`np.pad`/`np.where`,
-  lookups, CFA planes, reads across frames, and folds (`x.sum()`, `np.add.at`) --
+  `np.maximum`/`np.minimum`, lookups, CFA planes, reads across frames, reductions
+  over a pixel's channels (`sum`/`max`/`min`/`argmin`/`argmax` over `axis=-1`,
+  `np.roll` of its lanes), and folds of the frame (`x.sum()`, `np.add.at`) --
   recorded as one graph and lowered to line buffers, shift registers, frame
-  stores and accumulators ([docs/one-graph.md](docs/one-graph.md)).
+  stores and accumulators ([docs/one-graph.md](docs/one-graph.md),
+  [docs/supported-ops.md](docs/supported-ops.md)).
 - **The same model as C**, bit-exact, for a CPU (`compile_c`, `pipeline run --c`).
 - **Faithful dtypes**: `uint8` wraps unless widened with `astype`; signed via NumPy
   types; `.clip` and `saturate()` for narrowing. The oracle is the same

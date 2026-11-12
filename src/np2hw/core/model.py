@@ -141,6 +141,17 @@ def _mul(x, y):
     return min(e), max(e)
 
 
+def _xor(x, y):
+    """Below the next power of two for non-negative values; else within
+    the two's-complement width both fit in, where two negatives can make a
+    positive."""
+    if x.lo >= 0 and y.lo >= 0:
+        return 0, (1 << max(x.hi, y.hi).bit_length()) - 1
+    k = max((v if v >= 0 else -v - 1).bit_length()
+            for v in (x.lo, x.hi, y.lo, y.hi))
+    return -(1 << k), (1 << k) - 1
+
+
 def _max(x, y):
     return max(x.lo, y.lo), max(x.hi, y.hi)
 
@@ -395,6 +406,7 @@ for _k in (
     Kind("model.mul", frozenset({PURE, COMMUTATIVE}), 2, _arith(_mul)),
     Kind("model.and", frozenset({PURE, COMMUTATIVE}), 2, _arith(_and)),
     Kind("model.or", frozenset({PURE, COMMUTATIVE}), 2, _arith(_or)),
+    Kind("model.xor", frozenset({PURE, COMMUTATIVE}), 2, _arith(_xor)),
     Kind("model.max", frozenset({PURE, COMMUTATIVE}), 2, _arith(_max)),
     Kind("model.min", frozenset({PURE, COMMUTATIVE}), 2, _arith(_min)),
     Kind("model.neg", _P, 1, _unary(_neg)),

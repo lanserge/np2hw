@@ -95,7 +95,9 @@ out = k(frame, threads=4, gain=24)      # registers by name
 Each node is printed as `evaluate.py` runs it, at a position: a read of the
 source or a table is a load, a read of a pad its edge rule, a read of a
 computed value that value computed at the index. Loops are the output's
-variables (an axis of up to 16 positions -- channels -- is unrolled); each
+variables (an axis of up to 16 positions -- channels -- is unrolled), and
+an output read through a C-order reshape is the value under it, written in
+its own loops -- the same memory, without the reshape's index math; each
 statement sits in the outermost loop it depends on; along the innermost
 loop, the positions no pad read can leave run with no clamps, between two
 edge loops. Every statement is typed by the narrowest integer holding its
@@ -109,8 +111,9 @@ order, and a range of the outermost loop, which is how threads take bands
 A kernel is built for one frame size and builds itself again for another.
 A register window at the output (`img[p.y0:, p.x0:][:p.h, :p.w]`) is
 computed over the whole frame and kept by its registers, as NumPy's crop
-keeps it. Refused by name: a canvas whose planes do not tile a lattice, a
-register window placed by computed values. A block is printed the same way
+keeps it. A `np.roll` along the frame, which hardware refuses, is a read
+at a wrapped index here. Refused by name: a canvas whose planes do not
+tile a lattice, a register window placed by computed values. A block is printed the same way
 through `Block.compile_c` and run in its model's place by `Block.run(...,
 kernel=...)`; `np2hw pipeline run --c` runs a whole chain so. Checked by `tests/test_cemit.py`: every model the core tests compile
 to Verilog, and the shipped model files, against NumPy; and by

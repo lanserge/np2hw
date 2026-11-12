@@ -116,6 +116,8 @@ class Tracer:
             return o.v
         if isinstance(o, Param):
             return self.register(o)
+        if isinstance(o, (bool, np.bool_)):
+            return self.const(int(o), BOOL)
         if isinstance(o, np.integer):
             return self.const(int(o), _container_of(type(o)))
         if isinstance(o, int) and not isinstance(o, bool):
@@ -167,6 +169,8 @@ class Array:
     def __rmul__(self, o): return self._binary("model.mul", o, True)
     def __and__(self, o): return self._binary("model.and", o)
     def __rand__(self, o): return self._binary("model.and", o, True)
+    def __xor__(self, o): return self._binary("model.xor", o)
+    def __rxor__(self, o): return self._binary("model.xor", o, True)
     def __or__(self, o): return self._binary("model.or", o)
     def __ror__(self, o): return self._binary("model.or", o, True)
     def __lt__(self, o): return self._binary("model.lt", o)
@@ -575,6 +579,8 @@ class Array:
             return _stack(self.t, *args, **kwargs)
         if func is np.reshape:
             return _reshape(args[0], tuple(int(n) for n in args[1]))
+        if func is np.roll:
+            return _roll(*args, **kwargs)
         raise Unsupported(f"np.{func.__name__}")
 
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
@@ -604,7 +610,8 @@ class Array:
                   np.greater: "model.gt", np.less_equal: "model.le",
                   np.greater_equal: "model.ge", np.equal: "model.eq",
                   np.not_equal: "model.ne", np.bitwise_and: "model.and",
-                  np.bitwise_or: "model.or", np.maximum: "model.max",
+                  np.bitwise_or: "model.or", np.bitwise_xor: "model.xor",
+                  np.maximum: "model.max",
                   np.minimum: "model.min"}
         if ufunc in binary and len(inputs) == 2:
             a, b = (self.t.operand(x) for x in inputs)
@@ -947,6 +954,49 @@ def _reshape(a: Array, shape: tuple) -> Array:
                 e = g.op("model.mod", e, divisor=old[i])
             idx[i] = e
     return Array(t, g.op("model.access", a.v, *idx))
+
+
+def _roll(a: "Array", shift, axis=None) -> "Array":
+    """`np.roll(a, shift, axis)`: each axis read at `(i - shift) mod n` --
+    on a word's axis its lanes in another order, a stack of them; on the
+    frame's a read that wraps around it, which the C backend takes and
+    hardware, needing the whole row or frame first, refuses. Shifts are
+    constants."""
+    if axis is None:
+        raise Unsupported("np.roll without an axis: name the axes it rolls")
+    shifts = shift if isinstance(shift, (tuple, list)) else (shift,)
+    axes = axis if isinstance(axis, (tuple, list)) else (axis,)
+    if len(shifts) == 1 and len(axes) > 1:
+        shifts = shifts * len(axes)
+    if len(shifts) != len(axes):
+        raise Unsupported(f"np.roll by {shift} over axes {axis}")
+    t, g = a.t, a.t.g
+    out = a
+    for s, ax in zip(shifts, axes):
+        if not isinstance(s, (int, np.integer)) or isinstance(s, bool):
+            raise Unsupported("np.roll by a shift that is not a constant")
+        if not -out.ndim <= int(ax) < out.ndim:
+            raise Unsupported(f"np.roll over axis {ax} of a {out.ndim}-D value")
+        ax = int(ax) % out.ndim
+        own = out.v.type.axes[ax]
+        n = out.shape[ax]
+        s = int(s) % n
+        if own is None or s == 0:
+            continue
+        if t.is_word(own):
+            # the word's lanes in another order: wiring, a stack of them
+            lanes = [out._lane(ax, (i - s) % n) for i in range(n)]
+            out = _stack(t, lanes, axis=ax)
+            continue
+        idx = []
+        for i, v in enumerate(out.v.type.axes):
+            var = g.op("model.var", name=v) if v is not None else t.const(0)
+            if i == ax:
+                var = g.op("model.mod", g.op("model.add", var, t.const(n - s)),
+                           divisor=n)
+            idx.append(var)
+        out = Array(t, g.op("model.access", out.v, *idx))
+    return out
 
 
 def _where(t: Tracer, cond, a, b, **kw):

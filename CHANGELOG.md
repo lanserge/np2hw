@@ -30,6 +30,20 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   and a min-sum check node's `np.where(np.arange(n) == first[..., None],
   ...)` are written as NumPy writes them.
 
+- **`np.roll`** with constant shifts over named axes: on a word's axis
+  the lanes in another order, in hardware and C; along the frame a read
+  that wraps around it, in C. A quasi-cyclic min-sum iteration -- the
+  rotations of a code's circulants, its check nodes, the messages rolled
+  back -- runs in C, held to NumPy in the tests.
+
+- **`^` and `np.bitwise_xor`**, its range sound where two negatives make
+  a positive; a Python `True` or `False` as an operand.
+
+- **The C backend writes a reshaped output in the layout it reads.** A
+  C-order reshape moves nothing, so the value under it is computed in its
+  own loops and the result handed back reshaped: a min-sum iteration
+  returning `(B, N)` from `(B, blocks, Z)` runs as fast as the blocks.
+
 - **A lane of a stack read across time.** A stack's lane at a constant
   is the value stacked there, so `np.stack([video, ...], axis=-1)[1:, ...,
   0]` reads the stream's frames as any history does; it was refused.

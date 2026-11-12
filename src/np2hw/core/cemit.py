@@ -60,7 +60,7 @@ from pathlib import Path
 import numpy as np
 
 from .canonical import Canonical, canonicalise
-from .graph import Value
+from .graph import Value, walk
 from .index import splits
 from .trace import Unsupported, trace
 
@@ -95,12 +95,12 @@ def _lit(v: int) -> str:
 
 
 _BIN = {"model.add": "+", "model.sub": "-", "model.mul": "*",
-        "model.and": "&", "model.or": "|"}
+        "model.and": "&", "model.or": "|", "model.xor": "^"}
 #: the operations whose low 64 bits are those of their operands': a result
 #: wider than 64 bits, which NumPy's 64-bit container wraps, is computed
 #: modulo 2**64
 _RING = {"model.add": "+", "model.sub": "-", "model.mul": "*",
-         "model.and": "&", "model.or": "|"}
+         "model.and": "&", "model.or": "|", "model.xor": "^"}
 _CMP = {"model.lt": "<", "model.gt": ">", "model.le": "<=", "model.ge": ">=",
         "model.eq": "==", "model.ne": "!="}
 
@@ -695,14 +695,19 @@ class _Printer:
                 raise Unsupported("a window placed by computed values in the "
                                   "C backend")
             window = tuple(v.node.attr("name") for v in place)
-        out_axes = [self.find(a) if a else None for a in c.output.type.axes]
+        out_shape = [self.count(a) if a else 1 for a in
+                     (self.find(a) if a else None for a in output.type.axes)]
+        # a C-order reshape moves nothing: the value it reads is computed in
+        # its own layout, which is the reshape's, without the index math
+        output = self._unreshaped(output)
+        out_axes = [self.find(a) if a else None for a in output.type.axes]
         real = [a for a in out_axes if a is not None]
         long_ = [a for a in real if self.count(a) > UNROLL_MAX]
         loops = [a for a in real if not long_ or self.count(a) > UNROLL_MAX]
         unrolled = [a for a in real if a not in loops]
         for i, v in enumerate(loops):
             self.names[v] = f"i{i}"
-        out_shape = [self.count(a) if a else 1 for a in out_axes]
+        buf_shape = [self.count(a) if a else 1 for a in out_axes]
         src_shape = [self.count(a) for a in c.source.type.axes]
 
         def body(nest: _Nest):
@@ -716,7 +721,7 @@ class _Printer:
                 env.update(combo)
                 got = self.val(nest, output, env)
                 off = None
-                for a, n in zip(out_axes, out_shape):
+                for a, n in zip(out_axes, buf_shape):
                     term = "0" if a is None else env[a].c(self.names)
                     off = term if off is None else f"({off}) * {n} + {term}"
                 line = (f"dst[{off}] = ({out_ctype})"
@@ -740,6 +745,34 @@ class _Printer:
                 body(nest)
         text = self.assemble(nest, fname, out_ctype, src_shape)
         return text, out_shape, src_shape, window
+
+    def _unreshaped(self, output: Value) -> Value:
+        """The value an output reads through C-order reshapes -- an access
+        whose index maps each position to the same flat offset of the value
+        it reads, checked on every position -- or the output itself."""
+        from .evaluate import _place, evaluate
+        g = self.c.g
+        while output.node.kind == "model.access":
+            buf, *idx = output.node.operands
+            if any(n.kind in ("model.param", "model.source", "model.table")
+                   for i in idx for n in walk([i])):
+                return output
+            have = [self.find(a) for a in output.type.axes if a is not None]
+            shape = [self.count(a) if a else 1 for a in buf.type.axes]
+            size = int(np.prod([self.count(a) for a in have])) if have else 1
+            if int(np.prod(shape)) != size or not have:
+                return output
+            vals = evaluate(g, idx, self.c.source, None, {})
+            coords = [np.broadcast_to(
+                _place(g, v, i.type.axes, tuple(have)) if i.type.axes
+                else np.asarray(v), [self.count(a) for a in have])
+                for v, i in zip(vals, idx)]
+            flat = np.ravel_multi_index(tuple(np.asarray(c, np.int64)
+                                              for c in coords), shape)
+            if not np.array_equal(flat.ravel(), np.arange(size)):
+                return output
+            output = buf
+        return output
 
     def assemble(self, nest: _Nest, fname, out_ctype, src_shape,
                  whole: bool = False, pre=(), post=()) -> str:

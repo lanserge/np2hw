@@ -122,7 +122,7 @@ def _cost(n, dev):
         return dev.compare(n.operands[0].type.bits)
     if k == "hw.abs":
         return dev.absolute(n.value.type.bits)
-    if k in ("hw.sel", "hw.and", "hw.or"):
+    if k in ("hw.sel", "hw.and", "hw.or", "hw.xor"):
         return dev.select()
     if k in ("hw.memread", "hw.rom"):
         return dev.mem()

@@ -41,7 +41,7 @@ def _decl(v: Value) -> str:
 
 
 _BIN = {"hw.add": "+", "hw.sub": "-", "hw.mul": "*", "hw.and": "&",
-        "hw.or": "|"}
+        "hw.or": "|", "hw.xor": "^"}
 _CMP = {"hw.lt": "<", "hw.gt": ">", "hw.le": "<=", "hw.ge": ">=",
         "hw.eq": "==", "hw.ne": "!="}
 

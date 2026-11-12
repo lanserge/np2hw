@@ -14,7 +14,7 @@ and its exact range, so the hardware wraps exactly where NumPy does
 | `+ - *` | value with value, constant, or register | adder, subtractor, multiplier -- by `+-2**k` a shift |
 | `-x`, `abs(x)` / `np.abs` | | negate, absolute value |
 | `< > <= >= == !=` | | comparisons, a 1-bit result |
-| `&`, `\|` | value with value, constant, or register | bitwise; `x & (2**k - 1)` of a non-negative value is its low bits |
+| `&`, `\|`, `^` | value with value, constant, or register | bitwise; `x & (2**k - 1)` of a non-negative value is its low bits |
 | `>> k`, `<< k` | `k` a constant | wiring |
 | `// k`, `% k` | `k` a constant power of two in hardware (the C backend takes any) | a shift, low bits |
 | `[a:b, c:d]` | constant slices, steps, a register start (`x[p.py::2]`, `x[1 - p.py::2]`) | a window: line buffers and shift registers, sized from the spread of the reads |
@@ -34,6 +34,7 @@ and its exact range, so the hardware wraps exactly where NumPy does
 | `np.stack([...], axis=-1)` | channels of one word -- each unsigned |
 | `coords(img)`, `make_coords(img, rows, cols)` | the input's, or a declared output's, position as values |
 | `np.add`, `np.subtract`, `np.multiply`, comparisons, `np.bitwise_and/or`, `np.absolute` | as their operators |
+| `np.roll(x, shift, axis)` | constant shifts, named axes: on a word's axis the lanes in another order, wiring; along the frame a read that wraps, which the C backend takes and hardware refuses |
 | `x[..., None]` (newaxis) | a dimension of size one, which broadcasting pairs with another value's axis |
 | a 1-D integer `np.ndarray` as an operand (`np.arange(n)`, `np.array([...])`) | constants along an axis of the word, as a stack of them: `abs(x[..., None] - centres)` |
 | `np.maximum(a, b)`, `np.minimum(a, b)` | a compare and a select; the range exact, so `np.maximum(x - 100, 0)` is never negative and may be windowed or stacked |

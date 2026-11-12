@@ -137,6 +137,24 @@ def test_the_ranges_are_exact():
     assert (out.lo, out.hi) == (-20, -20)
     out = trace(lambda img: np.minimum(img, 300), image).output.type
     assert (out.lo, out.hi) == (0, 255)
+    out = trace(lambda img: img ^ 3, image).output.type
+    assert (out.lo, out.hi) == (0, 255)
+
+
+def test_the_xor_range_holds_every_value():
+    """Over every pair of ranges in [-9, 9], each XOR of their values lies
+    in the range both levels give it -- two negatives can make a positive."""
+    import itertools
+    from types import SimpleNamespace as Range
+    from np2hw.core import hw, model
+    span = range(-9, 10)
+    for xl, xh, yl, yh in itertools.product(span, span, span, span):
+        if xl > xh or yl > yh:
+            continue
+        got = [a ^ b for a in range(xl, xh + 1) for b in range(yl, yh + 1)]
+        for rule in (model._xor, hw._xor):
+            lo, hi = rule(Range(lo=xl, hi=xh), Range(lo=yl, hi=yh))
+            assert lo <= min(got) and max(got) <= hi, (xl, xh, yl, yh)
 
 
 def test_a_maximum_with_zero_is_never_negative():
@@ -261,8 +279,23 @@ def check_node(img):
     return np.stack([a.min(axis=-1), min2, sign], axis=-1)
 
 
+def parity(img):
+    """The sign of a product: the XOR of the signs."""
+    x = img.astype(np.int16)
+    m = np.stack([x - 128, 100 - x, (x >> 1) - 40], axis=-1)
+    neg = m < 0
+    return (neg[..., 0] ^ neg[..., 1]) ^ np.bitwise_xor(neg[..., 2], True)
+
+
+def signed_xor(img):
+    """Two negatives can make a positive: -8 ^ -1 is 7."""
+    x = img.astype(np.int16)
+    return ((x >> 4) - 8) ^ ((x & 3) - 4)
+
+
 @needs_iverilog
-@pytest.mark.parametrize("fn", [nearest_centre, check_node])
+@pytest.mark.parametrize("fn", [nearest_centre, check_node, parity,
+                                signed_xor])
 def test_numpy_as_written(tmp_path, fn):
     _check(tmp_path, fn)
 

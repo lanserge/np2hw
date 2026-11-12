@@ -64,6 +64,17 @@ def _or(x, y):
     return _pow2floor(min(x.lo, y.lo)), max(hi, -1)
 
 
+def _xor(x, y):
+    """Below the next power of two for non-negative values; else within
+    the two's-complement width both fit in, where two negatives can make a
+    positive."""
+    if x.lo >= 0 and y.lo >= 0:
+        return 0, (1 << max(x.hi, y.hi).bit_length()) - 1
+    k = max((v if v >= 0 else -v - 1).bit_length()
+            for v in (x.lo, x.hi, y.lo, y.hi))
+    return -(1 << k), (1 << k) - 1
+
+
 def _clip(x, a):
     lo, hi = max(x.lo, a["lo"]), min(x.hi, a["hi"])
     return (lo, hi) if lo <= hi else (a["lo"], a["lo"])
@@ -201,6 +212,7 @@ for _k in (
     Kind("hw.ne", frozenset({PURE, COMMUTATIVE}), 2, _bin(lambda x, y: BOOL01)),
     Kind("hw.and", frozenset({PURE, COMMUTATIVE}), 2, _bin(_and)),
     Kind("hw.or", frozenset({PURE, COMMUTATIVE}), 2, _bin(_or)),
+    Kind("hw.xor", frozenset({PURE, COMMUTATIVE}), 2, _bin(_xor)),
     Kind("hw.not", _P, 1, _un(lambda x, a: BOOL01)),
     Kind("hw.sel", _P, 3, _sel),
     Kind("hw.wrap", _P, 1, _un(_wrap)),
