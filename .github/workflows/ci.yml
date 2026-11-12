@@ -16,7 +16,7 @@ on:
 jobs:
   examples:
     name: Example suite (iverilog)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Every version the packaging metadata CLAIMS. It claimed five and
     # tested one, which is a classifier list rather than evidence -- and
     # the versions most likely to break are the oldest and the newest,
