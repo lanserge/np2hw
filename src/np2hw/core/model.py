@@ -141,6 +141,14 @@ def _mul(x, y):
     return min(e), max(e)
 
 
+def _max(x, y):
+    return max(x.lo, y.lo), max(x.hi, y.hi)
+
+
+def _min(x, y):
+    return min(x.lo, y.lo), min(x.hi, y.hi)
+
+
 def _unary(fn):
     def infer(g, ts, a):
         (x,) = ts
@@ -387,6 +395,8 @@ for _k in (
     Kind("model.mul", frozenset({PURE, COMMUTATIVE}), 2, _arith(_mul)),
     Kind("model.and", frozenset({PURE, COMMUTATIVE}), 2, _arith(_and)),
     Kind("model.or", frozenset({PURE, COMMUTATIVE}), 2, _arith(_or)),
+    Kind("model.max", frozenset({PURE, COMMUTATIVE}), 2, _arith(_max)),
+    Kind("model.min", frozenset({PURE, COMMUTATIVE}), 2, _arith(_min)),
     Kind("model.neg", _P, 1, _unary(_neg)),
     Kind("model.abs", _P, 1, _unary(_abs)),
     Kind("model.shr", _P, 1, _unary(_shr)),

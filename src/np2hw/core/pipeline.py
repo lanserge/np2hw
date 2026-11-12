@@ -115,6 +115,9 @@ def _cost(n, dev):
         return dev.mul()
     if k == "hw.clip":
         return dev.clip(n.value.type.bits)
+    if k in ("hw.max", "hw.min"):
+        return dev.compare(max(o.type.bits for o in n.operands)) + \
+            dev.select()
     if k in ("hw.lt", "hw.gt", "hw.le", "hw.ge", "hw.eq", "hw.ne"):
         return dev.compare(n.operands[0].type.bits)
     if k == "hw.abs":

@@ -61,6 +61,19 @@ class Tracer:
 
     def __init__(self):
         self.g = Graph(intern=False, locations=True)
+        # the axes inside a pixel's word -- a source's channels, a stack's,
+        # and what slices and reshapes make of them -- as declared: a
+        # reduction over them is arithmetic within one pixel, not a fold
+        # over the frame
+        self.word: set = set()
+
+    def is_word(self, axis) -> bool:
+        """Whether an axis lies within a pixel's word; a dimension of size
+        one (None) is no axis of the frame either."""
+        if axis is None:
+            return True
+        find = self.g.vars.find
+        return any(find(w) == find(axis) for w in self.word)
 
     def const(self, value: int, container=WEAK) -> Value:
         return self.g.op("model.const", value=int(value), container=container)
@@ -107,6 +120,13 @@ class Tracer:
             return self.const(int(o), _container_of(type(o)))
         if isinstance(o, int) and not isinstance(o, bool):
             return self.const(o)
+        if isinstance(o, np.ndarray) and o.ndim == 1 and o.dtype.kind in "ui":
+            # constants along an axis of their own -- a pixel's word, as a
+            # stack's is -- which broadcasting pairs with the value's:
+            # `abs(x[..., None] - centres)`
+            c = _container_of(o.dtype)
+            return _stack(self, [np.dtype(o.dtype).type(v) for v in o]).v \
+                if o.size > 1 else self.const(int(o[0]), c)
         return None
 
 
@@ -209,6 +229,9 @@ class Array:
     # -- slicing: index math, then an access ---------------------------------
 
     def __getitem__(self, key):
+        if key is None or isinstance(key, tuple) and \
+                any(k is None for k in key):
+            return self._newaxis(key)
         key = _expand(key, self.ndim)
         g = self.t.g
         window = self._window_of(key)
@@ -223,11 +246,37 @@ class Array:
                 idx.append(g.op("model.var", name=axis))
                 continue
             dim = 1 if axis is None else g.vars.count(axis)
-            idx.append(self._index(k, dim))
+            idx.append(self._index(k, dim, axis is not None
+                                   and self.t.is_word(axis)))
         return self._op("model.access", self.v, *idx)
 
-    def _index(self, k, dim: int) -> Value:
-        """The index expression one key reads an axis of `dim` through."""
+    def _newaxis(self, key) -> "Array":
+        """`x[..., None]`: the value indexed without the Nones, then placed
+        among axes with a dimension of size one at each -- NumPy's newaxis,
+        an expand."""
+        key = key if isinstance(key, tuple) else (key,)
+        real = sum(k is not None and k is not Ellipsis for k in key)
+        if sum(k is Ellipsis for k in key) > 1:
+            raise Unsupported("an index with two ellipses")
+        if Ellipsis in key:
+            i = key.index(Ellipsis)
+            key = key[:i] + (slice(None),) * (self.ndim - real) + key[i + 1:]
+        else:
+            key = key + (slice(None),) * (self.ndim - real)
+        r = self[tuple(k for k in key if k is not None)]
+        have = iter(r.v.type.axes)
+        axes = []
+        for k in key:
+            if k is None:
+                axes.append(None)
+            elif not (isinstance(k, (int, np.integer))
+                      and not isinstance(k, bool)):
+                axes.append(next(have))
+        return r._op("model.expand", r.v, axes=tuple(axes))
+
+    def _index(self, k, dim: int, word: bool = False) -> Value:
+        """The index expression one key reads an axis of `dim` through;
+        `word`, an axis within the pixel's word, whose slice is one too."""
         g, t = self.t.g, self.t
         if isinstance(k, Array):                   # an index expression
             return k.v
@@ -255,8 +304,10 @@ class Array:
         # back from the end, or one at or past it -- or at a fixed index
         stop = k.stop if isinstance(k.stop, (int, np.integer)) else None
         ends = "end" if stop is None or stop < 0 or stop >= dim else "fixed"
-        v = g.op("model.var", name=g.vars.declare(count, f"slice {k}", "s",
-                                                  ends=ends))
+        name = g.vars.declare(count, f"slice {k}", "s", ends=ends)
+        if word:
+            t.word.add(name)
+        v = g.op("model.var", name=name)
         if step != 1:
             v = g.op("model.mul", v, t.const(step))
         return g.op("model.add", v, start)
@@ -387,6 +438,14 @@ class Array:
         _options(kw, "min")
         return self._reduce("min", self._held(), self.v.type.hi, axis)
 
+    def argmax(self, axis=None, **kw):
+        _options(kw, "argmax")
+        return self._arg("max", axis)
+
+    def argmin(self, axis=None, **kw):
+        _options(kw, "argmin")
+        return self._arg("min", axis)
+
     def _held(self):
         c = self.v.type.container
         return ("i", 64) if c == WEAK else c
@@ -408,6 +467,19 @@ class Array:
         if len(gone) != len(axes):
             raise Unsupported(f"a reduction over axis {axis}: an axis twice")
         own = self.v.type.axes
+        word = sorted((a for a in gone if self.t.is_word(own[a])),
+                      reverse=True)
+        if word:
+            # within each pixel's word: the lanes combined as NumPy combines
+            # them -- then, over the frame's axes left, a fold as below
+            x = self._lanes_reduced(op, container, word)
+            rest = tuple(a - sum(w < a for w in word) for a in gone
+                         if a not in word)
+            if not rest:
+                return x
+            init = {"add": init, "max": x.v.type.lo,
+                    "min": x.v.type.hi}[op]
+            return x._reduce(op, container, init, rest)
         kept = [i for i in range(ndim) if i not in gone]
         if any(own[i] is None for i in kept):
             raise Unsupported("a reduction keeping an axis of size 1")
@@ -423,6 +495,66 @@ class Array:
         return self._op("model.scatter", self.v, *keys, op=op,
                         init=int(init), axes=tuple(entries),
                         container=container)
+
+    def _lane(self, axis: int, i: int) -> "Array":
+        """Lane `i` of a word axis: `x[..., i, ...]`."""
+        return self[tuple(i if a == axis else slice(None)
+                          for a in range(self.ndim))]
+
+    def _lanes_reduced(self, op, container, axes) -> "Array":
+        """The value reduced over word axes, last first: per axis its lanes
+        combined pairwise, a balanced tree -- each step the operation in
+        the container NumPy reduces in, which for a sum is where it wraps
+        (modulo its width, as NumPy's sequential sum is)."""
+        kind = {"add": "model.add", "max": "model.max",
+                "min": "model.min"}[op]
+        x = self
+        for a in axes:
+            n = x.shape[a]
+            lanes = [x._lane(a, i) for i in range(n)]
+            lanes = [l if l.v.type.container == container
+                     else l.astype(_dtype_of(container)) for l in lanes]
+            while len(lanes) > 1:
+                pairs = [lanes[i:i + 2] for i in range(0, len(lanes), 2)]
+                lanes = [p[0] if len(p) == 1 else p[0]._op(kind, p[0].v, p[1].v)
+                         for p in pairs]
+            x = lanes[0]
+        return x
+
+    def _arg(self, op, axis) -> "Array":
+        """`argmax` / `argmin` over a word axis: the lanes paired in a
+        balanced tree, each pair keeping the better value and its lane --
+        the left one on a tie, so the first such lane wins, as NumPy's
+        does. The index is NumPy's: a 64-bit integer."""
+        if axis is None:
+            if self.ndim != 1:
+                raise Unsupported(f"np.arg{op} of a {self.ndim}-D value "
+                                  "without an axis: name the word's axis")
+            axis = 0
+        if not isinstance(axis, (int, np.integer)) or \
+                not -self.ndim <= axis < self.ndim:
+            raise Unsupported(f"np.arg{op} over axis {axis}")
+        axis = int(axis) % self.ndim
+        if not self.t.is_word(self.v.type.axes[axis]):
+            raise Unsupported(f"np.arg{op} over an axis of the frame: over a "
+                              "pixel's word, its channels, only")
+        better = "model.gt" if op == "max" else "model.lt"
+        keep = "model.max" if op == "max" else "model.min"
+        pairs = [(self._lane(axis, i), self.t.const(i, ("i", 64)))
+                 for i in range(self.shape[axis])]
+        g = self.t.g
+        while len(pairs) > 1:
+            nxt = []
+            for i in range(0, len(pairs), 2):
+                if i + 1 == len(pairs):
+                    nxt.append(pairs[i])
+                    continue
+                (lv, li), (rv, ri) = pairs[i], pairs[i + 1]
+                take = g.op(better, rv.v, lv.v)
+                nxt.append((lv._op(keep, lv.v, rv.v),
+                            g.op("model.where", take, ri, li)))
+            pairs = nxt
+        return Array(self.t, pairs[0][1])
 
     # -- NumPy's protocols ---------------------------------------------------
 
@@ -453,6 +585,16 @@ class Array:
                     "itself: make it like the frame -- np.zeros(n, dtype, "
                     "like=pixel) -- so the trace sees it")
             return inputs[0].at(ufunc, *inputs[1:])
+        if method == "reduce" and ufunc in _UFUNC_REDUCE \
+                and inputs[0] is self and len(inputs) == 1:
+            axis = kwargs.pop("axis", 0)
+            dtype = kwargs.pop("dtype", None)
+            _options(kwargs, f"np.{ufunc.__name__}.reduce")
+            if ufunc is np.add:
+                return self.sum(axis=axis, dtype=dtype)
+            if dtype is not None:
+                raise Unsupported(f"np.{ufunc.__name__}.reduce with a dtype")
+            return getattr(self, _UFUNC_REDUCE[ufunc])(axis=axis)
         if method != "__call__" or kwargs:
             raise Unsupported(f"{ufunc.__name__}.{method}")
         if ufunc is np.absolute and len(inputs) == 1:
@@ -462,7 +604,8 @@ class Array:
                   np.greater: "model.gt", np.less_equal: "model.le",
                   np.greater_equal: "model.ge", np.equal: "model.eq",
                   np.not_equal: "model.ne", np.bitwise_and: "model.and",
-                  np.bitwise_or: "model.or"}
+                  np.bitwise_or: "model.or", np.maximum: "model.max",
+                  np.minimum: "model.min"}
         if ufunc in binary and len(inputs) == 2:
             a, b = (self.t.operand(x) for x in inputs)
             if a is None or b is None:
@@ -492,7 +635,17 @@ def _options(kw, what):
 
 #: NumPy's reductions, by the method each is
 _REDUCTIONS = {np.sum: "sum", np.max: "max", np.amax: "max", np.min: "min",
-               np.amin: "min"}
+               np.amin: "min", np.argmax: "argmax", np.argmin: "argmin"}
+#: the ufuncs whose `reduce` is a reduction the tracer has
+_UFUNC_REDUCE = {np.add: "sum", np.maximum: "max", np.minimum: "min"}
+
+
+def _dtype_of(container):
+    """The NumPy dtype of a container."""
+    kind, bits = container
+    if kind == "b":
+        return np.bool_
+    return np.dtype(f"{'u' if kind == 'u' else 'i'}{bits // 8}")
 #: what an accumulator is made by, and what it starts at
 _CREATIONS = {np.zeros: 0, np.ones: 1, np.full: None}
 #: what each ufunc's `at` does to the entries it reaches
@@ -711,6 +864,7 @@ def _stack(t: Tracer, arrays, axis=0, **kw):
     if any(v is None for v in vals):
         raise Unsupported("np.stack of those operands")
     var = t.g.vars.declare(len(vals), "stacked", "k")
+    t.word.add(var)
     return Array(t, t.g.node("model.stack", vals,
                              {"var": var, "axis": int(axis)}).value)
 
@@ -745,8 +899,15 @@ def _reshape(a: Array, shape: tuple) -> Array:
                       for n in shape)
     if int(np.prod(old)) != int(np.prod(shape)):
         raise Unsupported(f"a reshape of {old} to {shape}")
-    new_vars = [None if n == 1 else g.vars.declare(n, "reshape", "h")
-                for n in shape]
+    groups = _groups(old, shape)
+    # an axis the reshape keeps whole keeps its variable, as a whole-axis
+    # slice does: the same positions, not a second lattice of equal count
+    kept = {news[0]: a.v.type.axes[olds[0]] for olds, news in groups
+            if len(olds) == len(news) == 1 and old[olds[0]] == shape[news[0]]
+            and a.v.type.axes[olds[0]] is not None}
+    new_vars = [kept.get(j) or (None if n == 1 else
+                                g.vars.declare(n, "reshape", "h"))
+                for j, n in enumerate(shape)]
     idx = [None] * len(old)
 
     def placed(j):
@@ -758,7 +919,14 @@ def _reshape(a: Array, shape: tuple) -> Array:
             v = g.op("model.expand", v, axes=axes)
         return v
 
-    for olds, news in _groups(old, shape):
+    for olds, news in groups:
+        if len(news) == 1 and news[0] in kept:
+            # read whole, in order: by its own variable, bare
+            idx[olds[0]] = g.op("model.var", name=kept[news[0]])
+            continue
+        if all(old[i] == 1 or t.is_word(a.v.type.axes[i]) for i in olds):
+            t.word.update(new_vars[j] for j in news
+                          if new_vars[j] is not None)
         live = [j for j in news if new_vars[j] is not None]
         flat = None
         for j in live:
@@ -823,6 +991,7 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
             raise Unsupported(f"a {bits}-bit word in {channels} fields")
         bits, signed = bits // channels, False
         axes += (g.vars.declare(channels, "channels of the source", "ch"),)
+        t.word.add(axes[-1])
     c = image_container(bits, signed)
     lo = -(1 << (bits - 1)) if signed else 0
     hi = (1 << (bits - (1 if signed else 0))) - 1

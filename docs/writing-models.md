@@ -51,6 +51,8 @@ followed operation by operation.
 | `np.pad(x, k, mode="edge"\|"constant")` | same-size output with edge handling |
 | `.astype(dtype)`, `.view(dtype)`, `.clip(lo, hi)`, `saturate(x, bits)` | containers and narrowing, as NumPy has them |
 | `np.where(cond, a, b)` | a mux on any condition the model computes |
+| `np.maximum`, `np.minimum` | a compare and a select, the range exact |
+| `x.max(axis=-1)`, `x.sum(axis=-1)`, `x.argmin(axis=-1)` over a word's channels | each pixel's own arithmetic over its lanes |
 | `table[x]` | a lookup in a register array or a `Rom` |
 | `np.stack([...], axis=-1)` | channels of one word |
 | `coords(img)` | the pixel's position, as values |

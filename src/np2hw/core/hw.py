@@ -187,6 +187,11 @@ for _k in (
     Kind("hw.shr", _P, 1, _un(lambda x, a: (x.lo >> a["amount"],
                                            x.hi >> a["amount"]))),
     Kind("hw.clip", _P, 1, _un(_clip)),
+    # the larger and the smaller of two: a compare and a select
+    Kind("hw.max", frozenset({PURE, COMMUTATIVE}), 2,
+         _bin(lambda x, y: (max(x.lo, y.lo), max(x.hi, y.hi)))),
+    Kind("hw.min", frozenset({PURE, COMMUTATIVE}), 2,
+         _bin(lambda x, y: (min(x.lo, y.lo), min(x.hi, y.hi)))),
     Kind("hw.abs", _P, 1, _un(_abs)),
     Kind("hw.lt", _P, 2, _bin(lambda x, y: BOOL01)),
     Kind("hw.gt", _P, 2, _bin(lambda x, y: BOOL01)),

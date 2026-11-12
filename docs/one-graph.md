@@ -312,7 +312,10 @@ off them:
   applied to a filter's result is one window over the source -- its spread
   the sum of the two. The inner arithmetic is computed at each tap of the
   outer one; identical taps are one node by interning, and a shifted copy
-  is arithmetic again rather than a register, which a later pass may trade;
+  is arithmetic again rather than a register, which a later pass may trade.
+  An index may be a constant too: one lane of a stack read at a constant
+  is the value stacked there, and a lane of a computed word is that word's
+  arithmetic at the lane;
 - **the edge** is the pad's: a row or column off the frame reads the
   nearest edge under `mode="edge"` and zero under a zero pad, each a select
   on the step's position, the rows past the last fed back by the flush.
@@ -621,6 +624,16 @@ reach -- none of the positions, or all of them -- wrapped into the
 accumulator's container where a step can leave it, as NumPy's `at` wraps each
 step (`into`, after canonicalising). A reduction over an axis is the fold keyed
 by the axes it keeps.
+
+A reduction over a pixel's WORD is not a fold: each pixel keeps its own
+value. The tracer knows which axes lie within the word -- a source's
+channels, a stack's, and what slices and reshapes make of them -- and
+records a `sum`, `max`, `min`, `argmin` or `argmax` over them as the
+lanes' own arithmetic, a balanced tree of `add`, `max` or `min` in the
+container NumPy reduces in (`argmin` and `argmax` pairing each value with
+its lane, the left one kept on a tie, as NumPy keeps the first). A
+`np.roll` of a word's axis is its lanes in another order. Over the frame's
+axes as well, the word is reduced first and the frame folded after.
 
 Lowering keeps the fold's value and keys as the pixel datapath, packed in the
 word a stage carries; the **accumulate** pass folds that word, beat by beat,

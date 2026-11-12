@@ -218,12 +218,14 @@ def test_a_reduction_over_the_image_axes(tmp_path, fn):
     _check(tmp_path, fn)
 
 
-def test_a_reduction_over_the_channels_is_refused():
-    """Summing a word's channels leaves every pixel its own value: not a
-    fold, which takes each pixel once."""
-    with pytest.raises(Unsupported, match="each pixel folds once"):
-        _compile(lambda pixel: pixel.sum(axis=-1), channels=2,
-                 bits=2 * BITS)
+def test_a_reduction_over_the_channels_is_no_fold():
+    """Summing a word's channels leaves every pixel its own value: each
+    pixel's arithmetic, not a fold (tests/test_core_reductions.py proves
+    it bit-exact)."""
+    core = _compile(lambda pixel: pixel.sum(axis=-1), channels=2,
+                    bits=2 * BITS)
+    assert "result" not in core["interface"]
+    assert not core["memories"]
 
 
 def test_an_axis_out_of_range_is_refused():

@@ -267,16 +267,35 @@ def test_a_value_computed_from_the_history_reads_its_frames(tmp_path):
     assert _sim(tmp_path, core, video) == _beats(model)
 
 
-def test_a_read_across_time_through_a_non_pointwise_value_is_refused():
-    """Where the value cannot be pushed through to the stream -- a stack of
-    two of it -- a slice on time is no read a store can serve, and it is
-    refused, saying how to write it."""
+@requires_iverilog
+def test_a_lane_of_a_stack_read_across_time_is_the_value_stacked(tmp_path):
+    """One lane of a stack, read at a constant, is the value stacked there:
+    sliced on time, it is that value at each frame read, kept as any
+    history is."""
     @block(version=(1, 0), description="stacked, then sliced",
            inputs=(StreamPort("in", history=True),),
            outputs=(StreamPort("out"),))
     def stacked(video, p, bit_depth):
-        v = np.stack([video, video], axis=-1)
-        return (v[1:, ..., 0] >> 1).astype(np.uint16)
+        v = np.stack([video, video >> 2], axis=-1)
+        return ((v[1:, ..., 0] >> 1) + v[:-1, ..., 1]).astype(np.uint16)
 
-    with pytest.raises(NotImplementedError):
+    core = stacked.generate(SPEC, W, H, module_name="stacked").core
+    video = _video(4)
+    assert _sim(tmp_path, core, video) == \
+        _beats(stacked.run(video, bit_depth=BITS))
+
+
+def test_a_read_across_time_through_a_non_pointwise_value_is_refused():
+    """Where the value cannot be pushed through to the stream -- a stack
+    read through a slice of its lanes -- a slice on time is no read a store
+    can serve, and it is refused, saying how to write it."""
+    @block(version=(1, 0), description="stacked, then sliced",
+           inputs=(StreamPort("in", history=True),),
+           outputs=(StreamPort("out"),))
+    def stacked(video, p, bit_depth):
+        v = video.astype(np.uint16)
+        s = np.stack([v, v + 1, v + 2], axis=-1)
+        return s[1:, ..., 1:].max(axis=-1)
+
+    with pytest.raises(NotImplementedError, match="slice the history first"):
         stacked.generate(SPEC, W, H, module_name="stacked")

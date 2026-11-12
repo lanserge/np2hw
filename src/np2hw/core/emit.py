@@ -126,6 +126,11 @@ class _Printer:
             a = self.ref(x, dom)
             return self.wire(v, f"({a} < {lo}) ? {lo} : "
                                 f"(({a} > {hi}) ? {hi} : {a})")
+        if k in ("hw.max", "hw.min"):
+            dom = any(_signed(o) for o in ops) or _signed(v)
+            a, b = (self.ref(o, dom) for o in ops)
+            return self.wire(v, f"({a} {'>' if k == 'hw.max' else '<'} {b})"
+                                f" ? {a} : {b}")
         if k == "hw.sel":
             c, a, b = ops
             dom = _signed(v) or _signed(a) or _signed(b)

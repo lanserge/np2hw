@@ -7,6 +7,39 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
+## Unreleased
+
+### Added
+
+- **`np.maximum` and `np.minimum`**, each a compare and a select, with
+  exact ranges: `np.maximum(x - 100, 0)` is never negative, so it may be
+  windowed or stacked into a word.
+
+- **Reductions within a pixel's word.** `sum`, `max`, `min` (and
+  `np.add.reduce`, `np.maximum.reduce`, `np.minimum.reduce`) over a word's
+  axes -- a source's channels, a stack's, what slices and reshapes make
+  of them -- are each pixel's own arithmetic, the lanes combined pairwise
+  in the container NumPy reduces in; `argmax` and `argmin` over a word's
+  axis keep the first of equal lanes, as NumPy's do. Over the frame's
+  axes as well, the word is reduced first and the frame folded after.
+  These were refused.
+
+- **`x[..., None]` and constant arrays.** NumPy's newaxis is a dimension
+  of size one; a 1-D integer array -- `np.arange(n)`, class centres -- is
+  constants along a word axis, so `abs(x[..., None] - centres).argmin(-1)`
+  and a min-sum check node's `np.where(np.arange(n) == first[..., None],
+  ...)` are written as NumPy writes them.
+
+- **A lane of a stack read across time.** A stack's lane at a constant
+  is the value stacked there, so `np.stack([video, ...], axis=-1)[1:, ...,
+  0]` reads the stream's frames as any history does; it was refused.
+
+### Changed
+
+- **A reshape keeps the variable of an axis it keeps whole**, as a
+  whole-axis slice does, so `px.reshape(H, W, 2, 2)` still reads the
+  frame's own pixel.
+
 ## 0.7.0
 
 **Breaking for designs and for revela 0.3.x.** Every core takes each

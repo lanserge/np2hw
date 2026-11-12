@@ -202,7 +202,8 @@ class _Selects:
     whose planes tile the lattice is a select (B); a select over the same
     operation is that operation over selects (C); an access through a
     buffer's own variables is the buffer; an access of a computed value is
-    that value computed at the index (D)."""
+    that value computed at the index (D); a stack's lane read at a constant
+    is the value stacked there (E)."""
 
     def __init__(self, c: Canonical):
         self.c, self.g = c, c.g
@@ -255,11 +256,27 @@ class _Selects:
             for v, a in zip(names, axes):
                 vars_.unify(v, a)
             return buf
+        # E: one lane of a stack, read at a constant on the stacked axis,
+        # is the value stacked there -- read at the other indexes as it
+        # broadcast into the stack
+        if buf.node.kind == "model.stack" and len(idx) == len(axes):
+            pos = buf.node.attr("axis") % len(axes)
+            lane = _const_value(idx[pos])
+            if lane is not None:
+                val = buf.node.operands[lane]
+                rest = idx[:pos] + idx[pos + 1:]
+                own = val.type.axes
+                rest = rest[len(rest) - len(own):] if own else []
+                return self.access([val, *(
+                    i if a is not None else self.g.op(
+                        "model.const", value=0, container=EXACT)
+                    for i, a in zip(rest, own))]) if own else val
         # D: a computed value read at an index is the value computed there
         # -- its own variables replaced by the index -- so a slice of a
         # result is a window over the source, as composing filters is
         if buf.node.kind not in _BUFFERS and None not in axes \
-                and len(idx) == len(axes) and all(map(_offset, idx)):
+                and len(idx) == len(axes) and all(
+                    _offset(i) or i.node.kind == "model.const" for i in idx):
             got = self._at(buf, dict(zip(axes, idx)))
             if got is not None:
                 return got
@@ -304,14 +321,78 @@ class _Selects:
                 out = None if None in ops else self.access(ops)
             elif n.kind in _POINTWISE:
                 ops = [go(o) for o in n.operands]
-                out = None if None in ops else \
-                    g.node(n.kind, ops, dict(n.attrs)).value
+                if None not in ops:
+                    ops = self._realigned(n, ops, sub)
+                out = None if None in ops else _folded(g, n, ops)
+                if out is None and None not in ops:
+                    out = g.node(n.kind, ops, dict(n.attrs)).value
+            elif n.kind == "model.expand":
+                out = self._expanded(n, go(n.operands[0]), sub)
+            elif n.kind == "model.stack":
+                # E inside an expression: the stacked axis at a constant is
+                # the value stacked there
+                at = sub.get(find(n.attr("var")))
+                lane = None if at is None else _const_value(at)
+                out = None if lane is None else go(n.operands[lane])
             else:
                 out = None
             memo[id(n)] = out
             return out
 
         return go(v)
+
+    def _realigned(self, n: Node, ops: list, sub: dict) -> list:
+        """The operands of `n`, substituted, with each size-one placeholder
+        dropped where it lined up with an axis the substitution removed --
+        `at[..., None]` beside a stack's lanes, read at one lane -- so they
+        broadcast as the rest of `n` now does."""
+        find = self.g.vars.find
+        axes = n.value.type.axes
+        gone = set()
+        for i, a in enumerate(axes):
+            if a is not None and find(a) in sub and not any(
+                    v is not None for v in sub[find(a)].type.axes):
+                gone.add(i)
+        if not gone:
+            return ops
+        out = []
+        for o, new in zip(n.operands, ops):
+            off = len(axes) - len(o.type.axes)
+            have = new.type.axes
+            drop = [j for j in range(len(have))
+                    if len(have) == len(o.type.axes) and off + j in gone
+                    and have[j] is None]
+            if drop and any(a is not None for a in have):
+                new = self.g.op("model.expand", new, axes=tuple(
+                    a for j, a in enumerate(have) if j not in drop))
+            out.append(new)
+        return out
+
+    def _expanded(self, n: Node, x: Value | None, sub: dict):
+        """An expand -- a value placed among axes -- of a substituted value:
+        each axis placed where it was, by what replaced it -- gone where a
+        constant did -- and the value itself where none is left."""
+        if x is None:
+            return None
+        find = self.g.vars.find
+        have = {find(a) for a in x.type.axes if a is not None}
+        if not have:
+            return x
+        target = []
+        for a in n.attr("axes"):
+            if a is None:
+                target.append(None)
+                continue
+            r = find(a)
+            if r in sub:
+                now = [find(v) for v in sub[r].type.axes if v is not None]
+                if len(now) > 1:
+                    return None
+                r = now[0] if now else None
+            target.append(r)
+        if {a for a in target if a is not None} != have:
+            return None
+        return self.g.op("model.expand", x, axes=tuple(target))
 
     # -- A: where on a remainder ---------------------------------------------
 
@@ -471,9 +552,32 @@ class _Selects:
 _BUFFERS = {"model.source", "model.pad", "model.table", "model.param"}
 _POINTWISE = {"model.add", "model.sub", "model.mul", "model.floordiv",
               "model.mod", "model.shr", "model.and", "model.or", "model.neg",
+              "model.max", "model.min",
               "model.abs", "model.eq", "model.ne", "model.lt", "model.le",
               "model.gt", "model.ge", "model.where", "model.clip",
               "model.astype", "model.bits", "model.wrap"}
+
+
+#: exact arithmetic on constants, folded where substitution makes it -- an
+#: index a constant lane turned constant
+_FOLDS = {"model.add": lambda n, a, b: a + b,
+          "model.sub": lambda n, a, b: a - b,
+          "model.mul": lambda n, a, b: a * b,
+          "model.neg": lambda n, a: -a,
+          "model.shr": lambda n, a: a >> n.attr("amount"),
+          "model.floordiv": lambda n, a: a // n.attr("divisor"),
+          "model.mod": lambda n, a: a % n.attr("divisor"),
+          "model.max": lambda n, a, b: max(a, b),
+          "model.min": lambda n, a, b: min(a, b)}
+
+
+def _folded(g, n: Node, ops):
+    """A constant, where `n` is exact arithmetic on constants; else None."""
+    vals = [_const_value(o) for o in ops]
+    if n.kind not in _FOLDS or None in vals:
+        return None
+    return g.op("model.const", value=int(_FOLDS[n.kind](n, *vals)),
+                container=EXACT)
 
 
 def _offset(v: Value) -> bool:

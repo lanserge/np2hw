@@ -34,7 +34,25 @@ and its exact range, so the hardware wraps exactly where NumPy does
 | `np.stack([...], axis=-1)` | channels of one word -- each unsigned |
 | `coords(img)`, `make_coords(img, rows, cols)` | the input's, or a declared output's, position as values |
 | `np.add`, `np.subtract`, `np.multiply`, comparisons, `np.bitwise_and/or`, `np.absolute` | as their operators |
+| `x[..., None]` (newaxis) | a dimension of size one, which broadcasting pairs with another value's axis |
+| a 1-D integer `np.ndarray` as an operand (`np.arange(n)`, `np.array([...])`) | constants along an axis of the word, as a stack of them: `abs(x[..., None] - centres)` |
+| `np.maximum(a, b)`, `np.minimum(a, b)` | a compare and a select; the range exact, so `np.maximum(x - 100, 0)` is never negative and may be windowed or stacked |
 | a video, `Image2D(..., frames=n)`: `video[1:]`, `video[:-1]` | reads across frames; the store derived from the reads |
+
+## Reductions within a pixel's word
+
+A pixel's word has axes of its own: a source's channels, a stack's, and
+what slices and reshapes make of them. A reduction over them is each
+pixel's own arithmetic -- the lanes combined pairwise, in the container
+NumPy reduces in -- and leaves the frame's axes as they were:
+
+| Model | Support |
+|---|---|
+| `x.sum(axis=-1)`, `x.max(axis=-1)`, `x.min(axis=-1)` (and `np.sum`, `np.max`, `np.min`, `np.add.reduce`, `np.maximum.reduce`, `np.minimum.reduce`) | over any of the word's axes; a sum in NumPy's container -- `uint64` of an unsigned value, `int64` of a signed one, or `dtype=` -- and wrapped where that wraps |
+| `x.argmax(axis=-1)`, `x.argmin(axis=-1)` (and `np.argmax`, `np.argmin`) | over one of the word's axes: the first of equal lanes, as NumPy's; a 64-bit index |
+
+Over the frame's axes as well -- `x.max()` of a stacked value -- the word
+is reduced first and the frame folded after, as below.
 
 ## Reductions and folds
 
@@ -68,10 +86,10 @@ it; a frame arriving before that is done waits, as for any core not ready.
 - folds side by side (`np.stack` of accumulators) where one can be
   negative -- a word's channels are unsigned; keep that fold an output
   of its own, where it may be signed, or offset it first;
-- a reduction over a word's channels (`x.sum(axis=-1)` of a multi-channel
-  value), `np.mean` (a divide);
-- `np.minimum` / `np.maximum` as functions, `np.clip` as a function -- use
-  `.clip`, `np.where`;
+- `np.mean` (a divide);
+- `np.argmin` / `np.argmax` over the frame's axes, or with no axis named
+  on a value of more than one;
+- `np.clip` as a function -- use `.clip`;
 - `@` / `np.matmul`, `np.convolve`, floating point.
 
 A fixed convolution is a weighted sum of slices, which is what the

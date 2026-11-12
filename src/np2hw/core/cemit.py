@@ -540,6 +540,12 @@ class _Printer:
                              f"({own})({a} < ({w}){_lit(clo)} ? ({w}){_lit(clo)}"
                              f" : {a} > ({w}){_lit(chi)} ? ({w}){_lit(chi)} : "
                              f"{a})", deps, lo, hi)
+        if k in ("model.max", "model.min"):
+            w = self.span(*res, *vals)
+            a, b = (self.ref(s, w) for s in vals)
+            op = ">" if k == "model.max" else "<"
+            return self.stmt(nest, own, f"({own})({a} {op} {b} ? {a} : {b})",
+                             deps, lo, hi)
         if k == "model.where":
             w = self.span(*res, vals[1], vals[2])
             cond = vals[0].c(self.names)
@@ -808,6 +814,8 @@ _FOLD = {
     "model.mul": lambda n, a, b: a * b,
     "model.neg": lambda n, a: -a,
     "model.abs": lambda n, a: abs(a),
+    "model.max": lambda n, a, b: max(a, b),
+    "model.min": lambda n, a, b: min(a, b),
     "model.shr": lambda n, a: a >> n.attr("amount"),
     "model.floordiv": lambda n, a: a // n.attr("divisor"),
     "model.mod": lambda n, a: a % n.attr("divisor"),

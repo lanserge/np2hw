@@ -140,6 +140,8 @@ _EVAL = {
     "model.mul": lambda g, n, v: v[0] * v[1],
     "model.and": lambda g, n, v: v[0] & v[1],
     "model.or": lambda g, n, v: v[0] | v[1],
+    "model.max": lambda g, n, v: np.maximum(v[0], v[1]),
+    "model.min": lambda g, n, v: np.minimum(v[0], v[1]),
     "model.neg": lambda g, n, v: -v[0],
     "model.abs": lambda g, n, v: np.absolute(v[0]),
     "model.shr": lambda g, n, v: v[0] >> n.attr("amount"),
