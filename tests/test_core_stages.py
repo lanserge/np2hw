@@ -40,7 +40,7 @@ def _sim(tmp_path, core, frames, values, seed=0):
     regs = "".join(f"    reg [{b - 1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n"
                     for n, _ in core["params"])
-    sets = "".join(f"        param_{n} = {int(values.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
+    sets = "".join(f"        param_{n} = {int(values.get(n, core['param_defaults'][n])) & ((1 << b) - 1)};\n"
                    for n, b in core["params"])
     words = [int(v) for v in np.asarray(frames).ravel()]
     per = W * H

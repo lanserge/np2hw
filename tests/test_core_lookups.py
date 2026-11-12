@@ -36,7 +36,7 @@ def _sim(tmp_path, core, frame, values):
     names = [n for n, _ in core["params"]]
     regs = "".join(f"    reg [{b - 1}:0] param_{n};\n" for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n" for n in names)
-    sets = "".join(f"        param_{n} = {int(values.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
+    sets = "".join(f"        param_{n} = {int(values.get(n, core['param_defaults'][n])) & ((1 << b) - 1)};\n"
                    for n, b in core["params"])
     words = [int(v) for v in frame.ravel()]
     (tmp_path / "in.hex").write_text("".join(f"{v:x}\n" for v in words))

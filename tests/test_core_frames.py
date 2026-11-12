@@ -48,7 +48,7 @@ def _sim(tmp_path, core, video, seed=0, values=None):
                    for n, b in core["params"])
     conns = "".join(f"        .param_{n}(param_{n}),\n"
                     for n, _ in core["params"])
-    sets = ["".join(f"            param_{n} = {int(v.get(n, core["param_defaults"][n])) & ((1 << b) - 1)};\n"
+    sets = ["".join(f"            param_{n} = {int(v.get(n, core['param_defaults'][n])) & ((1 << b) - 1)};\n"
                     for n, b in core["params"]) for v in values]
     # a core whose stream carries its context takes each frame's in it: its
     # size, and every value the caller gives a frame, packed

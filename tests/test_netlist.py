@@ -5,7 +5,7 @@
 Each design here is a composite, written to a library and loaded by
 reference -- the one way a pipeline is described. What is checked is the
 graph: every block input driven exactly once, no cycle, a tap allowed and a
-fork between two real datapaths refused, a port that exists.
+fork between two real datapaths taken through np2hw_fork, a port that exists.
 """
 import pytest
 

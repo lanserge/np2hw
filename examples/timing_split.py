@@ -198,7 +198,7 @@ def _two_frames(meta, W, H, frames, values):
     a("        $readmemh(\"in.hex\", img);")
     a("        fh = $fopen(\"out.txt\", \"w\");")
     for name, _ in meta["params"]:
-        a(f"        param_{name} = {int(values.get(name, meta["param_defaults"][name]))};")
+        a(f"        param_{name} = {int(values.get(name, meta['param_defaults'][name]))};")
     a("        @(negedge clk); rst = 0;")
     a(f"        for (fr = 0; fr < {len(frames)}; fr = fr + 1) begin")
     a(f"            for (r = 0; r < {H}; r = r + 1) begin")

@@ -9,9 +9,10 @@ validates before anything is generated. It exists because an application that
 re-derives these rules keeps a copy of the emitter's law, and the fork rule
 really was implemented twice before this module.
 
-Each check here demonstrates one refusal, plus the two things that must be
-ACCEPTED for the rules to be worth anything: a tap (any number of sinks fan
-out free, because a sink never stalls) and a diamond that is NOT a cycle.
+Each check here demonstrates one refusal, plus what must be ACCEPTED for
+the rules to be worth anything: a fork (two consumers that both stall take
+the stream through np2hw_fork), a tap (any number of sinks fan out free,
+because a sink never stalls) and a diamond that is NOT a cycle.
 
 Run:  python examples/netlist_rules.py
 """
@@ -68,12 +69,17 @@ def main():
               outputs=()),
         "cycle"))
 
-    checks.append(refuses(
-        "fork to two blocking consumers", "a deadlock under load",
-        build([("in", "a.in"), ("a.out", "b.in"), ("a.out", "out")], [a, b]),
-        "buffering fork element"))
+    # A fork is accepted: both consumers stall, so the composer puts
+    # np2hw_fork between them and the source, which holds each beat until
+    # every one of them has taken it.
+    forked = build([("in", "a.in"), ("a.out", "b.in"), ("a.out", "out")], [a, b])
+    forked.validate()
+    ok = not forked.is_tap(Endpoint("b", "in")) and not forked.is_tap(Endpoint(None, "out"))
+    print(f"  {'fork to two blocking consumers':<34} {'PASS' if ok else 'FAIL'}  "
+          "(accepted, through np2hw_fork; neither consumer is a tap)")
+    checks.append(ok)
 
-    # A tap is FREE: the same fork, but the second consumer is a sink.
+    # A tap is FREE: the same fan-out, but the second consumer is a sink.
     tapped = build([("in", "a.in"), ("a.out", "out"), ("a.out", "watch.in")],
                    [a, watch])
     tapped.validate()
