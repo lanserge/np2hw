@@ -6,6 +6,8 @@ The same format and the same loader as a design on disk: :func:`build`
 writes a description to a library on the import path and loads it by
 reference. Blocks are named as toylib registers them.
 """
+from __future__ import annotations
+
 import json
 import sys
 import tempfile
