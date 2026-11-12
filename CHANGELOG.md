@@ -7,7 +7,13 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
-## Unreleased
+## 0.7.0
+
+**Breaking for designs and for revela 0.3.x.** Every core takes each
+frame's size from its stream's context, so a design whose source carries
+no width and height is refused; revela 0.3.x needs `np2hw<0.7`, revela
+0.4.0 needs this release. The statistics window (`StatsWindow`) is gone:
+statistics are a fold's output stream, read through the readout leaf.
 
 ### Added
 
@@ -204,150 +210,6 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   1`, `1 - (p.phase & 1)` -- whose exact range fits the stride: a CFA block
   takes its phase as the one input it is.
 
-### Removed
-
-- **`ContextBit`, and `consumes=`, `context=` and `vocabulary=` on
-  `block()`.** A block knows nothing of the pipeline it is placed in: it
-  takes what it reads as inputs, and a design binds them (above). What a
-  block consumes is what its bindings read. The pipeline context is the
-  DESIGN's: a composite names it (`"vocabulary": "package.module:NAME"`,
-  every composite of one design the same one), `assemble()` takes
-  `vocabulary=`, and `Block.bind()` takes it from the design. A design that
-  names none has no pipeline. `even_frame` moves from `Context` to
-  `block()`: the block's own statement that its math tiles 2x2.
-- **A model's `ctx` argument.** A model is `(pixel, p, bit_depth)`: its
-  stream, its inputs and registers, and the stream's depth. **Every model
-  signature changes.**
-
-### Changed
-
-- **A design's register file is as wide as its registers.** No region is
-  reserved for statistics windows -- statistics are a fold's stream, read
-  through the readout -- so the control interface's address ports
-  (`s_axil_awaddr`, `s_axil_araddr`) and its window on the bus are what the
-  registers need -- 12 bits, one page, for revela's ISPs -- where every
-  design was at least 15 bits and 32 KB. The registers keep their
-  addresses.
-
-- **One compiler.** `np2hw.core` builds every model; the earlier compiler,
-  its tracer (`np2hw.frontend`, `np2hw.trace`) and its emitters are gone,
-  with the `NP2HW_CORE` switch. `to_ir(fn, image, *params, channels=1)`
-  returns `(None, module)` or refuses, by name (`NotImplementedError`) or by
-  reason (`ValueError`); `generate(module, module_name, clk_ns, label, dev,
-  sync_memory)` builds it, or refuses -- it no longer hands a model to
-  another compiler when its own build misses the clock.
-- **Every core takes each frame's size at run time** -- one kind of core
-  -- **in its stream's context.** A stream carries each frame's context in
-  a new optional member, `ctx` (`CTX` in `np2hw.stream.STREAM_SIGNALS`):
-  the facts the stream declares, packed in its vocabulary's order, the
-  first in the low bits, the frame's `width` and `height` first where it
-  declares them -- `context_bits`, `pack_context` and `unpack_context` read
-  and write it. A core latches `in_ctx` with a frame's first beat and hands
-  `out_ctx` on with the frame: the same fields, the size the frame it puts
-  out has, every other field as the frame brought it, each in a register.
-  A size a core works out rather than passes on -- a window's part of the
-  frame, an output a border smaller -- is worked out from the latched
-  size the cycle after the frame's first beat, a stage of its own, and
-  such a core keeps at least two stages, so its first beat out carries it.
-  An image's `context` is its layout, by default the size alone. The size a
-  model is traced at is the most the core holds (a line buffer's depth, a
-  frame store's), and a generated module has no `WIDTH`/`HEIGHT` parameters
-  left to override. A frame is at least 2x2. **Ports change on every
-  core**: `in_ctx` and `out_ctx` are new, and a value a frame brings
-  (`Param(frame=True)`, a bound input's context) is a field of `in_ctx`,
-  not a port. `core["registers"]` lists the model's own registers,
-  `core["params"]` every register port.
-- **A frame's context travels with its stream.** A composed module wires
-  each stream's `ctx` with its other members, and a sink taking a context
-  is refused one of another layout. A pipeline's input stream carries the
-  facts its port declares; the context block's registers supply the rest,
-  joined into the one layout every core of the pipeline carries
-  (`compose.context_layout`, `compose.carried_layout`), and a fact the
-  stream carries has no register. A design reads a stream's layout off a
-  node's port, an output's as well as an input's -- `context`,
-  `context_bits` and `context_at`, each fact of the vocabulary's low bit
-  in it or -1 -- so a module packing or unpacking it is told where each
-  fact goes. The RTL twin reads each output's size from its `out_ctx`. A wrapper of one core (`control_top`, the
-  Switchboard and AXI4-Stream wrappers, the testbenches) offers each
-  context field as a register port, the size among them, and packs them
-  into `in_ctx` (`verilog.offered_params`, `verilog.context_word`).
-- **Fixed modules carry the context they do not read.** `frame_store`
-  and `frame_cdc` carry their stream's `ctx` whole (`CTX_BITS`, which a
-  design reads as `node.port.context_bits`), and the frame store's size
-  is the one each frame's own beats draw: its width to the first `eol`,
-  its rows to its `last`. **Their ports change**: the separate size ports
-  are gone.
-- **A window takes frames of any height**: its row steps count at the
-  16-bit geometry width (its column steps stay sized from the traced width,
-  which its line buffers hold). **Emitted widths change** for those step
-  registers.
-- **A video takes frames smaller than it was traced at**: its store's
-  address wraps at the frame's last pixel.
-- **An index that can leave a table is a model error** (`ValueError`,
-  "falls outside the table"), for register arrays and constant tables alike.
-
-- **A window's bounds are registered.** Its last row and column -- the
-  registers that place it, added -- are worked out once into a register,
-  frame-constant as they are, and compared against; the sum and the
-  compare in one cycle were a carry chain too long for the clock.
-- **An implementation that is a module takes its settings as parameters.**
-  A block filled by a Verilog implementation gets its `config`, evaluated
-  over the block's parameters, as the module's parameters -- as any module
-  leaf takes its build -- where it used to be refused as vendor IP
-  properties.
-
-- **A context register exists only where something reads it.** A
-  register-backed context signal is made -- in the decode, the published
-  map, the ports and the binding -- only where a block consumes it, or the
-  cores' run-time frame reads it as the frame's width or height; stream-
-  carried signals keep their ports as before. A vocabulary may declare a
-  signal nothing in a design reads, and that design no longer carries a
-  register for it; the first block that consumes it brings it back. No
-  remaining register moves: the allocation is unchanged.
-
-- **Fixed modules are Verilog files.** `skid`, `tee` and `cdc_fifo` were
-  Verilog printed by Python, the same structure every time. They are
-  files in the package now -- `np2hw/hdl/np2hw_skid.v`, `np2hw_tee.v`,
-  `np2hw_cdc_fifo.v` -- sized by module parameters. The functions return
-  the file with the `parameters` a use sets; a result that instantiates
-  one lists it in `requires`, and `np2hw.hdl.closure(result)` is the text
-  with everything it requires. **`module_name` is gone from all three**:
-  a fixed module has one name.
-- **`Block.run` hands the model the type the trace gives its input.** The
-  frame is cast to the smallest unsigned integer holding `bit_depth` bits
-  (`uint8` for an 8-bit stream), so a model that adds before widening wraps
-  in NumPy exactly as in the generated RTL. It used to keep the caller's
-  type (often `uint16` or `int64`), and such a model disagreed with its own
-  hardware; only the twin caught it. A frame with a value outside
-  `bit_depth` bits is now refused instead of being passed through.
-- **A run of the models reads each stage's depth from the trace.**
-  `np2hw.pipeline.run.run_model` tells each block the depth of the word it
-  is given as the composer does, from its driver's traced output
-  (`compose.handed_on`). **`out_depth` is gone from `block`**: it declared
-  a block's output depth beside the trace that already published it, and
-  only the model run read it.
-- **An uncalled leaf generator's build is not evaluated** (a load with
-  `generate=False`): it would be spent making the module, and may read
-  facts only the generated design has.
-- **A primitive's declared default is its instance's value.** An instance
-  carries every parameter its block declares a default for, so the wiring
-  check, the toolchain and the facts read one value; the wiring check used
-  to refuse a width reading a defaulted parameter as never set.
-- **Geometry is read from the trace too, by both.** `compose.handed_on`
-  returns the channels, depth, width and height a block hands on
-  (`compose.Handed`). The composer no longer falls back to the design's
-  geometry for a block that states none -- it refuses -- and a model run
-  builds each block at the frame it is given and refuses a model whose
-  frame comes out other than its trace says. A window's trace is a bound
-  (`compose.keeps_window`): its model may hand on any frame inside it.
-- **The RTL twin ends a frame where the hardware does**, at `last`, and
-  reads its size from the `<output>_frame_width`/`_height` the top
-  publishes, so a chain that keeps a window is proven against its model's
-  window. It used to wait for as many words as went in.
-- **`np2hw.testing.block` checks the framing of the model's frame**, not
-  the frame it drove, so a block that keeps a window is testable.
-
-### Added
 
 - **Windows on the compiler**: line buffers behind the `<module>_linebuf`
   seam, read a column ahead; replicate and zero edges; crops by slice or
@@ -505,12 +367,134 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   the sampling clock's period. `docs/clock-crossings.md` gave the
   constraint; now the module ships it.
 
-### Fixed
+### Changed
 
-- **The SystemRDL map escapes SystemRDL's keywords.** A register, design or
-  instance named one -- a threshold called `level` -- was written bare, and
-  the reference compiler refused the file. It is written as an escaped
-  identifier (`\level`), which names the same component.
+- **A design's register file is as wide as its registers.** No region is
+  reserved for statistics windows -- statistics are a fold's stream, read
+  through the readout -- so the control interface's address ports
+  (`s_axil_awaddr`, `s_axil_araddr`) and its window on the bus are what the
+  registers need -- 12 bits, one page, for revela's ISPs -- where every
+  design was at least 15 bits and 32 KB. The registers keep their
+  addresses. The register map has no `statistics` entries, so its
+  `map_format_version` is 6: a host built for 5 refuses it.
+
+- **One compiler.** `np2hw.core` builds every model; the earlier compiler,
+  its tracer (`np2hw.frontend`, `np2hw.trace`) and its emitters are gone,
+  with the `NP2HW_CORE` switch. `to_ir(fn, image, *params, channels=1)`
+  returns `(None, module)` or refuses, by name (`NotImplementedError`) or by
+  reason (`ValueError`); `generate(module, module_name, clk_ns, label, dev,
+  sync_memory)` builds it, or refuses -- it no longer hands a model to
+  another compiler when its own build misses the clock.
+- **Every core takes each frame's size at run time** -- one kind of core
+  -- **in its stream's context.** A stream carries each frame's context in
+  a new optional member, `ctx` (`CTX` in `np2hw.stream.STREAM_SIGNALS`):
+  the facts the stream declares, packed in its vocabulary's order, the
+  first in the low bits, the frame's `width` and `height` first where it
+  declares them -- `context_bits`, `pack_context` and `unpack_context` read
+  and write it. A core latches `in_ctx` with a frame's first beat and hands
+  `out_ctx` on with the frame: the same fields, the size the frame it puts
+  out has, every other field as the frame brought it, each in a register.
+  A size a core works out rather than passes on -- a window's part of the
+  frame, an output a border smaller -- is worked out from the latched
+  size the cycle after the frame's first beat, a stage of its own, and
+  such a core keeps at least two stages, so its first beat out carries it.
+  An image's `context` is its layout, by default the size alone. The size a
+  model is traced at is the most the core holds (a line buffer's depth, a
+  frame store's), and a generated module has no `WIDTH`/`HEIGHT` parameters
+  left to override. A frame is at least 2x2. **Ports change on every
+  core**: `in_ctx` and `out_ctx` are new, and a value a frame brings
+  (`Param(frame=True)`, a bound input's context) is a field of `in_ctx`,
+  not a port. `core["registers"]` lists the model's own registers,
+  `core["params"]` every register port.
+- **A frame's context travels with its stream.** A composed module wires
+  each stream's `ctx` with its other members, and a sink taking a context
+  is refused one of another layout. A pipeline's input stream carries the
+  facts its port declares; the context block's registers supply the rest,
+  joined into the one layout every core of the pipeline carries
+  (`compose.context_layout`, `compose.carried_layout`), and a fact the
+  stream carries has no register. A design reads a stream's layout off a
+  node's port, an output's as well as an input's -- `context`,
+  `context_bits` and `context_at`, each fact of the vocabulary's low bit
+  in it or -1 -- so a module packing or unpacking it is told where each
+  fact goes. The RTL twin reads each output's size from its `out_ctx`. A wrapper of one core (`control_top`, the
+  Switchboard and AXI4-Stream wrappers, the testbenches) offers each
+  context field as a register port, the size among them, and packs them
+  into `in_ctx` (`verilog.offered_params`, `verilog.context_word`).
+- **Fixed modules carry the context they do not read.** `frame_store`
+  and `frame_cdc` carry their stream's `ctx` whole (`CTX_BITS`, which a
+  design reads as `node.port.context_bits`), and the frame store's size
+  is the one each frame's own beats draw: its width to the first `eol`,
+  its rows to its `last`. **Their ports change**: the separate size ports
+  are gone.
+- **A window takes frames of any height**: its row steps count at the
+  16-bit geometry width (its column steps stay sized from the traced width,
+  which its line buffers hold). **Emitted widths change** for those step
+  registers.
+- **A video takes frames smaller than it was traced at**: its store's
+  address wraps at the frame's last pixel.
+- **An index that can leave a table is a model error** (`ValueError`,
+  "falls outside the table"), for register arrays and constant tables alike.
+
+- **A window's bounds are registered.** Its last row and column -- the
+  registers that place it, added -- are worked out once into a register,
+  frame-constant as they are, and compared against; the sum and the
+  compare in one cycle were a carry chain too long for the clock.
+- **An implementation that is a module takes its settings as parameters.**
+  A block filled by a Verilog implementation gets its `config`, evaluated
+  over the block's parameters, as the module's parameters -- as any module
+  leaf takes its build -- where it used to be refused as vendor IP
+  properties.
+
+- **A context register exists only where something reads it.** A
+  register-backed context signal is made -- in the decode, the published
+  map, the ports and the binding -- only where a block consumes it, or the
+  cores' run-time frame reads it as the frame's width or height; stream-
+  carried signals keep their ports as before. A vocabulary may declare a
+  signal nothing in a design reads, and that design no longer carries a
+  register for it; the first block that consumes it brings it back. No
+  remaining register moves: the allocation is unchanged.
+
+- **Fixed modules are Verilog files.** `skid`, `tee` and `cdc_fifo` were
+  Verilog printed by Python, the same structure every time. They are
+  files in the package now -- `np2hw/hdl/np2hw_skid.v`, `np2hw_tee.v`,
+  `np2hw_cdc_fifo.v` -- sized by module parameters. The functions return
+  the file with the `parameters` a use sets; a result that instantiates
+  one lists it in `requires`, and `np2hw.hdl.closure(result)` is the text
+  with everything it requires. **`module_name` is gone from all three**:
+  a fixed module has one name.
+- **`Block.run` hands the model the type the trace gives its input.** The
+  frame is cast to the smallest unsigned integer holding `bit_depth` bits
+  (`uint8` for an 8-bit stream), so a model that adds before widening wraps
+  in NumPy exactly as in the generated RTL. It used to keep the caller's
+  type (often `uint16` or `int64`), and such a model disagreed with its own
+  hardware; only the twin caught it. A frame with a value outside
+  `bit_depth` bits is now refused instead of being passed through.
+- **A run of the models reads each stage's depth from the trace.**
+  `np2hw.pipeline.run.run_model` tells each block the depth of the word it
+  is given as the composer does, from its driver's traced output
+  (`compose.handed_on`). **`out_depth` is gone from `block`**: it declared
+  a block's output depth beside the trace that already published it, and
+  only the model run read it.
+- **An uncalled leaf generator's build is not evaluated** (a load with
+  `generate=False`): it would be spent making the module, and may read
+  facts only the generated design has.
+- **A primitive's declared default is its instance's value.** An instance
+  carries every parameter its block declares a default for, so the wiring
+  check, the toolchain and the facts read one value; the wiring check used
+  to refuse a width reading a defaulted parameter as never set.
+- **Geometry is read from the trace too, by both.** `compose.handed_on`
+  returns the channels, depth, width and height a block hands on
+  (`compose.Handed`). The composer no longer falls back to the design's
+  geometry for a block that states none -- it refuses -- and a model run
+  builds each block at the frame it is given and refuses a model whose
+  frame comes out other than its trace says. A window's trace is a bound
+  (`compose.keeps_window`): its model may hand on any frame inside it.
+- **The RTL twin ends a frame where the hardware does**, at `last`, and
+  reads its size from the `<output>_frame_width`/`_height` the top
+  publishes, so a chain that keeps a window is proven against its model's
+  window. It used to wait for as many words as went in.
+- **`np2hw.testing.block` checks the framing of the model's frame**, not
+  the frame it drove, so a block that keeps a window is testable.
 
 ### Changed (resources)
 
@@ -531,6 +515,20 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ### Removed
 
+- **`ContextBit`, and `consumes=`, `context=` and `vocabulary=` on
+  `block()`.** A block knows nothing of the pipeline it is placed in: it
+  takes what it reads as inputs, and a design binds them (above). What a
+  block consumes is what its bindings read. The pipeline context is the
+  DESIGN's: a composite names it (`"vocabulary": "package.module:NAME"`,
+  every composite of one design the same one), `assemble()` takes
+  `vocabulary=`, and `Block.bind()` takes it from the design. A design that
+  names none has no pipeline. `even_frame` moves from `Context` to
+  `block()`: the block's own statement that its math tiles 2x2.
+- **A model's `ctx` argument.** A model is `(pixel, p, bit_depth)`: its
+  stream, its inputs and registers, and the stream's depth. **Every model
+  signature changes.**
+
+
 - `generate(framing=, max_width=)`: a run-time size is every core's; the
   end-of-frame framing and `MAX_WIDTH`/`active_width` cores, and the
   `eof_framing`, `dynamic_res` and `active_width` examples, go with them.
@@ -550,6 +548,13 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   `bayerlink_fpga/hdl/bayerlink_in.v` and `bayerlink_fpga.receiver` now,
   beside the protocol it implements, proven there against the reference
   codec. np2hw no longer depends on bayerlink for anything.
+
+### Fixed
+
+- **The SystemRDL map escapes SystemRDL's keywords.** A register, design or
+  instance named one -- a threshold called `level` -- was written bare, and
+  the reference compiler refused the file. It is written as an escaped
+  identifier (`\level`), which names the same component.
 
 ## 0.6.1
 
