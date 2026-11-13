@@ -7,7 +7,13 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
-## Unreleased
+## 0.8.0
+
+Reductions within a pixel's word, `np.maximum`/`np.minimum`, `np.roll`,
+XOR and NumPy's newaxis, in hardware and C. One build that used to succeed
+is refused: hardware takes unsigned sources, and a signed image with
+several lanes, which it built with the lanes unsigned, is refused as a
+signed image with one already was.
 
 ### Added
 
@@ -48,6 +54,12 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   is the value stacked there, so `np.stack([video, ...], axis=-1)[1:, ...,
   0]` reads the stream's frames as any history does; it was refused.
 
+### Changed
+
+- **A reshape keeps the variable of an axis it keeps whole**, as a
+  whole-axis slice does, so `px.reshape(H, W, 2, 2)` still reads the
+  frame's own pixel.
+
 ### Fixed
 
 - **A signed image's lanes are signed.** A multi-lane source took its
@@ -60,12 +72,6 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 - **A model without a plain name compiles to C.** The C function was named
   after the model, so a lambda's `<lambda>` made a file the compiler
   refused; the name is made a C identifier.
-
-### Changed
-
-- **A reshape keeps the variable of an axis it keeps whole**, as a
-  whole-axis slice does, so `px.reshape(H, W, 2, 2)` still reads the
-  frame's own pixel.
 
 ## 0.7.0
 
