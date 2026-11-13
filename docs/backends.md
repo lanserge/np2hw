@@ -112,7 +112,9 @@ A kernel is built for one frame size and builds itself again for another.
 A register window at the output (`img[p.y0:, p.x0:][:p.h, :p.w]`) is
 computed over the whole frame and kept by its registers, as NumPy's crop
 keeps it. A `np.roll` along the frame, which hardware refuses, is a read
-at a wrapped index here. Refused by name: a canvas whose planes do not
+at a wrapped index here, and a signed source, which hardware refuses too,
+is read as its type -- each lane of a multi-lane image signed where the
+image is. Refused by name: a canvas whose planes do not
 tile a lattice, a register window placed by computed values. A block is printed the same way
 through `Block.compile_c` and run in its model's place by `Block.run(...,
 kernel=...)`; `np2hw pipeline run --c` runs a whole chain so. Checked by `tests/test_cemit.py`: every model the core tests compile

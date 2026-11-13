@@ -986,7 +986,9 @@ def _build(fn, image, params, channels, flags, build) -> Kernel:
     t = c.output.type
     out_dtype = _out_dtype(traced.output.type.container, t.lo, t.hi)
     out_c = "uint8_t" if out_dtype == bool else _CNAME[out_dtype]
-    fname = f"np2hw_{getattr(fn, '__name__', 'model')}"
+    # a C identifier: a lambda's `<lambda>` and the like become underscores
+    fname = "np2hw_" + "".join(ch if ch.isalnum() or ch == "_" else "_"
+                               for ch in getattr(fn, "__name__", "model"))
     text, regs, out_shape, src_shape, outer, window = emit(c, fname, out_c)
     key = hashlib.sha1((text + " ".join(flags)).encode()).hexdigest()[:12]
     d = Path(build)

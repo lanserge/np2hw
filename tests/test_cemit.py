@@ -127,6 +127,39 @@ def test_channels_in_and_out(tmp_path):
            bits=16, channels=2)
 
 
+def _lane_sum(w):
+    """A three-tap sum down the rows of each lane, zero-padded."""
+    p = np.pad(w, ((1, 1), (0, 0), (0, 0)), mode="constant").astype(np.int64)
+    n = w.shape[0]
+    return p[:n] + p[1:n + 1] + p[2:n + 2]
+
+
+@pytest.mark.parametrize("fn", [
+    lambda w: w[..., 1].astype(np.int64),
+    lambda w: w.astype(np.int64) * 2,
+    _lane_sum,
+])
+@pytest.mark.parametrize("dtype", [np.int16, np.int32, np.int64])
+def test_a_signed_image_has_signed_lanes(tmp_path, fn, dtype):
+    """Each lane of a signed multi-lane image is of the image's type: an
+    int32 image's -2 is -2, not 2**32 - 2."""
+    a = np.random.default_rng(0).integers(-100, 100, (9, 11, 3)).astype(dtype)
+    bits = np.dtype(dtype).itemsize * 8 * 3
+    k = compile_c(fn, Image2D("img", 11, 9, bits=bits, signed=True),
+                  channels=3, build=tmp_path)
+    want = fn(a)
+    got = k(a)
+    assert got.dtype == want.dtype and np.array_equal(got, want)
+
+
+def test_a_signed_image_with_lanes_is_refused_in_hardware():
+    """Hardware takes unsigned sources, one lane or several."""
+    from np2hw import to_ir
+    with pytest.raises(Unsupported, match="a signed source"):
+        to_ir(lambda w: w[..., 0], Image2D("img", 11, 9, bits=48, signed=True),
+              channels=3)
+
+
 @pytest.mark.parametrize("name, params", [
     ("knee", ("KNOTS",)), ("droop", ()), ("wide_table", ()), ("big_table", ()),
     ("gated", ("GAIN", "FLOOR"))])

@@ -1025,8 +1025,9 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
     """Run the model on a traced image; return the graph it built.
 
     With `channels`, the source is (H, W, C): each pixel's word carries C
-    fields, channel 0 in the low bits -- how that axis is laid out at the
-    stream boundary, a fact of the source."""
+    fields of the image's own type, signed where it is signed, channel 0 in
+    the low bits -- how that axis is laid out at the stream boundary, a
+    fact of the source."""
     t = Tracer()
     g = t.g
     # a video's frames are its outermost axis, as they arrive
@@ -1039,7 +1040,9 @@ def trace(fn, image: Image2D, *params, channels: int = 1) -> Traced:
     if channels > 1:
         if bits % channels:
             raise Unsupported(f"a {bits}-bit word in {channels} fields")
-        bits, signed = bits // channels, False
+        # each field is a lane of the image's own type: an int32 image's
+        # lanes are int32, read signed
+        bits = bits // channels
         axes += (g.vars.declare(channels, "channels of the source", "ch"),)
         t.word.add(axes[-1])
     c = image_container(bits, signed)

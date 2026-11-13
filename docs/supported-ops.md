@@ -31,7 +31,7 @@ and its exact range, so the hardware wraps exactly where NumPy does
 | `.reshape(...)`, `np.reshape` | access through split and merged indexes; nothing moves |
 | `np.pad(x, w, mode="edge" \| "constant")` | any value; zero only for `"constant"` |
 | `np.where(cond, a, b)` | a condition the model computes, or a register; a Python bool picks at trace time |
-| `np.stack([...], axis=-1)` | channels of one word -- each unsigned |
+| `np.stack([...], axis=-1)` | channels of one word -- each unsigned, in hardware |
 | `coords(img)`, `make_coords(img, rows, cols)` | the input's, or a declared output's, position as values |
 | `np.add`, `np.subtract`, `np.multiply`, comparisons, `np.bitwise_and/or`, `np.absolute` | as their operators |
 | `np.roll(x, shift, axis)` | constant shifts, named axes: on a word's axis the lanes in another order, wiring; along the frame a read that wraps, which the C backend takes and hardware refuses |
@@ -83,7 +83,8 @@ it; a frame arriving before that is done waits, as for any core not ready.
 - a window over a value that can be negative -- offset it first;
 - `//` and `%` by a constant that is not a power of two, and a shift by a
   register (the C backend takes the first);
-- a source declared signed;
+- a source declared signed, in hardware -- the C backend takes one, each
+  lane of a multi-lane image of the image's own type;
 - folds side by side (`np.stack` of accumulators) where one can be
   negative -- a word's channels are unsigned; keep that fold an output
   of its own, where it may be signed, or offset it first;

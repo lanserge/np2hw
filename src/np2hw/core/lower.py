@@ -319,10 +319,10 @@ def rewrite(c: Canonical, dev=None):
             if k == "model.table":
                 return None                         # only its reads are lowered
             if n is src.node:
-                if chan:
-                    return None                     # only fields are read
                 if img.signed:
                     raise Unsupported("a signed source")
+                if chan:
+                    return None                     # only fields are read
                 if tsrc is not None:
                     # the video as a value is its live frame; otherwise it
                     # is only what its reads read, each lowered on its own

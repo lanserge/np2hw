@@ -48,6 +48,19 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   is the value stacked there, so `np.stack([video, ...], axis=-1)[1:, ...,
   0]` reads the stream's frames as any history does; it was refused.
 
+### Fixed
+
+- **A signed image's lanes are signed.** A multi-lane source took its
+  lanes as unsigned whatever the image declared, so in C an `int32`
+  image's -2 read as `2**32 - 2` (`int64` lanes came out right only
+  because the wrap back hid it). Each lane is now of the image's own type;
+  hardware, which takes unsigned sources, refuses a signed one with lanes
+  as it did one without, where it used to build the lanes unsigned.
+
+- **A model without a plain name compiles to C.** The C function was named
+  after the model, so a lambda's `<lambda>` made a file the compiler
+  refused; the name is made a C identifier.
+
 ### Changed
 
 - **A reshape keeps the variable of an axis it keeps whole**, as a
