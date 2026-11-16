@@ -100,7 +100,9 @@ an output read through a C-order reshape is the value under it, written in
 its own loops -- the same memory, without the reshape's index math; each
 statement sits in the outermost loop it depends on; along the innermost
 loop, the positions no pad read can leave run with no clamps, between two
-edge loops. Every statement is typed by the narrowest integer holding its
+edge loops, and the loop is cut where a quotient of its variable by a
+constant changes -- a roll's wrap -- so each segment reads along memory
+(a quasi-cyclic min-sum iteration at Z = 384: 0.85 ms to 0.2 ms). Every statement is typed by the narrowest integer holding its
 exact range, its operands converted first, so C's promotions never change a
 value -- except a sum, difference, product or negation wider than 64 bits,
 which NumPy wraps in its 64-bit container: that one is computed modulo

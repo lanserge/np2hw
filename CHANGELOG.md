@@ -9,6 +9,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
 
 ## Unreleased
 
+### Changed
+
+- **The C backend cuts the innermost loop where a quotient changes.** A
+  `%` or `//` of the loop's variable by a constant -- a roll's wrap -- is a
+  constant within each segment, so its index is affine and its reads run
+  along memory; a loop that would need more than 64 segments keeps its
+  general body. A quasi-cyclic min-sum iteration at Z = 384 runs in 0.2 ms
+  where it took 0.85.
+
 ### Fixed
 
 - **Two reshapes sharing an axis.** Where broadcasting paired the axes of

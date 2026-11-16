@@ -152,5 +152,43 @@ def test_a_min_sum_iteration_in_c(tmp_path):
     [source] = tmp_path.glob("*.c")
     text = source.read_text()
     loops = [l for l in text.splitlines() if "for (int64_t" in l]
-    assert any(f"< {Z}; ++" in l for l in loops), loops
     assert not any(f"< {NB * Z}; ++" in l for l in loops), loops
+    # and the rolls are cut where they wrap: no quotient by Z is left, each
+    # segment's reads running along memory
+    assert f"/ {Z})" not in text and f"% {Z}" not in text
+
+
+def many_rolls(img):
+    """Rolls by several shifts, both ways, along both axes, summed."""
+    x = img.astype(np.int16)
+    return (np.roll(x, 3, axis=1) - np.roll(x, -7, axis=1)
+            + np.roll(x, (2, -1), axis=(0, 1)) + np.roll(x, 39, axis=1))
+
+
+def too_many_wraps(img):
+    """A remainder by 5 along a row wraps every fifth pixel: too many cuts,
+    so the loop keeps its general body."""
+    from np2hw import coords
+    _, col = coords(img)
+    return img.astype(np.int16) + col % 5 - (col // 5 & 1)
+
+
+def quotient_per_segment(img):
+    """A quotient constant within each segment, and arithmetic on that
+    constant alone: a value of its segment, not shared between them."""
+    from np2hw import coords
+    _, col = coords(img)
+    return img.astype(np.int16) + (col // 160 & 1) + (col // 160) * 3
+
+
+@needs_cc
+@pytest.mark.parametrize("fn", [many_rolls, too_many_wraps,
+                                quotient_per_segment])
+def test_a_loop_cut_where_it_wraps(tmp_path, fn):
+    k = compile_c(fn, Image2D("img", 640, 9, bits=8), build=tmp_path)
+    for seed in range(3):
+        img = np.random.default_rng(seed).integers(0, 256, (9, 640)).astype(
+            np.uint8)
+        want = fn(img)
+        got = k(img)
+        assert got.dtype == want.dtype and np.array_equal(got, want)

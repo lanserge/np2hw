@@ -31,6 +31,9 @@ Speed comes from the loop's shape, not from intrinsics:
 - along the innermost loop, positions where no pad read can leave the
   padded buffer's interior run in a loop of their own with no clamps and no
   tests, between two short edge loops that keep them;
+- the innermost loop is cut where a quotient of its variable by a constant
+  changes -- a roll's wrap, `i // d`, `i % d` -- so within each segment the
+  quotient is a constant and every index affine, its reads along memory;
 - the caller hands a range of the outermost loop, so threads take bands.
 
 The function is plain C11 with fixed-width types and caller-owned buffers:
@@ -66,6 +69,8 @@ from .trace import Unsupported, trace
 
 #: an output axis this short is unrolled when a longer one can be the loop
 UNROLL_MAX = 16
+#: the most segments an innermost loop is cut into where quotients change
+SEGMENTS_MAX = 64
 
 _CTYPES = [(np.int8, "int8_t"), (np.uint8, "uint8_t"), (np.int16, "int16_t"),
            (np.uint16, "uint16_t"), (np.int32, "int32_t"),
@@ -168,7 +173,12 @@ class _Nest:
     on. Along the innermost loop there are two bodies -- the EDGE body,
     every read kept inside its buffer, and the INTERIOR body, where reads
     the interior keeps inside are left alone -- and the statements that
-    depend on the innermost variable are each body's own."""
+    depend on the innermost variable are each body's own.
+
+    A loop cut into SEGMENTS has a body for each: within one, every
+    quotient of the innermost variable by a constant -- a `%` or `//` of
+    `c * i + b`, a roll's wrap -- is a constant, so its index is affine and
+    its reads run along memory."""
 
     def __init__(self, loops: list):
         self.loops = loops                       # loop variables, outer first
@@ -176,12 +186,16 @@ class _Nest:
         self.inner = loops[-1] if loops else None
         self.top: list[str] = []
         self.at: list[list[str]] = [[] for _ in loops]
-        self.bodies = {"edge": [], "interior": []}
+        self.bodies: dict = {"edge": [], "interior": []}
         self.mode = "edge"
         self.shared: dict = {}
-        self.own = {"edge": {}, "interior": {}}
+        self.own: dict = {"edge": {}, "interior": {}}
         self.interior = None                    # [xa, xb) once known
+        self.in_interior = False                # the body being made is
         self.bounds: list = []                  # (coef, const, n) per read
+        self.wraps: dict = {}                   # quotients: key -> (c, b, d)
+        self.seg = None                         # [s0, s1) being made
+        self.segments = None                    # [(s0, s1, mode)] once cut
 
     def place(self, deps: frozenset, line: str):
         if not deps:
@@ -189,17 +203,21 @@ class _Nest:
             return
         lvl = max(self.level[d] for d in deps)
         if lvl == len(self.loops) - 1:
-            self.bodies[self.mode].append(line)
+            self.bodies.setdefault(self.mode, []).append(line)
         else:
             self.at[lvl].append(line)
 
     def get(self, key):
         hit = self.shared.get(key)
-        return hit if hit is not None else self.own[self.mode].get(key)
+        return hit if hit is not None else \
+            self.own.setdefault(self.mode, {}).get(key)
 
     def put(self, key, sym: Sym):
-        if self.inner in sym.deps:
-            self.own[self.mode][key] = sym
+        # a value made for one segment is that segment's even where it no
+        # longer depends on the innermost variable: a quotient constant
+        # there may be another constant in the next
+        if self.inner in sym.deps or self.seg is not None:
+            self.own.setdefault(self.mode, {})[key] = sym
         else:
             self.shared[key] = sym
 
@@ -432,7 +450,7 @@ class _Printer:
                     and q.terms[0][0] == nest.inner and q.terms[0][1] > 0:
                 if nest.mode == "edge":
                     nest.bounds.append((q.terms[0][1], q.const, n))
-                elif nest.interior is not None:
+                elif nest.in_interior:
                     coords.append(q)             # the interior keeps it in
                     continue
             c = q.c(self.names)
@@ -459,6 +477,28 @@ class _Printer:
         deps = got.deps.union(*(s.deps for s in inside))
         return self.stmt(nest, own, f"({cond}) ? ({own}){got.c(self.names)} "
                                     f": ({own})0", deps, t.lo, t.hi)
+
+    def segmented(self, nest: _Nest, k: str, t, a: Sym, d: int):
+        """`a // d` or `a % d` where `a` is `c * i + b` in the innermost
+        variable: recorded where its quotient changes, and within a segment
+        where it does not, that constant -- the remainder `a - q * d`,
+        affine. None where the general expression is printed."""
+        if nest.inner is None or not a.affine or len(a.terms) != 1 \
+                or a.terms[0][0] != nest.inner or a.terms[0][1] <= 0:
+            return None
+        c, b = a.terms[0][1], a.const
+        key = (c, b, d)
+        if nest.seg is None:
+            nest.wraps[key] = key
+            return None
+        s0, s1 = nest.seg
+        q = (c * s0 + b) // d
+        if q != (c * (s1 - 1) + b) // d:
+            nest.wraps[key] = key               # cut where it changes too
+            return None
+        if k == "model.floordiv":
+            return _literal(q)
+        return self.combine(nest, [(a, 1)], -q * d, t.lo, t.hi)
 
     # -- arithmetic ------------------------------------------------------------ #
 
@@ -521,6 +561,9 @@ class _Printer:
             if d <= 0:
                 raise Unsupported("a division by a constant that is not "
                                   "positive")
+            got = self.segmented(nest, k, t, vals[0], d)
+            if got is not None:
+                return got
             w = self.span(*res, *vals)
             a = self.ref(vals[0], w)
             if vals[0].lo >= 0:
@@ -653,6 +696,7 @@ class _Printer:
             if nest.bounds and xa < xb:
                 nest.interior = (xa, xb)
                 nest.mode = "interior"
+                nest.in_interior = True
                 body(nest)
         size = entries * lanes
         pre = [f"{acc_t} acc[{size}];",
@@ -742,9 +786,47 @@ class _Printer:
             if nest.bounds and xa < xb:
                 nest.interior = (xa, xb)
                 nest.mode = "interior"
+                nest.in_interior = True
                 body(nest)
+            if nest.wraps:
+                self.segment(nest, body, n_in)
         text = self.assemble(nest, fname, out_ctype, src_shape)
         return text, out_shape, src_shape, window
+
+    def segment(self, nest: _Nest, body, n: int, rounds: int = 3):
+        """Cut the innermost loop where a quotient changes -- and at the pad
+        interior's bounds -- and make each segment's body. A quotient that
+        becomes affine only inside a segment adds its own cuts, up to
+        `rounds`; a loop that would need more than SEGMENTS_MAX segments
+        keeps its general body."""
+        cuts = {0, n}
+        if nest.interior is not None:
+            cuts |= set(nest.interior)
+        seen: set = set()
+        for r in range(rounds):
+            new = [w for w in nest.wraps if w not in seen]
+            if r and not new:
+                break
+            for c, b, d in new:
+                seen.add((c, b, d))
+                first, last = b // d, (c * (n - 1) + b) // d
+                for m in range(first + 1, last + 1):
+                    cuts.add(-((b - m * d) // c))        # ceil((m*d - b)/c)
+            if len(cuts) - 1 > SEGMENTS_MAX:
+                nest.seg = None
+                return
+            edges = sorted(cuts)
+            segs = []
+            for j, (s0, s1) in enumerate(zip(edges, edges[1:])):
+                nest.mode = f"s{r}_{j}"
+                nest.seg = (s0, s1)
+                nest.in_interior = nest.interior is not None and \
+                    nest.interior[0] <= s0 and s1 <= nest.interior[1]
+                body(nest)
+                segs.append((s0, s1, nest.mode))
+            nest.segments = segs
+        nest.seg = None
+        nest.in_interior = False
 
     def _unreshaped(self, output: Value) -> Value:
         """The value an output reads through C-order reshapes -- an access
@@ -792,6 +874,16 @@ class _Printer:
             lo_, hi_ = ("lo", "hi") if len(loops) == 1 and not whole \
                 else ("0", str(n))
             edge = [pad + ind + s for s in nest.bodies["edge"]]
+            clip_ = (lambda e: f"(({e}) < lo ? lo : ({e}) > hi ? hi : ({e}))") \
+                if len(loops) == 1 and not whole else (lambda e: e)
+            if nest.segments:
+                out = []
+                for s0, s1, mode in nest.segments:
+                    body_ = [pad + ind + s for s in nest.bodies.get(mode, [])]
+                    out += [f"{pad}for (int64_t {name} = {clip_(str(s0))}; "
+                            f"{name} < {clip_(str(s1))}; ++{name}) {{",
+                            *body_, f"{pad}}}"]
+                return out
             if nest.interior is None:
                 return [f"{pad}for (int64_t {name} = {lo_}; {name} < {hi_}; "
                         f"++{name}) {{", *edge, f"{pad}}}"]
