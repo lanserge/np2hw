@@ -7,6 +7,15 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
+## Unreleased
+
+### Fixed
+
+- **Two reshapes sharing an axis.** Where broadcasting paired the axes of
+  two reshapes, the later one's index was put in another order than its
+  layout, and canonicalising raised a `GraphError` placing it back; it now
+  keeps the index as written.
+
 ## 0.8.0
 
 Reductions within a pixel's word, `np.maximum`/`np.minimum`, `np.roll`,

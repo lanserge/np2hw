@@ -98,6 +98,11 @@ class _Rebuild:
         if {x for x in want if x} != {find(x) for x in c.type.axes if x}:
             return v
         have = tuple(find(x) if x else None for x in c.type.axes)
+        if [x for x in have if x] != [x for x in want if x]:
+            # the canonical form lists its variables in another order -- one
+            # unified with a variable declared earlier -- and an expand only
+            # places axes, it does not reorder them: the index as written
+            return v
         if have != want:                   # keep the index's layout: (H, 1)
             c = self.g.op("model.expand", c, axes=want)
         return c

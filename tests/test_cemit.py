@@ -152,6 +152,18 @@ def test_a_signed_image_has_signed_lanes(tmp_path, fn, dtype):
     assert got.dtype == want.dtype and np.array_equal(got, want)
 
 
+def two_reshapes(y):
+    """Two reshapes whose last axes broadcasting pairs: the second's
+    variable is unified with the first's, declared before its own others."""
+    a = y[:, :8].reshape(y.shape[0], 2, 4)
+    b = y[:, 8:].reshape(y.shape[0], 3, 4)
+    return (a[:, 1] + b[:, 2]).astype(np.uint16)
+
+
+def test_reshapes_sharing_an_axis(tmp_path):
+    _check(tmp_path, two_reshapes, width=20, height=5)
+
+
 def test_a_signed_image_with_lanes_is_refused_in_hardware():
     """Hardware takes unsigned sources, one lane or several."""
     from np2hw import to_ir
