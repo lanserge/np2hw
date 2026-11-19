@@ -15,8 +15,15 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   `%` or `//` of the loop's variable by a constant -- a roll's wrap -- is a
   constant within each segment, so its index is affine and its reads run
   along memory; a loop that would need more than 64 segments keeps its
-  general body. A quasi-cyclic min-sum iteration at Z = 384 runs in 0.2 ms
-  where it took 0.85.
+  general body, as does one whose segments' bodies would add more than
+  65 536 lines to the function. A quasi-cyclic min-sum iteration at
+  Z = 384 runs in 0.2 ms where it took 0.85.
+- **The C backend gives each lane of a stack its own loop nest.** A loop
+  over an axis that selects among a stack's lanes -- an `np.stack` of more
+  than 16 blocks -- computed every lane at every position and kept one;
+  it is now split into one nest per lane with the axis fixed, so each
+  position computes only its own. A min-sum iteration over 144 blocks of
+  384 runs in 0.25 s where it took 44.
 
 ### Fixed
 

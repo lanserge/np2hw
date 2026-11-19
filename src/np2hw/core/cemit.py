@@ -31,6 +31,9 @@ Speed comes from the loop's shape, not from intrinsics:
 - along the innermost loop, positions where no pad read can leave the
   padded buffer's interior run in a loop of their own with no clamps and no
   tests, between two short edge loops that keep them;
+- a loop over an axis that selects among the lanes of a stack is split
+  into one nest per lane, with the axis fixed: each nest computes only its
+  own lane, where one loop would compute every lane and pick one;
 - the innermost loop is cut where a quotient of its variable by a constant
   changes -- a roll's wrap, `i // d`, `i % d` -- so within each segment the
   quotient is a constant and every index affine, its reads along memory;
@@ -71,6 +74,11 @@ from .trace import Unsupported, trace
 UNROLL_MAX = 16
 #: the most segments an innermost loop is cut into where quotients change
 SEGMENTS_MAX = 64
+#: the most nests a loop is split into, one per lane of the stack it selects
+LANES_MAX = 1024
+#: the most lines the segments' bodies may add to one function, shared
+#: between its nests: past it a loop keeps its general body
+SEGMENT_LINES_MAX = 1 << 16
 
 _CTYPES = [(np.int8, "int8_t"), (np.uint8, "uint8_t"), (np.int16, "int16_t"),
            (np.uint16, "uint16_t"), (np.int32, "int32_t"),
@@ -718,7 +726,7 @@ class _Printer:
         out_shape = [self.count(self.find(a)) if a else 1
                      for a in c.output.type.axes]
         src_shape = [self.count(a) for a in c.source.type.axes]
-        text = self.assemble(nest, fname, out_ctype, src_shape, whole=True,
+        text = self.assemble([nest], fname, out_ctype, src_shape, whole=True,
                              pre=pre, post=post)
         return text, out_shape, src_shape, ()
 
@@ -749,13 +757,16 @@ class _Printer:
         long_ = [a for a in real if self.count(a) > UNROLL_MAX]
         loops = [a for a in real if not long_ or self.count(a) > UNROLL_MAX]
         unrolled = [a for a in real if a not in loops]
+        lane = self.lane_axis(output, loops)
+        if lane is not None:
+            loops.remove(lane)
         for i, v in enumerate(loops):
             self.names[v] = f"i{i}"
         buf_shape = [self.count(a) if a else 1 for a in out_axes]
         src_shape = [self.count(a) for a in c.source.type.axes]
 
-        def body(nest: _Nest):
-            combos = [{}]
+        def body(nest: _Nest, fixed: dict):
+            combos = [dict(fixed)]
             for u in unrolled:
                 combos = [dict(e, **{u: _literal(i)}) for e in combos
                           for i in range(self.count(u))]
@@ -775,30 +786,56 @@ class _Printer:
                 else:
                     nest.top.append(line)
 
-        nest = _Nest(loops)
-        body(nest)
-        if loops:
-            n_in = self.count(nest.inner)
-            xa, xb = 0, n_in
-            for coef, const, n in nest.bounds:
-                xa = max(xa, -(const // coef))           # ceil(-const / coef)
-                xb = min(xb, -((const - n) // coef))     # ceil((n-const)/coef)
-            if nest.bounds and xa < xb:
-                nest.interior = (xa, xb)
-                nest.mode = "interior"
-                nest.in_interior = True
-                body(nest)
-            if nest.wraps:
-                self.segment(nest, body, n_in)
-        text = self.assemble(nest, fname, out_ctype, src_shape)
+        fixes = [{}] if lane is None else \
+            [{lane: _literal(k)} for k in range(self.count(lane))]
+        nests = []
+        for fixed in fixes:
+            nest = _Nest(loops)
+            make = (lambda nest, fixed=fixed: body(nest, fixed))
+            make(nest)
+            if loops:
+                n_in = self.count(nest.inner)
+                xa, xb = 0, n_in
+                for coef, const, n in nest.bounds:
+                    xa = max(xa, -(const // coef))       # ceil(-const / coef)
+                    xb = min(xb, -((const - n) // coef))  # ceil((n-const)/coef)
+                if nest.bounds and xa < xb:
+                    nest.interior = (xa, xb)
+                    nest.mode = "interior"
+                    nest.in_interior = True
+                    make(nest)
+                if nest.wraps:
+                    self.segment(nest, make, n_in,
+                                 SEGMENT_LINES_MAX // len(fixes))
+            nests.append(nest)
+        text = self.assemble(nests, fname, out_ctype, src_shape)
         return text, out_shape, src_shape, window
 
-    def segment(self, nest: _Nest, body, n: int, rounds: int = 3):
+    def lane_axis(self, output: Value, loops: list):
+        """The loop axis to split into one nest per position: one that
+        selects among the lanes of a stack the output reads. Looped over,
+        every position would compute every lane and keep one; fixed, a
+        nest computes only its lane -- the code is the lanes' code either
+        way. None where no loop selects a lane."""
+        stacks = {}
+        for n in walk([output]):
+            if n.kind == "model.stack":
+                v = self.find(n.attr("var"))
+                stacks[v] = stacks.get(v, 0) + 1
+        for v in loops:
+            if v in stacks and self.count(v) <= LANES_MAX:
+                return v
+        return None
+
+    def segment(self, nest: _Nest, body, n: int, budget: int,
+                rounds: int = 3):
         """Cut the innermost loop where a quotient changes -- and at the pad
         interior's bounds -- and make each segment's body. A quotient that
         becomes affine only inside a segment adds its own cuts, up to
-        `rounds`; a loop that would need more than SEGMENTS_MAX segments
+        `rounds`; a loop that would need more than SEGMENTS_MAX segments,
+        or whose segments' bodies would come to more than `budget` lines,
         keeps its general body."""
+        size = len(nest.bodies["edge"])
         cuts = {0, n}
         if nest.interior is not None:
             cuts |= set(nest.interior)
@@ -812,7 +849,8 @@ class _Printer:
                 first, last = b // d, (c * (n - 1) + b) // d
                 for m in range(first + 1, last + 1):
                     cuts.add(-((b - m * d) // c))        # ceil((m*d - b)/c)
-            if len(cuts) - 1 > SEGMENTS_MAX:
+            if len(cuts) - 1 > SEGMENTS_MAX or \
+                    (len(cuts) - 1) * size > budget:
                 nest.seg = None
                 return
             edges = sorted(cuts)
@@ -856,14 +894,39 @@ class _Printer:
             output = buf
         return output
 
-    def assemble(self, nest: _Nest, fname, out_ctype, src_shape,
+    def assemble(self, nests: list, fname, out_ctype, src_shape,
                  whole: bool = False, pre=(), post=()) -> str:
-        """The function: `whole` runs every loop over its whole count --
-        a fold, which no thread shares -- with `pre` before the loops and
-        `post` after them."""
+        """The function: the nests one after another; `whole` runs every
+        loop over its whole count -- a fold, which no thread shares -- with
+        `pre` before the loops and `post` after them."""
         src_t = ctype_for(self.c.source.type.lo, self.c.source.type.hi)[1]
         ind = "    "
-        lines = [f"{ind}{s}" for s in [*pre, *nest.top]]
+        lines = [f"{ind}{s}" for s in pre]
+        for nest in nests:
+            lines += self.nest_lines(nest, whole)
+        if not nests[0].loops or whole:
+            lines = [f"{ind}if (lo > 0) return;"] + lines
+        lines += [f"{ind}{s}" for s in post]
+        body = "\n".join(lines)
+        decls = "\n".join(self.decls)
+        return f"""/* generated by np2hw (C backend); do not edit */
+#include <stdbool.h>
+#include <stdint.h>
+
+{decls}
+
+void {fname}(const {src_t}* restrict src, {out_ctype}* restrict dst,
+        const int64_t* restrict regs, int64_t lo, int64_t hi) {{
+    (void)regs; (void)lo; (void)hi; (void)src;
+{body}
+}}
+"""
+
+    def nest_lines(self, nest: _Nest, whole: bool) -> list:
+        """One nest's lines: its statements before any loop, then its loops,
+        the outermost over [lo, hi) unless `whole`."""
+        ind = "    "
+        lines = [f"{ind}{s}" for s in nest.top]
         loops = nest.loops
 
         def inner_loops(depth: int) -> list:
@@ -912,25 +975,7 @@ class _Printer:
                 close.append(f"{pad}}}")
             lines += inner_loops(len(loops) - 2 + 0)
             lines += reversed(close)
-        else:
-            lines = [f"{ind}if (lo > 0) return;"] + lines
-        if whole:
-            lines = [f"{ind}if (lo > 0) return;"] + lines
-        lines += [f"{ind}{s}" for s in post]
-        body = "\n".join(lines)
-        decls = "\n".join(self.decls)
-        return f"""/* generated by np2hw (C backend); do not edit */
-#include <stdbool.h>
-#include <stdint.h>
-
-{decls}
-
-void {fname}(const {src_t}* restrict src, {out_ctype}* restrict dst,
-        const int64_t* restrict regs, int64_t lo, int64_t hi) {{
-    (void)regs; (void)lo; (void)hi; (void)src;
-{body}
-}}
-"""
+        return lines
 
 
 _FOLD = {

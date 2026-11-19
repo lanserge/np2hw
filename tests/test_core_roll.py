@@ -107,15 +107,15 @@ BASE = [[(0, 1), (1, 5), (3, 2), (4, 7)],
         [(0, 6), (2, 2), (3, 5), (5, 1)]]
 
 
-def min_sum(x):
+def min_sum(x, base=BASE, nb=NB):
     """Every check's message to every variable, from the channel LLRs,
     summed into the posteriors: for each row block its variables rotated
     into check order, the smallest and next smallest magnitude and the sign
     parity, and each message rotated back."""
     llr = x.astype(np.int16) - 128
-    blocks = llr.reshape(llr.shape[0], NB, Z)
-    into = [[] for _ in range(NB)]
-    for row in BASE:
+    blocks = llr.reshape(llr.shape[0], nb, Z)
+    into = [[] for _ in range(nb)]
+    for row in base:
         v = np.stack([np.roll(blocks[:, c], -s, axis=-1) for c, s in row],
                      axis=-1)
         a = np.abs(v)
@@ -130,12 +130,12 @@ def min_sum(x):
             into[c].append(np.roll(np.where(negative == 1, -mag, mag), s,
                                    axis=-1))
     post = []
-    for c in range(NB):
+    for c in range(nb):
         p = blocks[:, c]
         for m in into[c]:
             p = p + m
         post.append(p)
-    return np.stack(post, axis=1).reshape(llr.shape[0], NB * Z)
+    return np.stack(post, axis=1).reshape(llr.shape[0], nb * Z)
 
 
 @needs_cc
@@ -192,3 +192,41 @@ def test_a_loop_cut_where_it_wraps(tmp_path, fn):
         want = fn(img)
         got = k(img)
         assert got.dtype == want.dtype and np.array_equal(got, want)
+
+
+#: more column blocks than an axis is unrolled for: the blocks are a loop
+WIDE = 20
+WIDE_BASE = [[(c, (7 * c + 3 * r) % Z) for c in range(WIDE) if (c + r) % 3]
+             for r in range(3)]
+
+
+def wide_min_sum(x):
+    return min_sum(x, WIDE_BASE, WIDE)
+
+
+@needs_cc
+@pytest.mark.parametrize("segments", [True, False])
+def test_a_loop_over_stacked_blocks_is_one_nest_a_block(tmp_path, monkeypatch,
+                                                        segments):
+    import re
+    from np2hw.core import cemit
+    # the blocks' bodies cut into segments come to about 100 000 lines
+    monkeypatch.setattr(cemit, "SEGMENT_LINES_MAX",
+                        1 << 20 if segments else 1 << 16)
+    k = compile_c(wide_min_sum, Image2D("llr", WIDE * Z, B, bits=8),
+                  build=tmp_path)
+    for seed in range(3):
+        x = np.random.default_rng(seed).integers(
+            0, 256, (B, WIDE * Z)).astype(np.uint8)
+        want = wide_min_sum(x)
+        got = k(x)
+        assert got.dtype == want.dtype and np.array_equal(got, want)
+    [source] = tmp_path.glob("*.c")
+    text = source.read_text()
+    # each block computes its own posterior: no choice among the blocks
+    # by a loop variable, and a loop over the batch for each block
+    assert not re.search(r"\(\(int64_t\)i\d+\) == \d+ \?", text)
+    outer = [l for l in text.splitlines() if "for (int64_t i0 = lo" in l]
+    assert len(outer) == WIDE, len(outer)
+    # cut where the rolls wrap, unless that is over the line budget
+    assert (f"% {Z}" in text or f"/ {Z})" in text) != segments

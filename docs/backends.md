@@ -97,12 +97,15 @@ source or a table is a load, a read of a pad its edge rule, a read of a
 computed value that value computed at the index. Loops are the output's
 variables (an axis of up to 16 positions -- channels -- is unrolled), and
 an output read through a C-order reshape is the value under it, written in
-its own loops -- the same memory, without the reshape's index math; each
+its own loops -- the same memory, without the reshape's index math; a loop
+over an axis that selects among a stack's lanes is split into one nest per
+lane, the axis fixed, so each position computes only its lane (a min-sum
+iteration over 144 blocks of 384: 44 s to 0.25 s); each
 statement sits in the outermost loop it depends on; along the innermost
 loop, the positions no pad read can leave run with no clamps, between two
 edge loops, and the loop is cut where a quotient of its variable by a
-constant changes -- a roll's wrap -- so each segment reads along memory
-(a quasi-cyclic min-sum iteration at Z = 384: 0.85 ms to 0.2 ms). Every statement is typed by the narrowest integer holding its
+constant changes -- a roll's wrap -- so each segment reads along memory,
+where the segments' bodies stay within 65 536 lines (a quasi-cyclic min-sum iteration at Z = 384: 0.85 ms to 0.2 ms). Every statement is typed by the narrowest integer holding its
 exact range, its operands converted first, so C's promotions never change a
 value -- except a sum, difference, product or negation wider than 64 bits,
 which NumPy wraps in its 64-bit container: that one is computed modulo
