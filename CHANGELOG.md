@@ -7,7 +7,13 @@ moves silently is how a downstream integrator reads the wrong bits.
 
 Pre-1.0, so the API can still move. Anything that moves is named here.
 
-## Unreleased
+## 0.8.1
+
+The C backend computes a rolled result once instead of at every read of
+it: a quasi-cyclic min-sum iteration runs some 60 times faster, and
+faster than NumPy. The generated
+Verilog does not change; nor does the C of a model with no roll of a
+computed value.
 
 ### Changed
 
