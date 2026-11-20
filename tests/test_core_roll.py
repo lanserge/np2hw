@@ -210,9 +210,10 @@ def test_a_loop_over_stacked_blocks_is_one_nest_a_block(tmp_path, monkeypatch,
                                                         segments):
     import re
     from np2hw.core import cemit
-    # the blocks' bodies cut into segments come to about 100 000 lines
-    monkeypatch.setattr(cemit, "SEGMENT_LINES_MAX",
-                        1 << 20 if segments else 1 << 16)
+    # within the default budget the loops are cut where they wrap; with
+    # none, each keeps its general body
+    if not segments:
+        monkeypatch.setattr(cemit, "SEGMENT_LINES_MAX", 0)
     k = compile_c(wide_min_sum, Image2D("llr", WIDE * Z, B, bits=8),
                   build=tmp_path)
     for seed in range(3):
@@ -221,12 +222,50 @@ def test_a_loop_over_stacked_blocks_is_one_nest_a_block(tmp_path, monkeypatch,
         want = wide_min_sum(x)
         got = k(x)
         assert got.dtype == want.dtype and np.array_equal(got, want)
+        # each thread stores the rows of its own band
+        assert np.array_equal(k(x, threads=5), want)
     [source] = tmp_path.glob("*.c")
     text = source.read_text()
     # each block computes its own posterior: no choice among the blocks
     # by a loop variable, and a loop over the batch for each block
     assert not re.search(r"\(\(int64_t\)i\d+\) == \d+ \?", text)
-    outer = [l for l in text.splitlines() if "for (int64_t i0 = lo" in l]
-    assert len(outer) == WIDE, len(outer)
+    nests = text.split("for (int64_t i0 = lo")[1:]
+    writes = [n for n in nests if "dst[" in n]
+    assert len(writes) == WIDE, len(writes)
+    # each message rotated back is computed once, into its row's store, by
+    # nests before the posteriors -- which read it there, rotated
+    stores = nests[:len(nests) - WIDE]
+    assert stores and not any("dst[" in n for n in stores)
+    assert all(re.search(r"\bt\d+\[", n) for n in writes)
     # cut where the rolls wrap, unless that is over the line budget
     assert (f"% {Z}" in text or f"/ {Z})" in text) != segments
+
+
+@needs_cc
+def test_one_row_stores_whole_values_a_check_row_a_nest(tmp_path):
+    """One codeword a call: the outer loop is a block's positions, the
+    rotations' own axis, so a rotated value is stored whole -- and the
+    messages of a check row, which share its smallest magnitudes, are
+    computed in a nest of their own, the posteriors in nests of theirs."""
+    import re
+    k = compile_c(wide_min_sum, Image2D("llr", WIDE * Z, 1, bits=8),
+                  build=tmp_path)
+    for seed in range(3):
+        x = np.random.default_rng(seed).integers(
+            0, 256, (1, WIDE * Z)).astype(np.uint8)
+        want = wide_min_sum(x)
+        got = k(x)
+        assert got.dtype == want.dtype and np.array_equal(got, want)
+    [source] = tmp_path.glob("*.c")
+    text = source.read_text()
+    # a nest's loops, its segments' among them, write the same stores
+    loops = re.split(r"\n    for \(int64_t i0 = ", text)[1:]
+    stores = []
+    for loop in loops:
+        got = set(re.findall(r"\b(t\d+)\[[^\]]*\] = ", loop))
+        if got and got not in stores:
+            stores.append(got)
+    assert stores, "nothing stored"
+    longest = max(len(row) for row in WIDE_BASE)
+    assert max(len(s) for s in stores) <= longest, [len(s) for s in stores]
+    assert sum(len(s) for s in stores) > longest

@@ -31,6 +31,9 @@ Speed comes from the loop's shape, not from intrinsics:
 - along the innermost loop, positions where no pad read can leave the
   padded buffer's interior run in a loop of their own with no clamps and no
   tests, between two short edge loops that keep them;
+- a computed value read at another position -- a roll of a result -- is
+  stored once a position, and read from there rather than computed again
+  at each read;
 - a loop over an axis that selects among the lanes of a stack is split
   into one nest per lane, with the axis fixed: each nest computes only its
   own lane, where one loop would compute every lane and pick one;
@@ -76,8 +79,11 @@ UNROLL_MAX = 16
 SEGMENTS_MAX = 64
 #: the most nests a loop is split into, one per lane of the stack it selects
 LANES_MAX = 1024
-#: the most lines the segments' bodies may add to one function, shared
-#: between its nests: past it a loop keeps its general body
+#: the fewest operations a value read at another position computes before
+#: it is stored rather than computed again at each read
+STORE_OPS_MIN = 4
+#: the most lines the segments' bodies may add to one function, the
+#: cheapest nests cut first: past it a loop keeps its general body
 SEGMENT_LINES_MAX = 1 << 16
 
 _CTYPES = [(np.int8, "int8_t"), (np.uint8, "uint8_t"), (np.int16, "int16_t"),
@@ -204,6 +210,7 @@ class _Nest:
         self.wraps: dict = {}                   # quotients: key -> (c, b, d)
         self.seg = None                         # [s0, s1) being made
         self.segments = None                    # [(s0, s1, mode)] once cut
+        self.whole = False                      # every loop over its count
 
     def place(self, deps: frozenset, line: str):
         if not deps:
@@ -415,6 +422,18 @@ class _Printer:
             return self.read_pad(nest, buf, idx, env)
         if b.kind in ("model.param", "model.const"):
             return self.val(nest, buf, env)
+        st = getattr(self, "stored", {}).get(id(b))
+        if st is not None:
+            name, _, _, shape, band, axes = st
+            at = {self.find(a): x for a, x in zip(t.axes, idx)}
+            if not band:
+                return self.load(nest, name, t, shape, [at[a] for a in axes])
+            o = at[self.outer]
+            if o.affine and o.terms == ((self.outer, 1),) and o.const == 0:
+                row = Sym((), 0, f"({self.names[self.outer]} - lo)", o.deps,
+                          0, self.count(self.outer) - 1)
+                rest = [at[a] for a in axes[1:]]
+                return self.load(nest, name, t, [1, *shape], [row, *rest])
         # a computed value read at an index is the value computed there
         inner = dict(env)
         for a, s in zip(t.axes, idx):
@@ -695,6 +714,7 @@ class _Printer:
                     nest.top.append(line)
 
         nest = _Nest(frame)
+        nest.names = self.names
         body(nest)
         if frame:
             xa, xb = 0, self.count(nest.inner)
@@ -753,19 +773,78 @@ class _Printer:
         # its own layout, which is the reshape's, without the index math
         output = self._unreshaped(output)
         out_axes = [self.find(a) if a else None for a in output.type.axes]
-        real = [a for a in out_axes if a is not None]
-        long_ = [a for a in real if self.count(a) > UNROLL_MAX]
-        loops = [a for a in real if not long_ or self.count(a) > UNROLL_MAX]
-        unrolled = [a for a in real if a not in loops]
-        lane = self.lane_axis(output, loops)
-        if lane is not None:
-            loops.remove(lane)
-        for i, v in enumerate(loops):
-            self.names[v] = f"i{i}"
         buf_shape = [self.count(a) if a else 1 for a in out_axes]
         src_shape = [self.count(a) for a in c.source.type.axes]
+        loops, _, _ = self.loop_plan(out_axes, [output])
+        outer = loops[0] if loops else None
+        self.outer = outer
+
+        def to_dst(env, names):
+            off = None
+            for a, n in zip(out_axes, buf_shape):
+                term = "0" if a is None else env[a].c(names)
+                off = term if off is None else f"({off}) * {n} + {term}"
+            return f"dst[{off}] = ({out_ctype})"
+
+        # the values the output reads at another position of the same outer
+        # loop's row: each stored for the band of rows a call computes, by
+        # nests before the output's -- computed once, read where it is read
+        groups = self.plan_stores(output, outer)
+        nests, pre, post = [], [], []
+        for band, axes, vals in groups:
+            for v in vals:
+                name, ct, size, _, _, _ = self.stored[id(v.node)]
+                rows = "(size_t)(hi > lo ? hi - lo : 1) * " if band else ""
+                pre.append(f"{ct}* restrict {name} = ({ct}*)malloc("
+                           f"{rows}{size} * sizeof({ct}));")
+                pre.append(f"if (!{name}) abort();")
+                post.append(f"free({name});")
+
+            def into(env, names, j, vals=vals):
+                name, ct, _, shape, band, axes = self.stored[id(vals[j].node)]
+                off = f"(({names[outer]}) - lo)" if band else None
+                for a, n in zip(axes[1:] if band else axes, shape):
+                    term = env[a].c(names)
+                    off = term if off is None else f"({off}) * {n} + {term}"
+                return f"{name}[{off or 0}] = ({ct})"
+            made = self.make_nests(axes, vals, into,
+                                   outer if band else None)
+            for nest in made:
+                nest.whole = not band
+            nests += made
+        nests += self.make_nests(out_axes, [output],
+                                 lambda env, names, j: to_dst(env, names),
+                                 outer)
+        self.cut_all(nests, SEGMENT_LINES_MAX)
+        text = self.assemble(nests, fname, out_ctype, src_shape, pre=pre,
+                             post=post)
+        return text, out_shape, src_shape, window
+
+    def loop_plan(self, axes: list, values: list, outer=None) -> tuple:
+        """(loops, unrolled, lane) over `axes`: an axis of up to UNROLL_MAX
+        positions unrolled when a longer one can be the loop -- `outer`
+        always a loop, and first -- and the loop split into a nest a lane,
+        removed from the loops."""
+        real = [a for a in axes if a is not None]
+        long_ = [a for a in real if self.count(a) > UNROLL_MAX]
+        loops = [a for a in real if not long_ or self.count(a) > UNROLL_MAX
+                 or a == outer]
+        if outer is not None:
+            loops = [outer] + [a for a in loops if a != outer]
+        unrolled = [a for a in real if a not in loops]
+        lane = self.lane_axis(values, [a for a in loops if a != outer])
+        if lane is not None:
+            loops.remove(lane)
+        return loops, unrolled, lane
+
+    def make_nests(self, axes, values, target, outer) -> list:
+        """The nests computing `values` over `axes`, each written by the
+        line `target(env, names, j)` begins: one nest, or one a lane."""
+        loops, unrolled, lane = self.loop_plan(axes, values, outer)
+        names = {v: f"i{i}" for i, v in enumerate(loops)}
 
         def body(nest: _Nest, fixed: dict):
+            self.names = names
             combos = [dict(fixed)]
             for u in unrolled:
                 combos = [dict(e, **{u: _literal(i)}) for e in combos
@@ -774,23 +853,20 @@ class _Printer:
                 env = {v: _affine({v: 1}, 0, 0, self.count(v) - 1)
                        for v in loops}
                 env.update(combo)
-                got = self.val(nest, output, env)
-                off = None
-                for a, n in zip(out_axes, buf_shape):
-                    term = "0" if a is None else env[a].c(self.names)
-                    off = term if off is None else f"({off}) * {n} + {term}"
-                line = (f"dst[{off}] = ({out_ctype})"
-                        f"{got.c(self.names)};")
-                if loops:
-                    nest.bodies[nest.mode].append(line)
-                else:
-                    nest.top.append(line)
+                for j, v in enumerate(values):
+                    got = self.val(nest, v, env)
+                    line = f"{target(env, names, j)}{got.c(names)};"
+                    if loops:
+                        nest.bodies[nest.mode].append(line)
+                    else:
+                        nest.top.append(line)
 
         fixes = [{}] if lane is None else \
             [{lane: _literal(k)} for k in range(self.count(lane))]
         nests = []
         for fixed in fixes:
             nest = _Nest(loops)
+            nest.names = names
             make = (lambda nest, fixed=fixed: body(nest, fixed))
             make(nest)
             if loops:
@@ -805,20 +881,149 @@ class _Printer:
                     nest.in_interior = True
                     make(nest)
                 if nest.wraps:
-                    self.segment(nest, make, n_in,
-                                 SEGMENT_LINES_MAX // len(fixes))
+                    nest.cut = (make, n_in)       # cut later, by `cut_all`
             nests.append(nest)
-        text = self.assemble(nests, fname, out_ctype, src_shape)
-        return text, out_shape, src_shape, window
+        return nests
 
-    def lane_axis(self, output: Value, loops: list):
+    def cut_all(self, nests: list, budget: int):
+        """Cut each nest's innermost loop where it wraps, the cheapest
+        first -- its body's lines times its segments -- while the lines the
+        segments add stay within `budget`, the function's."""
+        def cost(nest):
+            make, n = nest.cut
+            cuts = 1 + sum((c * (n - 1) + b) // d - b // d
+                           for c, b, d in nest.wraps)
+            return len(nest.bodies["edge"]) * cuts
+        for nest in sorted((x for x in nests if getattr(x, "cut", None)),
+                           key=cost):
+            make, n = nest.cut
+            self.names = nest.names
+            self.segment(nest, make, n, budget)
+            if nest.segments:
+                budget -= sum(len(nest.bodies.get(m, []))
+                              for _, _, m in nest.segments)
+
+    def plan_stores(self, output: Value, outer) -> list:
+        """The computed values to store, as nests: [(band, axes, values)] in
+        the order they are computed -- a value after every stored value it
+        reads. Stored: a computed value the output reads through an access
+        -- at another position: a roll, a reorder -- over axes all its own,
+        in a 64-bit container, of at least STORE_OPS_MIN operations; it is
+        computed once a position instead of once a read. Where every read
+        keeps `outer`, the outer loop's variable, as it is, a call stores
+        the BAND of rows it computes; otherwise the value is stored whole.
+
+        Values over the same axes at the same depth share nests, a nest for
+        each cluster of them that share computation -- a check row's
+        messages and the row's smallest magnitudes -- so what they share is
+        computed once, and each nest reads few shifts, cut where they
+        wrap."""
+        self.stored = {}
+        reads: dict = {}                         # id(node) -> [buf, band]
+        for n in walk([output]):
+            if n.kind != "model.access":
+                continue
+            buf, *idx = n.operands
+            b = buf.node
+            if b.kind in _NOT_OPS:
+                continue
+            axes = [self.find(a) if a is not None else None
+                    for a in buf.type.axes]
+            if None in axes or len(idx) != len(axes) \
+                    or len(set(axes)) != len(axes) \
+                    or not _fits64(buf.type.lo, buf.type.hi):
+                continue
+            keeps = outer is not None and outer in axes and (
+                lambda i: i.kind == "model.var"
+                and self.find(i.attr("name")) == outer)(
+                    idx[axes.index(outer)].node)
+            got = reads.setdefault(id(b), [buf, True])
+            got[1] = got[1] and keeps
+        found = [(buf, band) for buf, band in reads.values()
+                 if sum(1 for x in walk([buf]) if x.kind not in _NOT_OPS)
+                 >= STORE_OPS_MIN]
+        if not found:
+            return []
+        ids = {id(v.node) for v, _ in found}
+        by_id = {id(v.node): v for v, _ in found}
+        index = {id(n): n for n in walk([output])}
+        reach = {k: {id(x) for x in walk([v])} for k, v in by_id.items()}
+        level: dict = {}
+
+        def lvl(k):                 # one past the stored values it reads
+            if k not in level:
+                level[k] = 1 + max((lvl(j) for j in reach[k] & ids if j != k),
+                                   default=-1)
+            return level[k]
+
+        # the operations a value computes at its own position: reached
+        # without passing through an access -- what an access reads is
+        # another position's -- and reading data, not index arithmetic
+        data: dict = {}
+
+        def is_data(n) -> bool:
+            if id(n) not in data:
+                data[id(n)] = n.kind in ("model.source", "model.table",
+                                         "model.pad", "model.param") or any(
+                    is_data(o.node) for o in n.operands)
+            return data[id(n)]
+
+        own = {}
+        for k, v in by_id.items():
+            seen: set = set()
+            todo = [v.node]
+            while todo:
+                n = todo.pop()
+                if id(n) in seen or n.kind in _NOT_OPS:
+                    continue
+                seen.add(id(n))
+                todo += [o.node for o in n.operands]
+            own[k] = {x for x in seen if is_data(index[x])}
+
+        groups: dict = {}
+        for v, band in found:
+            axes = [self.find(a) for a in v.type.axes]
+            if band:
+                axes = [outer, *(a for a in axes if a != outer)]
+            groups.setdefault((lvl(id(v.node)), band, tuple(axes)),
+                              []).append(v)
+        out = []
+        for (_, band, axes), vals in sorted(groups.items(),
+                                            key=lambda kv: kv[0][0]):
+            # clusters: values joined where they compute an operation in common
+            parent = list(range(len(vals)))
+
+            def root(i):
+                while parent[i] != i:
+                    parent[i] = parent[parent[i]]
+                    i = parent[i]
+                return i
+            first: dict = {}
+            for i, v in enumerate(vals):
+                for x in own[id(v.node)]:
+                    j = first.setdefault(x, i)
+                    parent[root(i)] = root(j)
+            clusters: dict = {}
+            for i, v in enumerate(vals):
+                clusters.setdefault(root(i), []).append(v)
+            shape = [self.count(a) for a in (axes[1:] if band else axes)]
+            size = int(np.prod(shape)) if shape else 1
+            for vs in clusters.values():
+                for v in vs:
+                    ct = ctype_for(v.type.lo, v.type.hi)[1]
+                    self.stored[id(v.node)] = (f"t{len(self.stored)}", ct,
+                                               size, shape, band, list(axes))
+                out.append((band, list(axes), vs))
+        return out
+
+    def lane_axis(self, values: list, loops: list):
         """The loop axis to split into one nest per position: one that
         selects among the lanes of a stack the output reads. Looped over,
         every position would compute every lane and keep one; fixed, a
         nest computes only its lane -- the code is the lanes' code either
         way. None where no loop selects a lane."""
         stacks = {}
-        for n in walk([output]):
+        for n in walk(values):
             if n.kind == "model.stack":
                 v = self.find(n.attr("var"))
                 stacks[v] = stacks.get(v, 0) + 1
@@ -903,8 +1108,8 @@ class _Printer:
         ind = "    "
         lines = [f"{ind}{s}" for s in pre]
         for nest in nests:
-            lines += self.nest_lines(nest, whole)
-        if not nests[0].loops or whole:
+            lines += self.nest_lines(nest, whole or nest.whole)
+        if not nests[-1].loops or whole:
             lines = [f"{ind}if (lo > 0) return;"] + lines
         lines += [f"{ind}{s}" for s in post]
         body = "\n".join(lines)
@@ -912,6 +1117,7 @@ class _Printer:
         return f"""/* generated by np2hw (C backend); do not edit */
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 {decls}
 
@@ -932,7 +1138,7 @@ void {fname}(const {src_t}* restrict src, {out_ctype}* restrict dst,
         def inner_loops(depth: int) -> list:
             pad = ind * (depth + 2)
             v = loops[-1]
-            name = self.names[v]
+            name = nest.names[v]
             n = self.count(v)
             lo_, hi_ = ("lo", "hi") if len(loops) == 1 and not whole \
                 else ("0", str(n))
@@ -966,7 +1172,7 @@ void {fname}(const {src_t}* restrict src, {out_ctype}* restrict dst,
             close = []
             for d, v in enumerate(loops[:-1]):
                 pad = ind * (d + 1)
-                name = self.names[v]
+                name = nest.names[v]
                 lo_, hi_ = ("lo", "hi") if d == 0 and not whole \
                     else ("0", str(self.count(v)))
                 lines.append(f"{pad}for (int64_t {name} = {lo_}; {name} < {hi_};"
@@ -976,6 +1182,11 @@ void {fname}(const {src_t}* restrict src, {out_ctype}* restrict dst,
             lines += inner_loops(len(loops) - 2 + 0)
             lines += reversed(close)
         return lines
+
+
+# what reading a value costs no more than: no operation of its own
+_NOT_OPS = {"model.source", "model.table", "model.pad", "model.param",
+            "model.const", "model.var", "model.access", "model.expand"}
 
 
 _FOLD = {
@@ -1097,9 +1308,8 @@ def emit(c: Canonical, fname: str, out_ctype: str) -> tuple:
     text, out_shape, src_shape, window = p.source(fname, out_ctype)
     loops = [a for a in c.output.type.axes if a is not None]
     outer = 1
-    if p.names and not getattr(p, "fold", False):
-        first = next(v for v, nm in p.names.items() if nm == "i0")
-        outer = c.g.vars.count(first)
+    if getattr(p, "outer", None) is not None:
+        outer = c.g.vars.count(p.outer)
     return text, p.regs, out_shape, src_shape, outer, window
 
 

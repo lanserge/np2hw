@@ -22,8 +22,19 @@ Pre-1.0, so the API can still move. Anything that moves is named here.
   over an axis that selects among a stack's lanes -- an `np.stack` of more
   than 16 blocks -- computed every lane at every position and kept one;
   it is now split into one nest per lane with the axis fixed, so each
-  position computes only its own. A min-sum iteration over 144 blocks of
-  384 runs in 0.25 s where it took 44.
+  position computes only its own.
+- **The C backend stores a value read at another position.** A computed
+  value of a few operations or more, read through an index that moves it
+  -- a roll of a computed result -- is computed once a position into a
+  buffer, by nests before the output's, and read from there: for the rows
+  a call computes where every read keeps the row, whole otherwise. Values
+  over the same axes that compute something in common at the same
+  position share a nest -- a check row's messages and the row's smallest
+  magnitudes -- so it is computed once, and each nest reads few shifts.
+  The lines segments may add are the function's, the cheapest nests cut
+  first. A min-sum iteration over 144 blocks of 384 runs in 0.11 ms a
+  codeword where it took 6.7 (NumPy: 13); 64 codewords in 6.9 ms where
+  they took 44 s.
 
 ### Fixed
 
